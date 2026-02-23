@@ -1,0 +1,64 @@
+# Joule Configuration
+# Copy to joule.config.yaml and customize
+
+providers:
+  ollama:
+    enabled: true
+    baseUrl: "http://localhost:11434"
+    models:
+      slm: "llama3.2:3b"
+
+  anthropic:
+    enabled: true
+    # apiKey: set via JOULE_ANTHROPIC_API_KEY env var
+    models:
+      slm: "claude-haiku-3.5"
+      llm: "claude-sonnet-4-20250514"
+
+  openai:
+    enabled: false
+    # apiKey: set via JOULE_OPENAI_API_KEY env var
+    models:
+      slm: "gpt-4o-mini"
+      llm: "gpt-4o"
+
+  google:
+    enabled: false
+    # apiKey: set via JOULE_GOOGLE_API_KEY env var
+    models:
+      slm: "gemini-2.0-flash"
+      llm: "gemini-2.5-pro"
+
+budgets:
+  default: "medium"
+
+routing:
+  preferLocal: true
+  slmConfidenceThreshold: 0.6
+  complexityThreshold: 0.7
+  preferEfficientModels: false
+  energyWeight: 0
+  providerPriority:
+    slm: ["ollama", "google", "openai", "anthropic"]
+    llm: ["anthropic", "openai", "google"]
+
+# Energy tracking configuration
+energy:
+  enabled: true
+  gridCarbonIntensity: 400       # gCO2/kWh (global average)
+  localModelCarbonIntensity: 0   # gCO2/kWh for local models (0 = user's own power)
+  includeInRouting: false        # set true to factor energy into model selection
+  energyWeight: 0.3              # 0-1: how much energy matters vs capability
+
+tools:
+  builtinEnabled: true
+  pluginDirs: []
+  disabledTools: []
+
+logging:
+  level: "info"
+  traceOutput: "memory"
+
+server:
+  port: 3927
+  host: "127.0.0.1"

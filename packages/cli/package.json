@@ -1,0 +1,43 @@
+{
+  "name": "@joule/cli",
+  "version": "0.5.0",
+  "description": "CLI application for Joule - energy-aware AI agent runtime",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/joule-ai/joule",
+    "directory": "packages/cli"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": ["dist", "README.md", "LICENSE"],
+  "keywords": ["joule", "ai-agent", "cli", "command-line", "energy-aware"],
+  "bin": {
+    "joule": "./dist/bin/joule.js"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@joule/core": "workspace:*",
+    "@joule/shared": "workspace:*",
+    "@joule/models": "workspace:*",
+    "@joule/tools": "workspace:*",
+    "@joule/server": "workspace:*",
+    "@joule/channels": "workspace:*",
+    "commander": "^13.0.0"
+  }
+}

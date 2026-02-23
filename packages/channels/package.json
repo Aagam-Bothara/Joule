@@ -1,0 +1,73 @@
+{
+  "name": "@joule/channels",
+  "version": "0.1.0",
+  "description": "Messaging channel integrations for Joule (11 platforms)",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/joule-ai/joule",
+    "directory": "packages/channels"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": ["dist", "README.md", "LICENSE"],
+  "keywords": ["joule", "ai-agent", "messaging", "slack", "discord", "telegram", "channels"],
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@joule/core": "workspace:*",
+    "@joule/shared": "workspace:*",
+    "@slack/bolt": "^4.1.0",
+    "discord.js": "^14.16.0"
+  },
+  "peerDependencies": {
+    "telegraf": "^4.16.0",
+    "whatsapp-web.js": "^1.26.0",
+    "botbuilder": "^4.22.0",
+    "nodemailer": "^6.9.0",
+    "imap": "^0.8.19",
+    "matrix-js-sdk": "^31.0.0",
+    "irc-framework": "^4.13.0",
+    "twilio": "^4.23.0"
+  },
+  "peerDependenciesMeta": {
+    "telegraf": {
+      "optional": true
+    },
+    "whatsapp-web.js": {
+      "optional": true
+    },
+    "botbuilder": {
+      "optional": true
+    },
+    "nodemailer": {
+      "optional": true
+    },
+    "imap": {
+      "optional": true
+    },
+    "matrix-js-sdk": {
+      "optional": true
+    },
+    "irc-framework": {
+      "optional": true
+    },
+    "twilio": {
+      "optional": true
+    }
+  }
+}

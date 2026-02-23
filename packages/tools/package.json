@@ -1,0 +1,48 @@
+{
+  "name": "@joule/tools",
+  "version": "0.1.0",
+  "description": "Built-in tools and plugin system for Joule",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/joule-ai/joule",
+    "directory": "packages/tools"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": ["dist", "README.md", "LICENSE"],
+  "keywords": ["joule", "ai-agent", "tools", "mcp", "iot", "browser-automation"],
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@joule/shared": "workspace:*",
+    "@modelcontextprotocol/sdk": "^1.26.0",
+    "zod": "^3.24.0"
+  },
+  "peerDependencies": {
+    "playwright": "^1.40.0",
+    "mqtt": "^5.10.0"
+  },
+  "peerDependenciesMeta": {
+    "playwright": {
+      "optional": true
+    },
+    "mqtt": {
+      "optional": true
+    }
+  }
+}

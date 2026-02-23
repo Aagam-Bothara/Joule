@@ -1,0 +1,40 @@
+{
+  "name": "@joule/core",
+  "version": "0.1.0",
+  "description": "Core engine for Joule - TaskExecutor, BudgetManager, ModelRouter, TraceLogger",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/joule-ai/joule",
+    "directory": "packages/core"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": ["dist", "README.md", "LICENSE"],
+  "keywords": ["joule", "ai-agent", "task-executor", "budget-manager", "energy-aware", "llm"],
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@joule/shared": "workspace:*",
+    "@joule/models": "workspace:*",
+    "@joule/tools": "workspace:*",
+    "yaml": "^2.7.0"
+  },
+  "devDependencies": {
+    "zod": "^3.24.0"
+  }
+}

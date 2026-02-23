@@ -1,0 +1,40 @@
+services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: joule-ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+
+  joule:
+    build: .
+    container_name: joule-server
+    ports:
+      - "3927:3927"
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      - OLLAMA_BASE_URL=http://ollama:11434
+      - JOULE_HOST=0.0.0.0
+      - JOULE_PORT=3927
+      - JOULE_DEFAULT_MODEL=qwen2.5:1.5b
+      - JOULE_AUTH_ENABLED=false
+      # Uncomment for auth:
+      # - JOULE_AUTH_ENABLED=true
+      # - JOULE_JWT_SECRET=change-me-in-production
+    volumes:
+      - joule_data:/app/.joule
+    restart: unless-stopped
+
+volumes:
+  ollama_data:
+  joule_data:

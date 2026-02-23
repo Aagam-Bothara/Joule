@@ -1,0 +1,12 @@
+node_modules
+**/node_modules
+**/dist
+.git
+.gitignore
+.joule
+*.md
+.github
+benchmarks
+.vscode
+.idea
+*.log
