@@ -8,4 +8,6 @@ joule.config.ts
 coverage/
 .joule/
 .turbo/
+.claude/
+~/
 *.log

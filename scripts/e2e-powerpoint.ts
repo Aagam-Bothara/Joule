@@ -343,7 +343,7 @@ $s6.Shapes.AddLine(350, 210, 610, 210).Line.ForeColor.RGB = $teal
 AddText $s6 80 230 800 60 "Joule does not just run AI agents.\`r\`nIt gives them eyes, hands, and a conscience." 18 $subText $false 2
 
 # GitHub
-AddText $s6 80 360 800 30 "github.com/joule-ai/joule" 16 $teal $false 2
+AddText $s6 80 360 800 30 "github.com/Aagam-Bothara/Joule" 16 $teal $false 2
 
 # Footer
 AddText $s6 80 460 800 30 "Open Source  |  MIT License  |  TypeScript + Node.js" 12 $subText $false 2

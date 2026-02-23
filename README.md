@@ -1,8 +1,8 @@
 # Joule
 
+![CI](https://github.com/Aagam-Bothara/Joule/actions/workflows/test.yml/badge.svg)
 ![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)
 ![Node.js](https://img.shields.io/badge/node-%3E%3D22-brightgreen)
-![Tests](https://img.shields.io/badge/tests-597%20passing-brightgreen)
 ![TypeScript](https://img.shields.io/badge/TypeScript-100%25-blue)
 
 **Energy-aware AI agent runtime with autonomous desktop control.**
@@ -18,74 +18,131 @@ It prefers small local models (Ollama) and only escalates to cloud LLMs (Anthrop
 
 ## How Is Joule Different?
 
-There are a lot of AI agent frameworks out there — LangChain, AutoGPT, CrewAI, OpenDevin (OpenHands), Claude Code, etc. Here's what Joule does differently and why it exists.
+The AI agent space is crowded. Here's an honest breakdown of where Joule fits and when you should use something else.
 
-### 1. Energy and cost are first-class constraints, not afterthoughts
+### The landscape at a glance
 
-Most frameworks let you set a token limit and that's it. Joule tracks **7 dimensions** per task: tokens, latency, tool calls, model escalations, cost (USD), energy (Wh), and carbon (gCO₂). Every LLM call and tool invocation is metered. You set a budget envelope and Joule stays inside it — or stops. This isn't a logging feature. It's a hard constraint that shapes which model gets picked and when the agent stops.
+There are 5 categories of tools solving related problems:
 
-**Why it matters:** Running agents in production costs money and burns energy. If your agent spirals into a retry loop calling GPT-4 50 times, you want it to stop — not just log that it happened.
+| Category | Examples | Best for |
+|---|---|---|
+| **Personal AI assistants** | OpenClaw | "Message it on WhatsApp, it does stuff" |
+| **Hosted computer-use agents** | OpenAI Operator, Anthropic Computer Use, Copilot Studio | Managed agents that drive a browser/desktop for you |
+| **Web-agent frameworks** | Browser-Use, Skyvern, LaVague | Building reliable web automation with LLMs |
+| **Developer agent platforms** | OpenHands (OpenDevin), CrewAI | Coding agents, multi-agent orchestration |
+| **Agent runtimes** | **Joule**, LangChain, AutoGPT | Run arbitrary tasks with tools, budgets, and routing |
 
-### 2. Small models first, big models only when needed
+Joule sits in the **agent runtime** category but borrows from several others — it has messaging channels (like OpenClaw), desktop control (like Operator), and browser automation (like Browser-Use).
 
-Joule's model router picks the **smallest capable model** for each step. A simple text extraction? Local Ollama model. Complex multi-step reasoning? Escalates to Claude or GPT-4 — but only if the budget allows it. Other frameworks default to the biggest model and hope for the best.
+### Joule vs OpenClaw
 
-**Why it matters:** Most agent tasks don't need a frontier model for every step. Using a 1.5B local model for simple subtasks is faster, cheaper, and doesn't send your data to the cloud.
+OpenClaw (100K+ GitHub stars) is the closest comparison — both TypeScript/Node.js, both have messaging channels, voice, and browser control. But they solve different problems:
 
-### 3. Desktop control that actually works for Office apps
+| | Joule | OpenClaw |
+|---|---|---|
+| **Core idea** | Budget-constrained agent runtime | Personal AI assistant |
+| **Model strategy** | SLM-first — prefers local Ollama, escalates only when needed | Cloud-first — Anthropic/OpenAI required |
+| **Budget/cost control** | 7-dimension hard limits (tokens, cost, energy, carbon, latency, tool calls, escalations) | No budget enforcement |
+| **Energy/carbon tracking** | Yes — tracks Wh and gCO₂ per task | No |
+| **Desktop automation** | COM automation for Office + mouse/keyboard + vision | Shell commands + browser (no Office-specific path) |
+| **Output validation** | Built-in critic LLM that scores and retries | No |
+| **IoT / smart home** | MQTT + Home Assistant | No |
+| **Model providers** | 4 (Ollama, Anthropic, OpenAI, Google) | 2 (Anthropic, OpenAI) |
+| **Local-only mode** | Yes — runs fully offline with Ollama | No — needs cloud LLM |
+| **Messaging channels** | 11 | 15+ (more platforms, including iMessage, Zalo) |
+| **Mobile apps** | No | iOS/Android nodes |
+| **Canvas/visual workspace** | No | Yes (A2UI) |
+| **Security** | Local-first, your data stays on your machine | Has drawn security scrutiny — broad permissions, credential-theft risk in real-world setups |
+| **Community** | Small | 100K+ stars |
 
-Most "computer use" agents (OpenDevin, Anthropic's computer use) control the screen by clicking and typing — like a human would. Joule does that too, but for Office apps (Excel, PowerPoint, Word) it uses **PowerShell COM automation** instead. One shell command creates an entire spreadsheet with formatting. No pixel hunting, no misclicks, no waiting for UI to render.
+**In short:** OpenClaw is a personal assistant that lives in your chat apps — "message it on WhatsApp and it does things." Joule is a runtime focused on efficiency within strict budgets — "run 1000 agent tasks without burning $500."
 
-```
-# Other agents: click cell A1, type "Name", tab, type "Score", tab, type "Alice"...  (50+ actions)
-# Joule: one shell_exec creates the whole thing in 2 seconds
-```
+### Joule vs Hosted Computer-Use Agents
 
-**Why it matters:** Mouse/keyboard automation is slow and fragile. COM automation is 10x faster and doesn't break when a dialog box pops up.
+**OpenAI Operator / CUA** — Managed agent with its own browser. Less setup friction than Joule, first-party model integration. But you're locked into OpenAI's ecosystem and can't run locally.
 
-### 4. Built-in validation — the agent checks its own work
+**Anthropic Claude Computer Use** — Developer-facing tool spec for building your own agent loop. Strong safety docs. But you still build/host the loop yourself — Joule provides that loop out of the box with budget enforcement on top.
 
-After the agent says "done", a **separate LLM call** screenshots the result and scores it as a critic. Empty cells? Missing slides? Placeholder data? The validator catches it and sends fix instructions back. This is built into the loop, not a separate tool.
+**Microsoft Copilot Studio** — Enterprise-grade computer use with Windows + web automation. Better governance and compliance story. But it's tied to the Microsoft/Power Platform stack and isn't hacker-friendly.
 
-**Why it matters:** Every agent lies about being "done". Without validation, you get empty spreadsheets and half-finished presentations that the agent confidently says are complete.
+**Where Joule wins:** Runs offline, tracks energy/carbon, works with any LLM provider, has COM automation for Office (faster than mouse-clicking through Excel). Where they win: less setup, managed infrastructure, enterprise compliance.
 
-### 5. It's a full runtime, not just an agent framework
+### Joule vs Web-Agent Frameworks
 
-Joule isn't just a "build your own agent" toolkit. It ships with:
-- **11 messaging channels** — Slack, Discord, Telegram, WhatsApp, etc. (not via plugins — built in)
-- **IoT/MQTT** — control smart home devices
-- **Voice mode** — wake word detection, speech-to-text, text-to-speech
-- **Cron scheduling** — recurring tasks with budget awareness
-- **Browser automation** — Playwright with 6 tools
-- **HTTP API** — deploy as a service with JWT auth
-- **React dashboard** — monitor tasks, budgets, energy in real time
+**Browser-Use** — Purpose-built for web automation. Cleaner web primitives than Joule's Playwright tools. Pick this if your tasks are purely web-based.
 
-Most frameworks give you the agent core and tell you to wire up everything else yourself.
+**Skyvern** — AI + computer-vision for RPA-style web workflows (forms, logins, downloads). Better at scaling hundreds of runs via API. Pick this for repetitive portal work.
 
-### 6. TypeScript, not Python
+**LaVague** — "Large Action Model" approach for turning intent into repeatable web automation. Good developer ergonomics. Pick this if you want to build reusable web automations.
 
-LangChain, CrewAI, AutoGPT, OpenDevin — all Python. Joule is 100% TypeScript. If your stack is Node.js, you don't need a Python sidecar to run agents. Same language for your app and your agent.
+**Where Joule wins:** Joule isn't web-only — it controls native desktop apps (Excel, PowerPoint, Word via COM), has IoT/MQTT, voice mode, and 11 messaging channels. These frameworks are better at web specifically, Joule is broader.
 
-### Honest comparison
+### Joule vs Developer Platforms
 
-| | Joule | LangChain | AutoGPT | OpenDevin | CrewAI |
-|---|---|---|---|---|---|
-| Language | TypeScript | Python | Python | Python | Python |
-| Budget enforcement | 7 dimensions | Token limit | Token limit | None | None |
-| Energy/carbon tracking | Yes | No | No | No | No |
-| Local model routing | Built-in (Ollama) | Via adapters | Via plugins | Via adapters | Via adapters |
-| Desktop control | COM + mouse/keyboard | No | Via plugins | Browser only | No |
-| Output validation | Built-in critic loop | No | No | No | No |
-| Messaging channels | 11 built-in | External | No | No | No |
-| IoT / smart home | MQTT + Home Assistant | No | No | No | No |
-| Voice mode | Built-in | No | No | No | No |
-| Production API server | Built-in (Hono) | LangServe | No | Web UI | No |
+**OpenHands (formerly OpenDevin)** — Open platform for software-engineering agents. Better at repo-level tasks, multi-agent dev patterns, sandboxing. Pick this for coding agents.
 
-**What Joule is NOT good at (yet):**
-- The computer agent is a working prototype — it handles Office tasks well but struggles with complex visual/browser workflows
+**CrewAI** — Multi-agent orchestration. Better at coordinating multiple agents with different roles. Pick this if you need agents collaborating on complex workflows.
+
+**Where Joule wins:** Budget enforcement (7 dimensions), energy tracking, local-first model routing, native desktop/Office automation. These platforms don't track cost or energy at all.
+
+### What makes Joule unique
+
+Six things no other framework in any category does together:
+
+**1. 7-dimension budget enforcement.** Tokens, cost, energy, carbon, latency, tool calls, escalations. Hard limits, not just logging. The agent stops when the budget runs out.
+
+**2. SLM-first model routing.** Smallest capable model for each step. Local Ollama for simple tasks, cloud LLM only when needed and only if budget allows.
+
+**3. Office automation via COM.** One PowerShell command creates an entire formatted spreadsheet. 10x faster than mouse/keyboard. No other agent framework has a dedicated fast-path for Office apps.
+
+**4. Built-in output validation.** Separate critic LLM scores the result 1-10 and requests fixes. Catches empty cells, missing slides, placeholder data.
+
+**5. Runs fully offline.** With Ollama, zero cloud dependency. Your data never leaves your machine.
+
+**6. Full runtime in one install.** 11 messaging channels, IoT/MQTT, voice, scheduling, browser automation, HTTP API, React dashboard — all built in.
+
+### Full comparison
+
+| | Joule | OpenClaw | Operator | Browser-Use | OpenHands | CrewAI | LangChain |
+|---|---|---|---|---|---|---|---|
+| Language | TypeScript | TypeScript | Managed | Python | Python | Python | Python |
+| Budget enforcement | 7 dimensions | None | Pay-per-use | None | None | None | Token limit |
+| Energy/carbon tracking | Yes | No | No | No | No | No | No |
+| Local-only mode | Ollama | No | No | Via config | Via config | Via config | Via adapters |
+| Desktop/Office control | COM + vision | Shell + browser | Browser only | Browser only | Browser + CLI | No | No |
+| Output validation | Critic loop | No | No | No | No | No | No |
+| Messaging channels | 11 | 15+ | No | No | No | No | External |
+| IoT / smart home | MQTT + HA | No | No | No | No | No | No |
+| Voice mode | Built-in | Built-in | No | No | No | No | No |
+| Mobile apps | No | iOS/Android | No | No | No | No | No |
+| Multi-agent | No | No | No | No | Yes | Yes | Yes |
+| API server | Hono | Gateway WS | Managed | No | Web UI | No | LangServe |
+| Self-hosted | Yes | Yes | No | Yes | Yes | Yes | Yes |
+| Community | Small | 100K+ | N/A | Growing | Growing | Growing | Large |
+
+### When to use Joule vs something else
+
+| You want... | Use |
+|---|---|
+| A personal AI butler on WhatsApp/Telegram | **OpenClaw** |
+| Managed browser agent, zero setup | **OpenAI Operator** |
+| Enterprise desktop automation with compliance | **Copilot Studio** |
+| Scalable web scraping / form filling | **Skyvern** or **Browser-Use** |
+| Coding agents / software engineering | **OpenHands** |
+| Multi-agent orchestration | **CrewAI** |
+| Budget-controlled tasks with energy tracking | **Joule** |
+| Offline/local-first agent runtime | **Joule** |
+| Windows Office automation (Excel, PowerPoint, Word) | **Joule** |
+| Maximum reliability, no LLM | **Playwright / Selenium** |
+
+### What Joule is NOT good at (yet)
+
+- Computer agent is a working prototype — handles Office tasks well, struggles with complex browser workflows
 - No multi-agent orchestration (CrewAI does this better)
-- No built-in RAG pipeline (LangChain has more mature retrieval tools)
-- Smaller community and ecosystem than Python frameworks
+- No built-in RAG pipeline (LangChain has more mature retrieval)
+- No mobile apps (OpenClaw has iOS/Android)
+- Much smaller community than OpenClaw or Python frameworks
+- Not as polished for pure web automation as Browser-Use or Skyvern
 
 ---
 
@@ -197,7 +254,7 @@ joule serve  # starts on port 3927
 ### Install
 
 ```bash
-git clone https://github.com/joule-ai/joule.git
+git clone https://github.com/Aagam-Bothara/Joule.git
 cd joule
 pnpm install
 pnpm build
