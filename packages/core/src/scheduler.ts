@@ -8,6 +8,7 @@ import {
   isoNow,
 } from '@joule/shared';
 import type { Joule } from './engine.js';
+import type { ScheduleRepository } from '@joule/store';
 
 const DEFAULT_SCHEDULE_FILE = '.joule/schedules.json';
 const DEFAULT_LOG_FILE = '.joule/schedule-logs.json';
@@ -127,10 +128,11 @@ export class Scheduler {
   private scheduleFile: string;
   private logFile: string;
   private loaded = false;
+  private repo?: ScheduleRepository;
 
   constructor(
     private joule: Joule,
-    options?: { scheduleFile?: string; logFile?: string; maxConcurrent?: number },
+    options?: { scheduleFile?: string; logFile?: string; maxConcurrent?: number; scheduleRepo?: ScheduleRepository },
   ) {
     this.scheduleFile = options?.scheduleFile
       ? path.resolve(options.scheduleFile)
@@ -139,10 +141,33 @@ export class Scheduler {
       ? path.resolve(options.logFile)
       : path.join(process.cwd(), DEFAULT_LOG_FILE);
     this.maxConcurrent = options?.maxConcurrent ?? 3;
+    this.repo = options?.scheduleRepo;
   }
 
   private async ensureLoaded(): Promise<void> {
     if (this.loaded) return;
+
+    if (this.repo) {
+      // Load from SQLite
+      const schedRows = this.repo.list();
+      this.schedules = schedRows.map(r => ({
+        id: r.id,
+        name: r.name,
+        cron: r.cron,
+        taskDescription: r.taskDescription,
+        budgetPreset: r.budgetPreset as BudgetPresetName,
+        enabled: r.enabled,
+        createdAt: r.createdAt,
+        lastRunAt: r.lastRunAt,
+        lastRunStatus: r.lastRunStatus as ScheduledTask['lastRunStatus'],
+        runCount: r.runCount,
+        totalEnergyWh: r.totalEnergyWh,
+        totalCarbonGrams: r.totalCarbonGrams,
+      }));
+      this.loaded = true;
+      return;
+    }
+
     await fs.mkdir(path.dirname(this.scheduleFile), { recursive: true });
     this.schedules = await this.readJson<ScheduledTask[]>(this.scheduleFile, []);
     this.logs = await this.readJson<ScheduleRunLog[]>(this.logFile, []);
@@ -159,11 +184,34 @@ export class Scheduler {
   }
 
   private async saveSchedules(): Promise<void> {
+    if (this.repo) {
+      for (const s of this.schedules) {
+        this.repo.save({
+          id: s.id,
+          name: s.name,
+          cron: s.cron,
+          taskDescription: s.taskDescription,
+          budgetPreset: s.budgetPreset,
+          enabled: s.enabled,
+          createdAt: s.createdAt,
+          lastRunAt: s.lastRunAt,
+          lastRunStatus: s.lastRunStatus,
+          runCount: s.runCount,
+          totalEnergyWh: s.totalEnergyWh,
+          totalCarbonGrams: s.totalCarbonGrams,
+        });
+      }
+      return;
+    }
+
     await fs.mkdir(path.dirname(this.scheduleFile), { recursive: true });
     await fs.writeFile(this.scheduleFile, JSON.stringify(this.schedules, null, 2));
   }
 
   private async saveLogs(): Promise<void> {
+    // When using the repo, logs are saved individually in executeScheduled
+    if (this.repo) return;
+
     await fs.mkdir(path.dirname(this.logFile), { recursive: true });
     await fs.writeFile(this.logFile, JSON.stringify(this.logs, null, 2));
   }
@@ -320,6 +368,18 @@ export class Scheduler {
         tokensUsed: result.budgetUsed.tokensUsed,
       };
       this.logs.push(log);
+      if (this.repo) {
+        this.repo.addLog({
+          scheduleId: log.scheduleId,
+          taskId: log.taskId,
+          startedAt: log.startedAt,
+          completedAt: log.completedAt,
+          status: log.status,
+          energyWh: log.energyWh,
+          carbonGrams: log.carbonGrams,
+          tokensUsed: log.tokensUsed,
+        });
+      }
       await this.saveLogs();
     } catch (err) {
       schedule.lastRunAt = isoNow();
@@ -338,6 +398,18 @@ export class Scheduler {
         tokensUsed: 0,
       };
       this.logs.push(log);
+      if (this.repo) {
+        this.repo.addLog({
+          scheduleId: log.scheduleId,
+          taskId: log.taskId,
+          startedAt: log.startedAt,
+          completedAt: log.completedAt,
+          status: log.status,
+          energyWh: log.energyWh,
+          carbonGrams: log.carbonGrams,
+          tokensUsed: log.tokensUsed,
+        });
+      }
       await this.saveLogs();
     }
   }

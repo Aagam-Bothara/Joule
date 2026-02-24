@@ -58,7 +58,7 @@ export async function createApp(joule: Joule) {
   let userStore: UserStore | null = null;
 
   if (authConfig?.enabled) {
-    userStore = new UserStore(resolve('.joule', 'users.json'));
+    userStore = new UserStore(resolve('.joule', 'users.json'), joule.store?.users);
     await userStore.load();
 
     // Public auth routes (login/register don't need auth)
@@ -93,7 +93,7 @@ export async function createApp(joule: Joule) {
   }
 
   // Routes
-  app.route('/tasks', tasksRoutes(joule));
+  app.route('/tasks', tasksRoutes(joule, joule.store?.tasks));
   app.route('/tools', toolsRoutes(joule));
   app.route('/health', healthRoutes(joule));
 

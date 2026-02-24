@@ -30,6 +30,7 @@
   },
   "dependencies": {
     "@joule/shared": "workspace:*",
+    "@joule/store": "workspace:*",
     "@joule/models": "workspace:*",
     "@joule/tools": "workspace:*",
     "yaml": "^2.7.0"

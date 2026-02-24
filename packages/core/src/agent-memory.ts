@@ -13,6 +13,7 @@ import {
   type SemanticMemory,
   type MemoryLayerType,
 } from '@joule/shared';
+import type { MemoryRepository } from '@joule/store';
 import { OptimizedMemory } from './memory/optimized-memory.js';
 
 // Map new layer names back to legacy names for backward compat
@@ -28,8 +29,8 @@ const LAYER_TO_LEGACY: Record<string, string> = {
 export class AgentMemory {
   readonly optimized: OptimizedMemory;
 
-  constructor(baseDir?: string) {
-    this.optimized = new OptimizedMemory(baseDir);
+  constructor(baseDir?: string, memoryRepo?: MemoryRepository) {
+    this.optimized = new OptimizedMemory(baseDir, memoryRepo);
   }
 
   // --- Facts Layer (delegates to semantic memory) ---

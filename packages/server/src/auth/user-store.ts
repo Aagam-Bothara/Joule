@@ -4,6 +4,7 @@ import { dirname } from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
 import type { JouleUser, ApiKey, MonthlyBudgetQuota } from '@joule/shared';
 import { generateId } from '@joule/shared';
+import type { UserRepository, UserData } from '@joule/store';
 
 const DEFAULT_QUOTA: MonthlyBudgetQuota = {
   maxTokens: 1_000_000,
@@ -19,10 +20,30 @@ export class UserStore {
   private users: Map<string, JouleUser> = new Map();
   private usernameIndex: Map<string, string> = new Map(); // username -> id
   private apiKeyIndex: Map<string, string> = new Map(); // key -> userId
+  private repo?: UserRepository;
 
-  constructor(private filePath: string) {}
+  constructor(private filePath: string, userRepo?: UserRepository) {
+    this.repo = userRepo;
+  }
 
   async load(): Promise<void> {
+    if (this.repo) {
+      const allUsers = this.repo.list();
+      this.users.clear();
+      this.usernameIndex.clear();
+      this.apiKeyIndex.clear();
+
+      for (const userData of allUsers) {
+        const user = this.fromUserData(userData);
+        this.users.set(user.id, user);
+        this.usernameIndex.set(user.username, user.id);
+        for (const key of user.apiKeys) {
+          this.apiKeyIndex.set(key.key, user.id);
+        }
+      }
+      return;
+    }
+
     if (!existsSync(this.filePath)) return;
 
     const data = JSON.parse(await readFile(this.filePath, 'utf-8'));
@@ -42,12 +63,71 @@ export class UserStore {
   }
 
   private async save(): Promise<void> {
+    if (this.repo) {
+      for (const user of this.users.values()) {
+        this.repo.save(this.toUserData(user));
+      }
+      return;
+    }
+
     const dir = dirname(this.filePath);
     if (!existsSync(dir)) {
       await mkdir(dir, { recursive: true });
     }
     const users = Array.from(this.users.values());
     await writeFile(this.filePath, JSON.stringify({ users }, null, 2), 'utf-8');
+  }
+
+  private toUserData(user: JouleUser): UserData {
+    return {
+      id: user.id,
+      username: user.username,
+      passwordHash: user.passwordHash,
+      role: user.role,
+      createdAt: user.createdAt,
+      quota: {
+        maxTokens: user.quota.maxTokens,
+        maxCostUsd: user.quota.maxCostUsd,
+        maxEnergyWh: user.quota.maxEnergyWh,
+        tokensUsed: user.quota.tokensUsed,
+        costUsed: user.quota.costUsed,
+        energyUsed: user.quota.energyUsed,
+        periodStart: user.quota.periodStart,
+      },
+      apiKeys: user.apiKeys.map(k => ({
+        id: k.id,
+        key: k.key,
+        name: k.name,
+        createdAt: k.createdAt,
+        lastUsedAt: k.lastUsedAt,
+      })),
+    };
+  }
+
+  private fromUserData(data: UserData): JouleUser {
+    return {
+      id: data.id,
+      username: data.username,
+      passwordHash: data.passwordHash,
+      role: data.role as 'user' | 'admin',
+      createdAt: data.createdAt,
+      apiKeys: data.apiKeys.map(k => ({
+        id: k.id,
+        key: k.key,
+        name: k.name,
+        createdAt: k.createdAt,
+        lastUsedAt: k.lastUsedAt,
+      })),
+      quota: {
+        maxTokens: data.quota.maxTokens,
+        maxCostUsd: data.quota.maxCostUsd,
+        maxEnergyWh: data.quota.maxEnergyWh,
+        tokensUsed: data.quota.tokensUsed,
+        costUsed: data.quota.costUsed,
+        energyUsed: data.quota.energyUsed,
+        periodStart: data.quota.periodStart,
+      },
+    };
   }
 
   static hashPassword(password: string): string {

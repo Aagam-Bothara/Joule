@@ -41,6 +41,15 @@ import {
   generateId,
   isoNow,
 } from '@joule/shared';
+import type {
+  MemoryRepository,
+  SemanticData,
+  EpisodicData,
+  ProceduralData,
+  PreferenceData,
+  LinkData,
+  FailureData,
+} from '@joule/store';
 import { SemanticIndex } from './semantic-index.js';
 
 const DEFAULT_MEMORY_DIR = '.joule/memory';
@@ -64,6 +73,7 @@ function daysSince(isoDate: string): number {
 
 export class OptimizedMemory {
   private memoryDir: string;
+  private repo?: MemoryRepository;
 
   // Layer stores
   private semantics: SemanticMemory[] = [];
@@ -81,8 +91,9 @@ export class OptimizedMemory {
   private loaded = false;
   private consolidationTimer: ReturnType<typeof setInterval> | null = null;
 
-  constructor(baseDir?: string) {
+  constructor(baseDir?: string, memoryRepo?: MemoryRepository) {
     this.memoryDir = baseDir ?? path.join(process.cwd(), DEFAULT_MEMORY_DIR);
+    this.repo = memoryRepo;
   }
 
   // ======================================================================
@@ -90,19 +101,31 @@ export class OptimizedMemory {
   // ======================================================================
 
   private async ensureDir(): Promise<void> {
+    if (this.repo) return; // No filesystem needed with SQLite
     await fs.mkdir(this.memoryDir, { recursive: true });
   }
 
   private async ensureLoaded(): Promise<void> {
     if (this.loaded) return;
-    await this.ensureDir();
 
-    this.semantics = await this.readJson<SemanticMemory[]>('semantics.json', []);
-    this.episodes = await this.readJson<EpisodicMemory[]>('episodes.json', []);
-    this.procedures = await this.readJson<ProceduralMemory[]>('procedures.json', []);
-    this.preferences = await this.readJson<PreferenceMemory[]>('preferences.json', []);
-    this.links = await this.readJson<AssociativeLink[]>('links.json', []);
-    this.failures = await this.readJson<FailurePattern[]>('failures.json', []);
+    if (this.repo) {
+      // Load from SQLite
+      this.semantics = this.repo.getAllSemantic({ includeSuperseded: true }).map(d => this.fromSemanticData(d));
+      this.episodes = this.repo.getAllEpisodic().map(d => this.fromEpisodicData(d));
+      this.procedures = this.repo.getAllProcedural().map(d => this.fromProceduralData(d));
+      this.preferences = this.repo.getAllPreferences().map(d => this.fromPreferenceData(d));
+      this.links = this.repo.getAllLinks().map(d => this.fromLinkData(d));
+      this.failures = this.repo.getAllFailures().map(d => this.fromFailureData(d));
+    } else {
+      // Load from JSON files
+      await this.ensureDir();
+      this.semantics = await this.readJson<SemanticMemory[]>('semantics.json', []);
+      this.episodes = await this.readJson<EpisodicMemory[]>('episodes.json', []);
+      this.procedures = await this.readJson<ProceduralMemory[]>('procedures.json', []);
+      this.preferences = await this.readJson<PreferenceMemory[]>('preferences.json', []);
+      this.links = await this.readJson<AssociativeLink[]>('links.json', []);
+      this.failures = await this.readJson<FailurePattern[]>('failures.json', []);
+    }
 
     // Rebuild search indices
     for (const s of this.semantics) {
@@ -711,7 +734,13 @@ export class OptimizedMemory {
       .join('\n');
   }
 
-  private saveFailures() { return this.writeJson('failures.json', this.failures); }
+  private saveFailures() {
+    if (this.repo) {
+      for (const f of this.failures) this.repo.saveFailure(this.toFailureData(f));
+      return Promise.resolve();
+    }
+    return this.writeJson('failures.json', this.failures);
+  }
 
   // ======================================================================
   // Preferences (Sub-layer of Semantic)
@@ -965,6 +994,148 @@ export class OptimizedMemory {
     return `${e.summary} ${e.toolsUsed.join(' ')} ${e.tags.join(' ')} ${e.context ?? ''} ${e.lessonsLearned ?? ''}`;
   }
 
+  // ======================================================================
+  // SQLite ↔ Domain Conversion
+  // ======================================================================
+
+  private toSemanticData(s: SemanticMemory): SemanticData {
+    return {
+      id: s.id, key: s.key, value: s.value, category: s.category,
+      source: s.source, confidence: s.confidence, scope: s.scope,
+      scopeId: s.scopeId, tags: s.tags,
+      supersedes: s.supersedes, supersededBy: s.supersededBy,
+      createdAt: s.temporal.createdAt, updatedAt: s.temporal.updatedAt,
+      lastAccessedAt: s.temporal.lastAccessedAt, accessCount: s.temporal.accessCount,
+    };
+  }
+
+  private fromSemanticData(d: SemanticData): SemanticMemory {
+    return {
+      id: d.id, key: d.key, value: d.value, category: d.category,
+      source: d.source, confidence: d.confidence,
+      scope: d.scope as MemoryScope, scopeId: d.scopeId,
+      tags: d.tags, supersedes: d.supersedes, supersededBy: d.supersededBy,
+      temporal: {
+        createdAt: d.createdAt, updatedAt: d.updatedAt,
+        lastAccessedAt: d.lastAccessedAt, accessCount: d.accessCount,
+      },
+    };
+  }
+
+  private toEpisodicData(e: EpisodicMemory): EpisodicData {
+    return {
+      id: e.id, taskId: e.taskId, summary: e.summary, outcome: e.outcome,
+      toolsUsed: e.toolsUsed, stepsCompleted: e.stepsCompleted,
+      totalSteps: e.totalSteps, energyUsed: e.energyUsed,
+      carbonUsed: e.carbonUsed, costUsd: e.costUsd, durationMs: e.durationMs,
+      scope: e.scope, scopeId: e.scopeId,
+      context: e.context, lessonsLearned: e.lessonsLearned, tags: e.tags,
+      createdAt: e.temporal.createdAt, updatedAt: e.temporal.updatedAt,
+      lastAccessedAt: e.temporal.lastAccessedAt, accessCount: e.temporal.accessCount,
+    };
+  }
+
+  private fromEpisodicData(d: EpisodicData): EpisodicMemory {
+    return {
+      id: d.id, taskId: d.taskId, summary: d.summary,
+      outcome: d.outcome as EpisodicMemory['outcome'],
+      toolsUsed: d.toolsUsed, stepsCompleted: d.stepsCompleted,
+      totalSteps: d.totalSteps, energyUsed: d.energyUsed,
+      carbonUsed: d.carbonUsed, costUsd: d.costUsd, durationMs: d.durationMs,
+      scope: d.scope as MemoryScope, scopeId: d.scopeId,
+      context: d.context, lessonsLearned: d.lessonsLearned, tags: d.tags,
+      temporal: {
+        createdAt: d.createdAt, updatedAt: d.updatedAt,
+        lastAccessedAt: d.lastAccessedAt, accessCount: d.accessCount,
+      },
+    };
+  }
+
+  private toProceduralData(p: ProceduralMemory): ProceduralData {
+    return {
+      id: p.id, name: p.name, description: p.description,
+      pattern: p.pattern, confidence: p.confidence,
+      successRate: p.successRate, timesUsed: p.timesUsed,
+      scope: p.scope, scopeId: p.scopeId, tags: p.tags,
+      createdAt: p.temporal.createdAt, updatedAt: p.temporal.updatedAt,
+      lastAccessedAt: p.temporal.lastAccessedAt, accessCount: p.temporal.accessCount,
+    };
+  }
+
+  private fromProceduralData(d: ProceduralData): ProceduralMemory {
+    return {
+      id: d.id, name: d.name, description: d.description,
+      pattern: d.pattern as ProceduralMemory['pattern'],
+      confidence: d.confidence, successRate: d.successRate,
+      timesUsed: d.timesUsed,
+      scope: d.scope as MemoryScope, scopeId: d.scopeId, tags: d.tags,
+      temporal: {
+        createdAt: d.createdAt, updatedAt: d.updatedAt,
+        lastAccessedAt: d.lastAccessedAt, accessCount: d.accessCount,
+      },
+    };
+  }
+
+  private toPreferenceData(p: PreferenceMemory): PreferenceData {
+    return {
+      id: p.id, key: p.key, value: p.value,
+      learnedFrom: p.learnedFrom, confidence: p.confidence,
+      scope: p.scope, scopeId: p.scopeId,
+      createdAt: p.temporal.createdAt, updatedAt: p.temporal.updatedAt,
+      lastAccessedAt: p.temporal.lastAccessedAt, accessCount: p.temporal.accessCount,
+    };
+  }
+
+  private fromPreferenceData(d: PreferenceData): PreferenceMemory {
+    return {
+      id: d.id, key: d.key, value: d.value,
+      learnedFrom: d.learnedFrom, confidence: d.confidence,
+      scope: d.scope as MemoryScope, scopeId: d.scopeId,
+      temporal: {
+        createdAt: d.createdAt, updatedAt: d.updatedAt,
+        lastAccessedAt: d.lastAccessedAt, accessCount: d.accessCount,
+      },
+    };
+  }
+
+  private toLinkData(l: AssociativeLink): LinkData {
+    return {
+      id: l.id, sourceId: l.sourceId, sourceType: l.sourceType,
+      targetId: l.targetId, targetType: l.targetType,
+      relationship: l.relationship, strength: l.strength,
+      createdAt: l.temporal.createdAt, updatedAt: l.temporal.updatedAt,
+      lastAccessedAt: l.temporal.lastAccessedAt, accessCount: l.temporal.accessCount,
+    };
+  }
+
+  private fromLinkData(d: LinkData): AssociativeLink {
+    return {
+      id: d.id, sourceId: d.sourceId, sourceType: d.sourceType as MemoryLayerType,
+      targetId: d.targetId, targetType: d.targetType as MemoryLayerType,
+      relationship: d.relationship, strength: d.strength,
+      temporal: {
+        createdAt: d.createdAt, updatedAt: d.updatedAt,
+        lastAccessedAt: d.lastAccessedAt, accessCount: d.accessCount,
+      },
+    };
+  }
+
+  private toFailureData(f: FailurePattern): FailureData {
+    return {
+      id: f.id, toolName: f.toolName, errorSignature: f.errorSignature,
+      context: f.context, resolution: f.resolution,
+      occurrences: f.occurrences, lastSeen: f.lastSeen,
+    };
+  }
+
+  private fromFailureData(d: FailureData): FailurePattern {
+    return {
+      id: d.id, toolName: d.toolName, errorSignature: d.errorSignature,
+      context: d.context, resolution: d.resolution,
+      occurrences: d.occurrences, lastSeen: d.lastSeen,
+    };
+  }
+
   private async readJson<T>(filename: string, fallback: T): Promise<T> {
     try {
       const content = await fs.readFile(path.join(this.memoryDir, filename), 'utf-8');
@@ -979,9 +1150,39 @@ export class OptimizedMemory {
     await fs.writeFile(path.join(this.memoryDir, filename), JSON.stringify(data, null, 2), 'utf-8');
   }
 
-  private saveSemantics() { return this.writeJson('semantics.json', this.semantics); }
-  private saveEpisodes() { return this.writeJson('episodes.json', this.episodes); }
-  private saveProcedures() { return this.writeJson('procedures.json', this.procedures); }
-  private savePreferences() { return this.writeJson('preferences.json', this.preferences); }
-  private saveLinks() { return this.writeJson('links.json', this.links); }
+  private saveSemantics() {
+    if (this.repo) {
+      for (const s of this.semantics) this.repo.saveSemantic(this.toSemanticData(s));
+      return Promise.resolve();
+    }
+    return this.writeJson('semantics.json', this.semantics);
+  }
+  private saveEpisodes() {
+    if (this.repo) {
+      for (const e of this.episodes) this.repo.saveEpisodic(this.toEpisodicData(e));
+      return Promise.resolve();
+    }
+    return this.writeJson('episodes.json', this.episodes);
+  }
+  private saveProcedures() {
+    if (this.repo) {
+      for (const p of this.procedures) this.repo.saveProcedural(this.toProceduralData(p));
+      return Promise.resolve();
+    }
+    return this.writeJson('procedures.json', this.procedures);
+  }
+  private savePreferences() {
+    if (this.repo) {
+      for (const p of this.preferences) this.repo.savePreference(this.toPreferenceData(p));
+      return Promise.resolve();
+    }
+    return this.writeJson('preferences.json', this.preferences);
+  }
+  private saveLinks() {
+    if (this.repo) {
+      for (const l of this.links) this.repo.saveLink(this.toLinkData(l));
+      return Promise.resolve();
+    }
+    return this.writeJson('links.json', this.links);
+  }
 }

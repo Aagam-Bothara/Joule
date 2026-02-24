@@ -1,6 +1,7 @@
 import type { Task, TaskResult, JouleConfig, ToolDefinition, EnergyConfig } from '@joule/shared';
 import type { ProgressCallback, StreamEvent } from './task-executor.js';
 import { ModelProviderRegistry } from '@joule/models';
+import { initializeStore, closeDatabase, type JouleStore } from '@joule/store';
 import { ConfigManager } from './config-manager.js';
 import { BudgetManager } from './budget-manager.js';
 import { ModelRouter } from './model-router.js';
@@ -22,6 +23,7 @@ export class Joule {
   readonly tools: ToolRegistry;
   readonly providers: ModelProviderRegistry;
   readonly memory: AgentMemory;
+  store?: JouleStore;
 
   private router!: ModelRouter;
   private planner!: Planner;
@@ -111,6 +113,20 @@ export class Joule {
     this.memory.optimized.startConsolidation();
 
     this.initialized = true;
+  }
+
+  /**
+   * Initialize the SQLite persistence store.
+   * Call this explicitly before `initialize()` if you want persistent storage.
+   * Not called automatically to maintain backward compatibility with tests.
+   */
+  initializeDatabase(dbPath?: string): void {
+    if (this.store) return;
+    this.store = initializeStore(dbPath);
+    // Re-create tracer with trace repository for persistence
+    (this as { tracer: TraceLogger }).tracer = new TraceLogger(this.store.traces);
+    // Re-create memory with memory repository for persistence
+    (this as { memory: AgentMemory }).memory = new AgentMemory(undefined, this.store.memory);
   }
 
   async execute(task: Task, onProgress?: ProgressCallback): Promise<TaskResult> {
@@ -307,6 +323,11 @@ export class Joule {
 
   async shutdown(): Promise<void> {
     this.memory.optimized.stopConsolidation();
+    try {
+      closeDatabase();
+    } catch {
+      // Best-effort cleanup
+    }
     this.initialized = false;
   }
 }

@@ -8,23 +8,26 @@ import {
   generateId,
   isoNow,
 } from '@joule/shared';
+import type { SessionRepository, SessionData } from '@joule/store';
 
 const DEFAULT_SESSIONS_DIR = '.joule/sessions';
 
 export class SessionManager {
   private sessionsDir: string;
+  private repo?: SessionRepository;
 
-  constructor(baseDir?: string) {
+  constructor(baseDir?: string, sessionRepo?: SessionRepository) {
     this.sessionsDir = baseDir ?? path.join(process.cwd(), DEFAULT_SESSIONS_DIR);
+    this.repo = sessionRepo;
   }
 
   async ensureDir(): Promise<void> {
-    await fs.mkdir(this.sessionsDir, { recursive: true });
+    if (!this.repo) {
+      await fs.mkdir(this.sessionsDir, { recursive: true });
+    }
   }
 
   async create(): Promise<ChatSession> {
-    await this.ensureDir();
-
     const session: ChatSession = {
       id: generateId('session'),
       createdAt: isoNow(),
@@ -44,6 +47,12 @@ export class SessionManager {
   }
 
   async load(id: string): Promise<ChatSession | null> {
+    if (this.repo) {
+      const data = this.repo.load(id);
+      if (!data) return null;
+      return this.fromSessionData(data);
+    }
+
     try {
       const filePath = this.sessionPath(id);
       const content = await fs.readFile(filePath, 'utf-8');
@@ -54,13 +63,23 @@ export class SessionManager {
   }
 
   async save(session: ChatSession): Promise<void> {
-    await this.ensureDir();
     session.updatedAt = isoNow();
+
+    if (this.repo) {
+      this.repo.save(this.toSessionData(session));
+      return;
+    }
+
+    await this.ensureDir();
     const filePath = this.sessionPath(session.id);
     await fs.writeFile(filePath, JSON.stringify(session, null, 2), 'utf-8');
   }
 
   async list(): Promise<SessionListEntry[]> {
+    if (this.repo) {
+      return this.repo.list();
+    }
+
     await this.ensureDir();
 
     try {
@@ -97,6 +116,10 @@ export class SessionManager {
   }
 
   async delete(id: string): Promise<boolean> {
+    if (this.repo) {
+      return this.repo.delete(id);
+    }
+
     try {
       await fs.unlink(this.sessionPath(id));
       return true;
@@ -142,5 +165,45 @@ export class SessionManager {
 
   private sessionPath(id: string): string {
     return path.join(this.sessionsDir, `${id}.json`);
+  }
+
+  private toSessionData(session: ChatSession): SessionData {
+    return {
+      id: session.id,
+      createdAt: session.createdAt,
+      updatedAt: session.updatedAt,
+      messages: session.messages.map(m => ({
+        role: m.role,
+        content: m.content,
+        timestamp: m.timestamp,
+      })),
+      metadata: {
+        messageCount: session.metadata.messageCount,
+        totalCostUsd: session.metadata.totalCostUsd,
+        totalEnergyWh: session.metadata.totalEnergyWh,
+        totalCarbonGrams: session.metadata.totalCarbonGrams,
+        totalTokens: session.metadata.totalTokens,
+      },
+    };
+  }
+
+  private fromSessionData(data: SessionData): ChatSession {
+    return {
+      id: data.id,
+      createdAt: data.createdAt,
+      updatedAt: data.updatedAt,
+      messages: data.messages.map(m => ({
+        role: m.role as 'user' | 'assistant',
+        content: m.content,
+        timestamp: m.timestamp ?? new Date().toISOString(),
+      })),
+      metadata: {
+        messageCount: data.metadata.messageCount,
+        totalCostUsd: data.metadata.totalCostUsd,
+        totalEnergyWh: data.metadata.totalEnergyWh,
+        totalCarbonGrams: data.metadata.totalCarbonGrams,
+        totalTokens: data.metadata.totalTokens,
+      },
+    };
   }
 }

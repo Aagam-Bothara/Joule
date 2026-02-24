@@ -14,6 +14,7 @@ scheduleCommand
     const { Scheduler } = await import('@joule/core');
 
     const joule = new Joule();
+    joule.initializeDatabase();
     await joule.initialize();
     const scheduler = new Scheduler(joule);
 
@@ -38,6 +39,7 @@ scheduleCommand
     const { Scheduler } = await import('@joule/core');
 
     const joule = new Joule();
+    joule.initializeDatabase();
     await joule.initialize();
     const scheduler = new Scheduler(joule);
 
@@ -58,6 +60,7 @@ scheduleCommand
     const { Scheduler } = await import('@joule/core');
 
     const joule = new Joule();
+    joule.initializeDatabase();
     await joule.initialize();
     const scheduler = new Scheduler(joule);
 
@@ -88,6 +91,7 @@ scheduleCommand
     const { Scheduler } = await import('@joule/core');
 
     const joule = new Joule();
+    joule.initializeDatabase();
     await joule.initialize();
     const scheduler = new Scheduler(joule);
 
@@ -108,6 +112,7 @@ scheduleCommand
     const { Scheduler } = await import('@joule/core');
 
     const joule = new Joule();
+    joule.initializeDatabase();
     await joule.initialize();
     const scheduler = new Scheduler(joule);
 
@@ -129,6 +134,7 @@ scheduleCommand
     const { Scheduler } = await import('@joule/core');
 
     const joule = new Joule();
+    joule.initializeDatabase();
     await joule.initialize();
     const scheduler = new Scheduler(joule);
 

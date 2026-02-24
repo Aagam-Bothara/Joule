@@ -50,6 +50,10 @@ import {
 const mcpClients: McpClient[] = [];
 
 export async function setupJoule(joule: Joule): Promise<void> {
+  // Initialize SQLite persistence — must happen before any other setup
+  // that might read from or write to the store
+  joule.initializeDatabase();
+
   const config = joule.config.getAll();
 
   // Register providers

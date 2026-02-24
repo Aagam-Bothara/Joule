@@ -7,13 +7,49 @@ import {
   type TaskResult,
 } from '@joule/shared';
 import type { Joule } from '@joule/core';
+import type { TaskRepository } from '@joule/store';
 
-export function tasksRoutes(joule: Joule) {
+export function tasksRoutes(joule: Joule, taskRepo?: TaskRepository) {
   const router = new Hono();
   const taskResults = new Map<string, TaskResult>();
 
+  // Helper: persist result to both in-memory map and SQLite
+  function storeResult(taskId: string, result: TaskResult) {
+    taskResults.set(taskId, result);
+    if (taskRepo) {
+      try {
+        taskRepo.save({
+          id: result.id ?? taskId,
+          description: result.taskId ?? taskId,
+          status: result.status,
+          result: result.result,
+          stepResults: result.stepResults,
+          budgetAllocated: result.budgetAllocated,
+          budgetUsed: result.budgetUsed,
+          error: result.error,
+          traceId: result.trace?.traceId,
+          createdAt: result.startedAt,
+          completedAt: result.completedAt,
+        });
+      } catch {
+        // DB persistence is best-effort
+      }
+    }
+  }
+
   // List all tasks
   router.get('/', (c) => {
+    if (taskRepo) {
+      const rows = taskRepo.list({ limit: 100, order: 'desc' });
+      return c.json(rows.map(r => ({
+        id: r.id,
+        description: r.description,
+        status: r.status,
+        created_at: r.created_at,
+        completed_at: r.completed_at,
+      })));
+    }
+
     const results = Array.from(taskResults.values()).map(r => ({
       id: r.id,
       taskId: r.taskId,
@@ -46,7 +82,7 @@ export function tasksRoutes(joule: Joule) {
     };
 
     const result = await joule.execute(task);
-    taskResults.set(task.id, result);
+    storeResult(task.id, result);
 
     return c.json(result, 201);
   });
@@ -88,7 +124,7 @@ export function tasksRoutes(joule: Joule) {
             data: JSON.stringify(event.chunk),
           });
         } else if (event.type === 'result') {
-          taskResults.set(task.id, event.result!);
+          storeResult(task.id, event.result!);
           await stream.writeSSE({
             event: 'result',
             data: JSON.stringify(event.result),
@@ -99,7 +135,19 @@ export function tasksRoutes(joule: Joule) {
   });
 
   router.get('/:id', (c) => {
-    const result = taskResults.get(c.req.param('id'));
+    const id = c.req.param('id');
+
+    // Try in-memory first
+    let result = taskResults.get(id);
+
+    // Fall back to SQLite
+    if (!result && taskRepo) {
+      const parsed = taskRepo.getByIdParsed(id);
+      if (parsed) {
+        return c.json(parsed);
+      }
+    }
+
     if (!result) {
       return c.json({ error: 'Task not found' }, 404);
     }

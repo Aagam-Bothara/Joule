@@ -13,9 +13,15 @@ import {
   type ToolInvocation,
   type ToolResult,
 } from '@joule/shared';
+import type { TraceRepository, TraceData, SpanData, EventData } from '@joule/store';
 
 export class TraceLogger {
   private traces = new Map<string, TraceState>();
+  private repo?: TraceRepository;
+
+  constructor(traceRepo?: TraceRepository) {
+    this.repo = traceRepo;
+  }
 
   createTrace(traceId: string, taskId: string, budget: BudgetEnvelope): void {
     this.traces.set(traceId, {
@@ -136,7 +142,7 @@ export class TraceLogger {
   getTrace(traceId: string, budgetUsed: BudgetUsage): ExecutionTrace {
     const state = this.getState(traceId);
     const now = monotonicNow();
-    return {
+    const trace: ExecutionTrace = {
       traceId: state.traceId,
       taskId: state.taskId,
       startedAt: state.startedAt,
@@ -148,6 +154,28 @@ export class TraceLogger {
       },
       spans: state.spans,
     };
+
+    // Persist completed trace to SQLite if repository is available
+    if (this.repo) {
+      try {
+        this.repo.save(this.toTraceData(trace));
+      } catch {
+        // Persistence is best-effort — don't fail the trace
+      }
+    }
+
+    // Clean up in-memory state
+    this.traces.delete(traceId);
+
+    return trace;
+  }
+
+  /** Load a previously persisted trace from the database */
+  loadTrace(traceId: string): ExecutionTrace | null {
+    if (!this.repo) return null;
+    const data = this.repo.load(traceId);
+    if (!data) return null;
+    return this.fromTraceData(data);
   }
 
   hasTrace(traceId: string): boolean {
@@ -167,6 +195,80 @@ export class TraceLogger {
       if (found) return found;
     }
     return undefined;
+  }
+
+  private toTraceData(trace: ExecutionTrace): TraceData {
+    return {
+      traceId: trace.traceId,
+      taskId: trace.taskId,
+      startedAt: trace.startedAt,
+      completedAt: trace.completedAt,
+      durationMs: trace.totalDurationMs,
+      budgetAllocated: trace.budget.allocated,
+      budgetUsed: trace.budget.used,
+      spans: trace.spans.map(s => this.toSpanData(s)),
+    };
+  }
+
+  private toSpanData(span: TraceSpan): SpanData {
+    return {
+      id: span.id,
+      traceId: span.traceId,
+      name: span.name,
+      startTime: span.startTime,
+      endTime: span.endTime,
+      events: span.events.map(e => this.toEventData(e)),
+      children: span.children.map(c => this.toSpanData(c)),
+    };
+  }
+
+  private toEventData(event: TraceEvent): EventData {
+    return {
+      id: event.id,
+      traceId: event.traceId,
+      spanId: event.parentSpanId,
+      type: event.type,
+      timestamp: event.timestamp,
+      wallClock: event.wallClock,
+      duration: event.duration,
+      data: event.data,
+    };
+  }
+
+  private fromTraceData(data: TraceData): ExecutionTrace {
+    return {
+      traceId: data.traceId,
+      taskId: data.taskId,
+      startedAt: data.startedAt,
+      completedAt: data.completedAt ?? '',
+      totalDurationMs: data.durationMs ?? 0,
+      budget: {
+        allocated: (data.budgetAllocated ?? {}) as BudgetEnvelope,
+        used: (data.budgetUsed ?? {}) as BudgetUsage,
+      },
+      spans: data.spans.map(s => this.fromSpanData(s)),
+    };
+  }
+
+  private fromSpanData(data: SpanData): TraceSpan {
+    return {
+      id: data.id,
+      traceId: data.traceId,
+      name: data.name,
+      startTime: data.startTime,
+      endTime: data.endTime,
+      events: data.events.map(e => ({
+        id: e.id,
+        traceId: e.traceId,
+        parentSpanId: e.spanId,
+        type: e.type as TraceEventType,
+        timestamp: e.timestamp,
+        wallClock: e.wallClock,
+        duration: e.duration,
+        data: e.data as Record<string, unknown>,
+      })),
+      children: data.children.map(c => this.fromSpanData(c)),
+    };
   }
 }
 

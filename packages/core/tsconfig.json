@@ -7,6 +7,7 @@
   "include": ["src/**/*"],
   "references": [
     { "path": "../shared" },
+    { "path": "../store" },
     { "path": "../models" },
     { "path": "../tools" }
   ]

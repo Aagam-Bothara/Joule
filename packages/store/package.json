@@ -1,19 +1,19 @@
 {
-  "name": "@joule/server",
+  "name": "@joule/store",
   "version": "0.1.0",
-  "description": "HTTP API server for Joule with auth, streaming, and energy tracking",
+  "description": "SQLite persistence layer for Joule - production-ready storage for tasks, sessions, traces, memory, schedules, and users",
   "type": "module",
   "license": "MIT",
   "repository": {
     "type": "git",
     "url": "https://github.com/Aagam-Bothara/Joule",
-    "directory": "packages/server"
+    "directory": "packages/store"
   },
   "publishConfig": {
     "access": "public"
   },
   "files": ["dist", "README.md", "LICENSE"],
-  "keywords": ["joule", "ai-agent", "api-server", "hono", "rest-api"],
+  "keywords": ["joule", "ai-agent", "sqlite", "persistence", "better-sqlite3"],
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
@@ -29,14 +29,10 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@joule/core": "workspace:*",
     "@joule/shared": "workspace:*",
-    "@joule/store": "workspace:*",
-    "hono": "^4.7.0",
-    "@hono/node-server": "^1.13.0",
-    "@hono/zod-validator": "^0.4.0"
+    "better-sqlite3": "^11.0.0"
   },
   "devDependencies": {
-    "zod": "^3.24.0"
+    "@types/better-sqlite3": "^7.6.0"
   }
 }

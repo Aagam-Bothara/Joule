@@ -10,6 +10,7 @@ channelsCommand
     const { Joule } = await import('@joule/core');
 
     const joule = new Joule();
+    joule.initializeDatabase();
     await joule.initialize();
     const config = joule.config.getAll();
 
@@ -218,6 +219,7 @@ channelsCommand
 
     const { Joule } = await import('@joule/core');
     const joule = new Joule();
+    joule.initializeDatabase();
     await joule.initialize();
     const config = joule.config.getAll();
 
