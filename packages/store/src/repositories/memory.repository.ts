@@ -782,6 +782,35 @@ export class MemoryRepository {
     bulkTx();
   }
 
+  /** Run a function inside a single SQLite transaction for atomicity. */
+  transaction<T>(fn: () => T): T {
+    return this.db.transaction(fn)();
+  }
+
+  /** Full-text search across semantic memory using FTS5. */
+  ftsSearchSemantic(query: string, limit = 50): SemanticData[] {
+    const rows = this.db.prepare(`
+      SELECT s.* FROM memory_semantic s
+      JOIN memory_semantic_fts fts ON s.id = fts.id
+      WHERE memory_semantic_fts MATCH ? AND s.superseded_by IS NULL
+      ORDER BY rank
+      LIMIT ?
+    `).all(query, limit) as SemanticRow[];
+    return rows.map(r => this.parseSemanticRow(r));
+  }
+
+  /** Full-text search across episodic memory using FTS5. */
+  ftsSearchEpisodic(query: string, limit = 20): EpisodicData[] {
+    const rows = this.db.prepare(`
+      SELECT e.* FROM memory_episodic e
+      JOIN memory_episodic_fts fts ON e.id = fts.id
+      WHERE memory_episodic_fts MATCH ?
+      ORDER BY rank
+      LIMIT ?
+    `).all(query, limit) as EpisodicRow[];
+    return rows.map(r => this.parseEpisodicRow(r));
+  }
+
   /** Get counts of items in each memory layer. */
   counts(): MemoryCounts {
     const count = (table: string): number =>

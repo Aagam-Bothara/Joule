@@ -36,6 +36,9 @@ describe('runMigrations', () => {
     expect(tableNames).toContain('schedule_logs');
     expect(tableNames).toContain('users');
     expect(tableNames).toContain('api_keys');
+    // FTS5 virtual tables from migration 002
+    expect(tableNames).toContain('memory_semantic_fts');
+    expect(tableNames).toContain('memory_episodic_fts');
     db.close();
   });
 
@@ -44,7 +47,7 @@ describe('runMigrations', () => {
     runMigrations(db, allMigrations);
 
     const version = getCurrentVersion(db);
-    expect(version).toBe(1);
+    expect(version).toBe(allMigrations.length);
     db.close();
   });
 
@@ -54,7 +57,7 @@ describe('runMigrations', () => {
     runMigrations(db, allMigrations);
 
     const version = getCurrentVersion(db);
-    expect(version).toBe(1);
+    expect(version).toBe(allMigrations.length);
     db.close();
   });
 

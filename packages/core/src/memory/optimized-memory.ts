@@ -88,6 +88,21 @@ export class OptimizedMemory {
   private semanticIndex = new SemanticIndex();
   private episodeIndex = new SemanticIndex();
 
+  // Dirty tracking — only write modified items to SQLite
+  private dirtySemantics = new Set<string>();
+  private dirtyEpisodes = new Set<string>();
+  private dirtyProcedures = new Set<string>();
+  private dirtyPreferences = new Set<string>();
+  private dirtyLinks = new Set<string>();
+  private dirtyFailures = new Set<string>();
+
+  // Index maps for O(1) lookup during dirty saves
+  private semanticMap = new Map<string, SemanticMemory>();
+  private episodeMap = new Map<string, EpisodicMemory>();
+
+  // Batch mode — defer writes until flushDirty()
+  private batchMode = false;
+
   private loaded = false;
   private consolidationTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -109,30 +124,30 @@ export class OptimizedMemory {
     if (this.loaded) return;
 
     if (this.repo) {
-      // Load from SQLite
-      this.semantics = this.repo.getAllSemantic({ includeSuperseded: true }).map(d => this.fromSemanticData(d));
-      this.episodes = this.repo.getAllEpisodic().map(d => this.fromEpisodicData(d));
-      this.procedures = this.repo.getAllProcedural().map(d => this.fromProceduralData(d));
-      this.preferences = this.repo.getAllPreferences().map(d => this.fromPreferenceData(d));
-      this.links = this.repo.getAllLinks().map(d => this.fromLinkData(d));
-      this.failures = this.repo.getAllFailures().map(d => this.fromFailureData(d));
-    } else {
-      // Load from JSON files
-      await this.ensureDir();
-      this.semantics = await this.readJson<SemanticMemory[]>('semantics.json', []);
-      this.episodes = await this.readJson<EpisodicMemory[]>('episodes.json', []);
-      this.procedures = await this.readJson<ProceduralMemory[]>('procedures.json', []);
-      this.preferences = await this.readJson<PreferenceMemory[]>('preferences.json', []);
-      this.links = await this.readJson<AssociativeLink[]>('links.json', []);
-      this.failures = await this.readJson<FailurePattern[]>('failures.json', []);
+      // SQLite mode — lazy loading. Don't bulk-load everything into memory.
+      // Arrays remain empty; read methods query SQLite directly.
+      // In-memory SemanticIndex not built — FTS5 handles text search.
+      this.loaded = true;
+      return;
     }
 
-    // Rebuild search indices
+    // JSON file mode — load everything into memory (original behavior)
+    await this.ensureDir();
+    this.semantics = await this.readJson<SemanticMemory[]>('semantics.json', []);
+    this.episodes = await this.readJson<EpisodicMemory[]>('episodes.json', []);
+    this.procedures = await this.readJson<ProceduralMemory[]>('procedures.json', []);
+    this.preferences = await this.readJson<PreferenceMemory[]>('preferences.json', []);
+    this.links = await this.readJson<AssociativeLink[]>('links.json', []);
+    this.failures = await this.readJson<FailurePattern[]>('failures.json', []);
+
+    // Rebuild search indices and index maps (only for JSON mode)
     for (const s of this.semantics) {
       this.semanticIndex.add(s.id, this.semanticToText(s));
+      this.semanticMap.set(s.id, s);
     }
     for (const e of this.episodes) {
       this.episodeIndex.add(e.id, this.episodeToText(e));
+      this.episodeMap.set(e.id, e);
     }
 
     this.loaded = true;
@@ -154,6 +169,30 @@ export class OptimizedMemory {
     }
   }
 
+  /** Enable batch mode — defers writes until flushDirty() is called */
+  enableBatchMode(): void { this.batchMode = true; }
+
+  /** Disable batch mode */
+  disableBatchMode(): void { this.batchMode = false; }
+
+  /** Flush all dirty items to SQLite in a single transaction */
+  flushDirty(): void {
+    if (!this.repo) return;
+    const hasDirty = this.dirtySemantics.size > 0 || this.dirtyEpisodes.size > 0
+      || this.dirtyProcedures.size > 0 || this.dirtyPreferences.size > 0
+      || this.dirtyLinks.size > 0 || this.dirtyFailures.size > 0;
+    if (!hasDirty) return;
+
+    this.repo.transaction(() => {
+      this.persistDirtySemantics();
+      this.persistDirtyEpisodes();
+      this.persistDirtyProcedures();
+      this.persistDirtyPreferences();
+      this.persistDirtyLinks();
+      this.persistDirtyFailures();
+    });
+  }
+
   // ======================================================================
   // Layer 1: Semantic Memory (Facts & Knowledge)
   // ======================================================================
@@ -169,10 +208,19 @@ export class OptimizedMemory {
   ): Promise<SemanticMemory> {
     await this.ensureLoaded();
 
-    // Check for existing fact with same key + scope
-    const existing = this.semantics.find(
-      f => f.key === key && f.scope === scope && f.scopeId === scopeId && !f.supersededBy,
-    );
+    // Find existing fact with same key + scope
+    let existing: SemanticMemory | undefined;
+    if (this.repo) {
+      // SQLite mode — search repo directly
+      const results = this.repo.searchSemantic({ key, scope, scopeId, limit: 1 });
+      if (results.length > 0) {
+        existing = this.fromSemanticData(results[0]);
+      }
+    } else {
+      existing = this.semantics.find(
+        f => f.key === key && f.scope === scope && f.scopeId === scopeId && !f.supersededBy,
+      );
+    }
 
     if (existing) {
       // Update existing — boost confidence
@@ -181,11 +229,12 @@ export class OptimizedMemory {
 
       if (oldValue !== newValue) {
         // Value changed — create new fact superseding old one
-        existing.supersededBy = generateId('fact');
+        const newId = generateId('fact');
+        existing.supersededBy = newId;
         existing.temporal.updatedAt = isoNow();
 
         const newFact: SemanticMemory = {
-          id: existing.supersededBy,
+          id: newId,
           key,
           value,
           category,
@@ -198,9 +247,18 @@ export class OptimizedMemory {
           supersedes: existing.id,
         };
 
-        this.semantics.push(newFact);
-        this.semanticIndex.add(newFact.id, this.semanticToText(newFact));
-        await this.saveSemantics();
+        if (this.repo) {
+          // SQLite mode — write directly
+          this.repo.supersedeSemantic(existing.id, newId);
+          this.repo.saveSemantic(this.toSemanticData(newFact));
+        } else {
+          this.semantics.push(newFact);
+          this.semanticMap.set(newFact.id, newFact);
+          this.dirtySemantics.add(existing.id);
+          this.dirtySemantics.add(newFact.id);
+          this.semanticIndex.add(newFact.id, this.semanticToText(newFact));
+          await this.saveSemantics();
+        }
         return newFact;
       }
 
@@ -209,8 +267,14 @@ export class OptimizedMemory {
       existing.temporal.updatedAt = isoNow();
       existing.temporal.accessCount++;
       existing.tags = [...new Set([...existing.tags, ...tags])];
-      this.semanticIndex.update(existing.id, this.semanticToText(existing));
-      await this.saveSemantics();
+
+      if (this.repo) {
+        this.repo.saveSemantic(this.toSemanticData(existing));
+      } else {
+        this.dirtySemantics.add(existing.id);
+        this.semanticIndex.update(existing.id, this.semanticToText(existing));
+        await this.saveSemantics();
+      }
       return existing;
     }
 
@@ -228,14 +292,32 @@ export class OptimizedMemory {
       tags,
     };
 
-    this.semantics.push(fact);
-    this.semanticIndex.add(fact.id, this.semanticToText(fact));
-    await this.saveSemantics();
+    if (this.repo) {
+      this.repo.saveSemantic(this.toSemanticData(fact));
+    } else {
+      this.semantics.push(fact);
+      this.semanticMap.set(fact.id, fact);
+      this.dirtySemantics.add(fact.id);
+      this.semanticIndex.add(fact.id, this.semanticToText(fact));
+      await this.saveSemantics();
+    }
     return fact;
   }
 
   async getFact(key: string, scope?: MemoryScope, scopeId?: string): Promise<SemanticMemory | undefined> {
     await this.ensureLoaded();
+
+    // SQLite path — query directly
+    if (this.repo) {
+      const data = this.repo.getSemanticByKey(key);
+      if (!data) return undefined;
+      const fact = this.fromSemanticData(data);
+      if (scope && fact.scope !== scope) return undefined;
+      if (scopeId && fact.scopeId !== scopeId) return undefined;
+      return fact;
+    }
+
+    // In-memory path
     const fact = this.semantics.find(
       f => f.key === key && !f.supersededBy
         && (!scope || f.scope === scope)
@@ -250,6 +332,32 @@ export class OptimizedMemory {
 
   async searchFacts(query: MemoryQuery): Promise<SemanticMemory[]> {
     await this.ensureLoaded();
+
+    // FTS5 path — use SQLite full-text search when repo + text query available
+    if (this.repo && query.text) {
+      try {
+        const ftsResults = this.repo.ftsSearchSemantic(query.text, (query.limit ?? 50) + 20);
+        let results = ftsResults.map(d => this.fromSemanticData(d));
+
+        // Apply additional filters on the FTS results
+        if (query.scope) results = results.filter(f => f.scope === query.scope);
+        if (query.scopeId) results = results.filter(f => f.scopeId === query.scopeId);
+        if (query.category) results = results.filter(f => f.category === query.category);
+        if (query.minConfidence !== undefined) results = results.filter(f => f.confidence >= query.minConfidence!);
+        if (query.key) results = results.filter(f => f.key.includes(query.key!));
+        if (query.tags?.length) results = results.filter(f => query.tags!.some(t => f.tags.includes(t)));
+        if (query.maxAge) {
+          const cutoff = new Date(Date.now() - query.maxAge).toISOString();
+          results = results.filter(f => f.temporal.updatedAt >= cutoff);
+        }
+
+        return results.slice(0, query.limit ?? 50);
+      } catch {
+        // FTS5 may not be available (e.g., migration not run yet) — fall through to in-memory
+      }
+    }
+
+    // In-memory path (JSON mode or non-text queries)
     let results = this.semantics.filter(f => !f.supersededBy || query.includeExpired);
 
     if (query.scope) results = results.filter(f => f.scope === query.scope);
@@ -323,18 +431,33 @@ export class OptimizedMemory {
       lessonsLearned: options.lessonsLearned,
     };
 
-    this.episodes.push(episode);
-    this.episodeIndex.add(episode.id, this.episodeToText(episode));
+    if (this.repo) {
+      // SQLite mode — write directly
+      this.repo.saveEpisodic(this.toEpisodicData(episode));
+    } else {
+      this.episodes.push(episode);
+      this.episodeMap.set(episode.id, episode);
+      this.dirtyEpisodes.add(episode.id);
+      this.episodeIndex.add(episode.id, this.episodeToText(episode));
+      await this.saveEpisodes();
+    }
 
     // Auto-create associative links to related facts
     await this.autoLink(episode);
 
-    await this.saveEpisodes();
     return episode;
   }
 
   async getRecentEpisodes(limit = 10, scope?: MemoryScope): Promise<EpisodicMemory[]> {
     await this.ensureLoaded();
+
+    // SQLite path — query directly
+    if (this.repo) {
+      const data = this.repo.getRecentEpisodic(limit, scope);
+      return data.map(d => this.fromEpisodicData(d));
+    }
+
+    // In-memory path
     let eps = [...this.episodes];
     if (scope) eps = eps.filter(e => e.scope === scope);
     return eps
@@ -344,6 +467,27 @@ export class OptimizedMemory {
 
   async searchEpisodes(query: MemoryQuery): Promise<EpisodicMemory[]> {
     await this.ensureLoaded();
+
+    // FTS5 path — use SQLite full-text search when repo + text query available
+    if (this.repo && query.text) {
+      try {
+        const ftsResults = this.repo.ftsSearchEpisodic(query.text, (query.limit ?? 20) + 10);
+        let results = ftsResults.map(d => this.fromEpisodicData(d));
+
+        if (query.scope) results = results.filter(e => e.scope === query.scope);
+        if (query.tags?.length) results = results.filter(e => query.tags!.some(t => e.tags.includes(t)));
+        if (query.maxAge) {
+          const cutoff = new Date(Date.now() - query.maxAge).toISOString();
+          results = results.filter(e => e.temporal.createdAt >= cutoff);
+        }
+
+        return results.slice(0, query.limit ?? 20);
+      } catch {
+        // FTS5 may not be available — fall through to in-memory
+      }
+    }
+
+    // In-memory path
     let results = [...this.episodes];
 
     if (query.scope) results = results.filter(e => e.scope === query.scope);
@@ -371,6 +515,18 @@ export class OptimizedMemory {
   /** Find similar past episodes for a given task description */
   async findSimilarEpisodes(taskDescription: string, limit = 5): Promise<EpisodicMemory[]> {
     await this.ensureLoaded();
+
+    // FTS5 path — use SQLite full-text search when repo is available
+    if (this.repo) {
+      try {
+        const ftsResults = this.repo.ftsSearchEpisodic(taskDescription, limit);
+        return ftsResults.map(d => this.fromEpisodicData(d));
+      } catch {
+        // FTS5 may not be available — fall through to in-memory
+      }
+    }
+
+    // In-memory TF-IDF fallback
     const scored = this.episodeIndex.search(taskDescription, limit);
     return scored
       .map(s => this.episodes.find(e => e.id === s.id)!)
@@ -392,13 +548,26 @@ export class OptimizedMemory {
     await this.ensureLoaded();
 
     // Check if similar procedure exists
-    const existing = this.procedures.find(p => p.name === name && p.scope === scope);
+    let existing: ProceduralMemory | undefined;
+    if (this.repo) {
+      const data = this.repo.getProceduralByName(name, scope);
+      if (data) existing = this.fromProceduralData(data);
+    } else {
+      existing = this.procedures.find(p => p.name === name && p.scope === scope);
+    }
+
     if (existing) {
       existing.pattern.steps = steps;
       existing.pattern.trigger = trigger;
       existing.confidence = Math.min(1, existing.confidence + 0.1);
       existing.temporal.updatedAt = isoNow();
-      await this.saveProcedures();
+
+      if (this.repo) {
+        this.repo.saveProcedural(this.toProceduralData(existing));
+      } else {
+        this.dirtyProcedures.add(existing.id);
+        await this.saveProcedures();
+      }
       return existing;
     }
 
@@ -415,16 +584,27 @@ export class OptimizedMemory {
       tags,
     };
 
-    this.procedures.push(proc);
-    await this.saveProcedures();
+    if (this.repo) {
+      this.repo.saveProcedural(this.toProceduralData(proc));
+    } else {
+      this.procedures.push(proc);
+      this.dirtyProcedures.add(proc.id);
+      await this.saveProcedures();
+    }
     return proc;
   }
 
   async findProcedure(taskDescription: string, limit = 3): Promise<ProceduralMemory[]> {
     await this.ensureLoaded();
+
+    // Load procedures — small table, OK to load all
+    const procs = this.repo
+      ? this.repo.getAllProcedural().map(d => this.fromProceduralData(d))
+      : this.procedures;
+
     // Simple keyword matching against trigger patterns
     const words = taskDescription.toLowerCase().split(/\s+/);
-    return this.procedures
+    return procs
       .map(p => ({
         proc: p,
         score: words.filter(w => p.pattern.trigger.toLowerCase().includes(w)).length / words.length,
@@ -437,6 +617,20 @@ export class OptimizedMemory {
 
   async recordProcedureUsage(id: string, success: boolean): Promise<void> {
     await this.ensureLoaded();
+
+    if (this.repo) {
+      // SQLite path — read, compute, write
+      const allProcs = this.repo.getAllProcedural();
+      const data = allProcs.find(p => p.id === id);
+      if (!data) return;
+
+      const newTimesUsed = data.timesUsed + 1;
+      const newSuccessRate = ((data.successRate * data.timesUsed) + (success ? 1 : 0)) / newTimesUsed;
+      const newConfidence = Math.min(1, data.confidence + (success ? 0.05 : -0.1));
+      this.repo.updateProceduralUsage(id, newTimesUsed, newSuccessRate, newConfidence);
+      return;
+    }
+
     const proc = this.procedures.find(p => p.id === id);
     if (!proc) return;
 
@@ -445,6 +639,7 @@ export class OptimizedMemory {
     proc.confidence = Math.min(1, proc.confidence + (success ? 0.05 : -0.1));
     proc.temporal.updatedAt = isoNow();
     proc.temporal.lastAccessedAt = isoNow();
+    this.dirtyProcedures.add(proc.id);
     await this.saveProcedures();
   }
 
@@ -608,13 +803,27 @@ export class OptimizedMemory {
     await this.ensureLoaded();
 
     // Avoid duplicate links
-    const existing = this.links.find(
-      l => l.sourceId === sourceId && l.targetId === targetId && l.relationship === relationship,
-    );
+    let existing: AssociativeLink | undefined;
+    if (this.repo) {
+      const sourceLinks = this.repo.getLinked(sourceId, relationship);
+      const match = sourceLinks.find(l => l.targetId === targetId);
+      if (match) existing = this.fromLinkData(match);
+    } else {
+      existing = this.links.find(
+        l => l.sourceId === sourceId && l.targetId === targetId && l.relationship === relationship,
+      );
+    }
+
     if (existing) {
       existing.strength = Math.min(1, existing.strength + 0.1);
       existing.temporal.updatedAt = isoNow();
-      await this.saveLinks();
+
+      if (this.repo) {
+        this.repo.saveLink(this.toLinkData(existing));
+      } else {
+        this.dirtyLinks.add(existing.id);
+        await this.saveLinks();
+      }
       return existing;
     }
 
@@ -629,13 +838,26 @@ export class OptimizedMemory {
       temporal: createTemporal(),
     };
 
-    this.links.push(link);
-    await this.saveLinks();
+    if (this.repo) {
+      this.repo.saveLink(this.toLinkData(link));
+    } else {
+      this.links.push(link);
+      this.dirtyLinks.add(link.id);
+      await this.saveLinks();
+    }
     return link;
   }
 
   async getLinked(id: string, relationship?: string): Promise<AssociativeLink[]> {
     await this.ensureLoaded();
+
+    // SQLite path — query directly
+    if (this.repo) {
+      const data = this.repo.getLinked(id, relationship);
+      return data.map(d => this.fromLinkData(d));
+    }
+
+    // In-memory path
     return this.links.filter(l =>
       (l.sourceId === id || l.targetId === id)
       && (!relationship || l.relationship === relationship),
@@ -644,9 +866,14 @@ export class OptimizedMemory {
 
   /** Auto-create links between a new episode and related facts */
   private async autoLink(episode: EpisodicMemory): Promise<void> {
+    // Get facts to link against
+    const facts = this.repo
+      ? this.repo.searchSemantic({ limit: 200 }).map(d => this.fromSemanticData(d))
+      : this.semantics.filter(f => !f.supersededBy);
+
     // Find facts that share tags
     for (const tag of episode.tags) {
-      const related = this.semantics.filter(f => f.tags.includes(tag) && !f.supersededBy);
+      const related = facts.filter(f => f.tags.includes(tag));
       for (const fact of related.slice(0, 3)) {
         await this.createLink(episode.id, 'episodic', fact.id, 'semantic', 'used_knowledge');
       }
@@ -654,7 +881,7 @@ export class OptimizedMemory {
 
     // Link to tools used (create tool facts if they don't exist)
     for (const tool of episode.toolsUsed) {
-      const toolFact = this.semantics.find(f => f.key === `tool:${tool}` && !f.supersededBy);
+      const toolFact = facts.find(f => f.key === `tool:${tool}`);
       if (toolFact) {
         await this.createLink(episode.id, 'episodic', toolFact.id, 'semantic', 'used_tool');
       }
@@ -672,9 +899,17 @@ export class OptimizedMemory {
   async storeFailurePattern(pattern: Omit<FailurePattern, 'id' | 'occurrences' | 'lastSeen'>): Promise<FailurePattern> {
     await this.ensureLoaded();
 
-    const existing = this.failures.find(
-      f => f.toolName === pattern.toolName && f.errorSignature === pattern.errorSignature,
-    );
+    // Find existing pattern
+    let existing: FailurePattern | undefined;
+    if (this.repo) {
+      const allForTool = this.repo.getFailuresByTool(pattern.toolName);
+      const match = allForTool.find(f => f.errorSignature === pattern.errorSignature);
+      if (match) existing = this.fromFailureData(match);
+    } else {
+      existing = this.failures.find(
+        f => f.toolName === pattern.toolName && f.errorSignature === pattern.errorSignature,
+      );
+    }
 
     if (existing) {
       existing.occurrences++;
@@ -685,7 +920,13 @@ export class OptimizedMemory {
       if (pattern.context && pattern.context.length > existing.context.length) {
         existing.context = pattern.context;
       }
-      await this.saveFailures();
+
+      if (this.repo) {
+        this.repo.updateFailure(existing.id, existing.occurrences, existing.lastSeen, existing.resolution);
+      } else {
+        this.dirtyFailures.add(existing.id);
+        await this.saveFailures();
+      }
       return existing;
     }
 
@@ -699,14 +940,27 @@ export class OptimizedMemory {
       lastSeen: isoNow(),
     };
 
-    this.failures.push(fp);
-    await this.saveFailures();
+    if (this.repo) {
+      this.repo.saveFailure(this.toFailureData(fp));
+    } else {
+      this.failures.push(fp);
+      this.dirtyFailures.add(fp.id);
+      await this.saveFailures();
+    }
     return fp;
   }
 
   /** Get failure patterns, optionally filtered by tool name */
   async getFailurePatterns(toolName?: string): Promise<FailurePattern[]> {
     await this.ensureLoaded();
+
+    // SQLite path — query directly
+    if (this.repo) {
+      const data = toolName ? this.repo.getFailuresByTool(toolName) : this.repo.getAllFailures();
+      return data.map(d => this.fromFailureData(d));
+    }
+
+    // In-memory path
     let patterns = [...this.failures];
     if (toolName) {
       patterns = patterns.filter(f => f.toolName === toolName);
@@ -720,7 +974,19 @@ export class OptimizedMemory {
    */
   async getFailurePatternsForPlanning(toolNames: string[]): Promise<string> {
     await this.ensureLoaded();
-    const relevant = this.failures.filter(f => toolNames.includes(f.toolName));
+
+    let relevant: FailurePattern[];
+    if (this.repo) {
+      // Query SQLite per tool — more efficient than loading all
+      relevant = [];
+      for (const tool of toolNames) {
+        const data = this.repo.getFailuresByTool(tool);
+        relevant.push(...data.map(d => this.fromFailureData(d)));
+      }
+    } else {
+      relevant = this.failures.filter(f => toolNames.includes(f.toolName));
+    }
+
     if (relevant.length === 0) return '';
 
     return relevant
@@ -736,7 +1002,7 @@ export class OptimizedMemory {
 
   private saveFailures() {
     if (this.repo) {
-      for (const f of this.failures) this.repo.saveFailure(this.toFailureData(f));
+      if (!this.batchMode) this.persistDirtyFailures();
       return Promise.resolve();
     }
     return this.writeJson('failures.json', this.failures);
@@ -755,13 +1021,26 @@ export class OptimizedMemory {
   ): Promise<PreferenceMemory> {
     await this.ensureLoaded();
 
-    const existing = this.preferences.find(p => p.key === key && p.scope === scope);
+    let existing: PreferenceMemory | undefined;
+    if (this.repo) {
+      const data = this.repo.getPreference(key);
+      if (data && (data.scope === scope)) existing = this.fromPreferenceData(data);
+    } else {
+      existing = this.preferences.find(p => p.key === key && p.scope === scope);
+    }
+
     if (existing) {
       existing.value = value;
       existing.confidence = Math.min(1, existing.confidence + 0.1);
       existing.learnedFrom = learnedFrom;
       existing.temporal.updatedAt = isoNow();
-      await this.savePreferences();
+
+      if (this.repo) {
+        this.repo.savePreference(this.toPreferenceData(existing));
+      } else {
+        this.dirtyPreferences.add(existing.id);
+        await this.savePreferences();
+      }
       return existing;
     }
 
@@ -776,18 +1055,38 @@ export class OptimizedMemory {
       temporal: createTemporal(),
     };
 
-    this.preferences.push(pref);
-    await this.savePreferences();
+    if (this.repo) {
+      this.repo.savePreference(this.toPreferenceData(pref));
+    } else {
+      this.preferences.push(pref);
+      this.dirtyPreferences.add(pref.id);
+      await this.savePreferences();
+    }
     return pref;
   }
 
   async getPreference(key: string): Promise<PreferenceMemory | undefined> {
     await this.ensureLoaded();
+
+    // SQLite path
+    if (this.repo) {
+      const data = this.repo.getPreference(key);
+      return data ? this.fromPreferenceData(data) : undefined;
+    }
+
     return this.preferences.find(p => p.key === key);
   }
 
   async getAllPreferences(scope?: MemoryScope): Promise<PreferenceMemory[]> {
     await this.ensureLoaded();
+
+    // SQLite path — query directly
+    if (this.repo) {
+      const data = this.repo.getAllPreferences(scope);
+      return data.map(d => this.fromPreferenceData(d));
+    }
+
+    // In-memory path
     let prefs = [...this.preferences];
     if (scope) prefs = prefs.filter(p => p.scope === scope);
     return prefs.sort((a, b) => b.confidence - a.confidence);
@@ -816,9 +1115,13 @@ export class OptimizedMemory {
     }
 
     if (!query.layer || query.layer === 'procedural') {
-      let procs = [...this.procedures];
+      let procs: ProceduralMemory[];
       if (query.text) {
         procs = await this.findProcedure(query.text, query.limit ?? 10);
+      } else {
+        procs = this.repo
+          ? this.repo.getAllProcedural().map(d => this.fromProceduralData(d))
+          : [...this.procedures];
       }
       if (procs.length > 0) {
         results.push({ layer: 'procedural', items: procs, totalCount: procs.length });
@@ -853,7 +1156,56 @@ export class OptimizedMemory {
     let decayed = 0;
     let promoted = 0;
 
-    // 1. Confidence decay — facts lose confidence over time if not accessed
+    if (this.repo) {
+      // ═══ SQLite consolidation — use targeted SQL operations ═══
+      this.repo.transaction(() => {
+        // 1. Confidence decay — load all active facts, apply decay, write back changed ones
+        const allFacts = this.repo!.getAllSemantic().map(d => this.fromSemanticData(d));
+        for (const fact of allFacts) {
+          const days = daysSince(fact.temporal.lastAccessedAt);
+          if (days > 1) {
+            const decay = CONFIDENCE_DECAY_RATE * days;
+            const newConfidence = Math.max(0.05, fact.confidence - decay);
+            if (newConfidence < fact.confidence) {
+              this.repo!.updateSemanticConfidence(fact.id, newConfidence);
+              decayed++;
+            }
+          }
+        }
+
+        // 2. Merge duplicate facts
+        const factsByKey = new Map<string, SemanticMemory[]>();
+        for (const f of allFacts) {
+          const k = `${f.scope}:${f.scopeId ?? ''}:${f.key}`;
+          const arr = factsByKey.get(k) ?? [];
+          arr.push(f);
+          factsByKey.set(k, arr);
+        }
+        for (const [, facts] of factsByKey) {
+          if (facts.length <= 1) continue;
+          facts.sort((a, b) => b.confidence - a.confidence);
+          for (let i = 1; i < facts.length; i++) {
+            this.repo!.supersedeSemantic(facts[i].id, facts[0].id);
+            merged++;
+          }
+        }
+
+        // 3. Prune old low-confidence facts
+        pruned += this.repo!.deleteSemanticBelow(0.1, 90);
+
+        // 4. Prune old episodes (keep last 500)
+        pruned += this.repo!.pruneEpisodic(500);
+
+        // 5. Prune orphan links
+        pruned += this.repo!.pruneOrphanLinks();
+      });
+
+      return { merged, pruned, decayed, promoted };
+    }
+
+    // ═══ JSON file consolidation (original behavior) ═══
+
+    // 1. Confidence decay
     for (const fact of this.semantics) {
       if (fact.supersededBy) continue;
       const days = daysSince(fact.temporal.lastAccessedAt);
@@ -867,7 +1219,7 @@ export class OptimizedMemory {
       }
     }
 
-    // 2. Merge duplicate facts — same key, same scope, different values
+    // 2. Merge duplicate facts
     const factsByKey = new Map<string, SemanticMemory[]>();
     for (const f of this.semantics.filter(f => !f.supersededBy)) {
       const k = `${f.scope}:${f.scopeId ?? ''}:${f.key}`;
@@ -877,7 +1229,6 @@ export class OptimizedMemory {
     }
     for (const [, facts] of factsByKey) {
       if (facts.length <= 1) continue;
-      // Keep highest confidence, supersede others
       facts.sort((a, b) => b.confidence - a.confidence);
       for (let i = 1; i < facts.length; i++) {
         facts[i].supersededBy = facts[0].id;
@@ -885,7 +1236,7 @@ export class OptimizedMemory {
       }
     }
 
-    // 3. Prune very old, low-confidence items
+    // 3. Prune old low-confidence items
     const cutoff90Days = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString();
     const beforeSemantics = this.semantics.length;
     this.semantics = this.semantics.filter(f =>
@@ -915,10 +1266,8 @@ export class OptimizedMemory {
     if (this.working) {
       for (const [key, value] of Object.entries(this.working.scratchpad)) {
         if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
-          // Check if this was stored multiple sessions
           const existingFact = this.semantics.find(f => f.key === `scratch:${key}` && !f.supersededBy);
           if (existingFact && existingFact.temporal.accessCount >= 3) {
-            // Promote to permanent fact
             existingFact.key = key;
             existingFact.category = 'promoted';
             existingFact.confidence = Math.min(1, existingFact.confidence + 0.2);
@@ -927,6 +1276,12 @@ export class OptimizedMemory {
         }
       }
     }
+
+    // Rebuild index maps
+    this.semanticMap.clear();
+    for (const s of this.semantics) this.semanticMap.set(s.id, s);
+    this.episodeMap.clear();
+    for (const e of this.episodes) this.episodeMap.set(e.id, e);
 
     // Rebuild search indices after pruning
     this.semanticIndex.clear();
@@ -940,11 +1295,11 @@ export class OptimizedMemory {
 
     // Save all layers
     await Promise.all([
-      this.saveSemantics(),
-      this.saveEpisodes(),
-      this.saveProcedures(),
-      this.savePreferences(),
-      this.saveLinks(),
+      this.writeJson('semantics.json', this.semantics),
+      this.writeJson('episodes.json', this.episodes),
+      this.writeJson('procedures.json', this.procedures),
+      this.writeJson('preferences.json', this.preferences),
+      this.writeJson('links.json', this.links),
     ]);
 
     return { merged, pruned, decayed, promoted };
@@ -957,6 +1312,24 @@ export class OptimizedMemory {
   async getStats(): Promise<MemoryStats> {
     await this.ensureLoaded();
 
+    // SQLite path — use repo counts
+    if (this.repo) {
+      const counts = this.repo.counts();
+      return {
+        totalFacts: counts.semantic,
+        totalEpisodes: counts.episodic,
+        totalProcedures: counts.procedural,
+        totalPreferences: counts.preferences,
+        totalLinks: counts.links,
+        avgFactConfidence: 0,
+        avgEpisodeSuccess: 0,
+        oldestMemory: '',
+        newestMemory: '',
+        storageBytes: 0,
+      };
+    }
+
+    // In-memory path
     const allDates = [
       ...this.semantics.map(s => s.temporal.createdAt),
       ...this.episodes.map(e => e.temporal.createdAt),
@@ -1150,37 +1523,95 @@ export class OptimizedMemory {
     await fs.writeFile(path.join(this.memoryDir, filename), JSON.stringify(data, null, 2), 'utf-8');
   }
 
+  // ── Dirty-aware persist helpers (used by saveX and flushDirty) ──
+
+  private persistDirtySemantics(): void {
+    if (!this.repo) return;
+    for (const id of this.dirtySemantics) {
+      const item = this.semanticMap.get(id);
+      if (item) this.repo.saveSemantic(this.toSemanticData(item));
+    }
+    this.dirtySemantics.clear();
+  }
+
+  private persistDirtyEpisodes(): void {
+    if (!this.repo) return;
+    for (const id of this.dirtyEpisodes) {
+      const item = this.episodeMap.get(id);
+      if (item) this.repo.saveEpisodic(this.toEpisodicData(item));
+    }
+    this.dirtyEpisodes.clear();
+  }
+
+  private persistDirtyProcedures(): void {
+    if (!this.repo) return;
+    for (const id of this.dirtyProcedures) {
+      const item = this.procedures.find(p => p.id === id);
+      if (item) this.repo.saveProcedural(this.toProceduralData(item));
+    }
+    this.dirtyProcedures.clear();
+  }
+
+  private persistDirtyPreferences(): void {
+    if (!this.repo) return;
+    for (const id of this.dirtyPreferences) {
+      const item = this.preferences.find(p => p.id === id);
+      if (item) this.repo.savePreference(this.toPreferenceData(item));
+    }
+    this.dirtyPreferences.clear();
+  }
+
+  private persistDirtyLinks(): void {
+    if (!this.repo) return;
+    for (const id of this.dirtyLinks) {
+      const item = this.links.find(l => l.id === id);
+      if (item) this.repo.saveLink(this.toLinkData(item));
+    }
+    this.dirtyLinks.clear();
+  }
+
+  private persistDirtyFailures(): void {
+    if (!this.repo) return;
+    for (const id of this.dirtyFailures) {
+      const item = this.failures.find(f => f.id === id);
+      if (item) this.repo.saveFailure(this.toFailureData(item));
+    }
+    this.dirtyFailures.clear();
+  }
+
+  // ── Save methods (batch-aware) ──
+
   private saveSemantics() {
     if (this.repo) {
-      for (const s of this.semantics) this.repo.saveSemantic(this.toSemanticData(s));
+      if (!this.batchMode) this.persistDirtySemantics();
       return Promise.resolve();
     }
     return this.writeJson('semantics.json', this.semantics);
   }
   private saveEpisodes() {
     if (this.repo) {
-      for (const e of this.episodes) this.repo.saveEpisodic(this.toEpisodicData(e));
+      if (!this.batchMode) this.persistDirtyEpisodes();
       return Promise.resolve();
     }
     return this.writeJson('episodes.json', this.episodes);
   }
   private saveProcedures() {
     if (this.repo) {
-      for (const p of this.procedures) this.repo.saveProcedural(this.toProceduralData(p));
+      if (!this.batchMode) this.persistDirtyProcedures();
       return Promise.resolve();
     }
     return this.writeJson('procedures.json', this.procedures);
   }
   private savePreferences() {
     if (this.repo) {
-      for (const p of this.preferences) this.repo.savePreference(this.toPreferenceData(p));
+      if (!this.batchMode) this.persistDirtyPreferences();
       return Promise.resolve();
     }
     return this.writeJson('preferences.json', this.preferences);
   }
   private saveLinks() {
     if (this.repo) {
-      for (const l of this.links) this.repo.saveLink(this.toLinkData(l));
+      if (!this.batchMode) this.persistDirtyLinks();
       return Promise.resolve();
     }
     return this.writeJson('links.json', this.links);

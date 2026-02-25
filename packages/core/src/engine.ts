@@ -213,36 +213,44 @@ export class Joule {
   /** Learn from a completed task result */
   private async learnFromResult(task: Task, result: TaskResult): Promise<void> {
     try {
-      // Record episode
-      const toolsUsed = result.stepResults.map(s => s.toolName);
-      const episode = await this.memory.optimized.recordEpisode(
-        task.id,
-        task.description,
-        result.status === 'completed' ? 'success' : result.status === 'budget_exhausted' ? 'partial' : 'failed',
-        toolsUsed,
-        {
-          stepsCompleted: result.stepResults.filter(s => s.success).length,
-          totalSteps: result.stepResults.length,
-          energyUsed: result.efficiencyReport?.actualEnergyWh ?? 0,
-          carbonUsed: result.efficiencyReport?.actualCarbonGrams ?? 0,
-          costUsd: result.budgetUsed?.costUsd ?? 0,
-          tags: toolsUsed,
-          context: task.description,
-          lessonsLearned: result.status === 'failed' ? result.error : undefined,
-        },
-      );
-
-      // Auto-extract facts from the interaction
-      if (this.factExtractor) {
-        await this.factExtractor.learnFromExecution(
+      // Enable batch mode to defer all SQLite writes into a single transaction
+      this.memory.optimized.enableBatchMode();
+      try {
+        // Record episode
+        const toolsUsed = result.stepResults.map(s => s.toolName);
+        const episode = await this.memory.optimized.recordEpisode(
+          task.id,
           task.description,
-          result.result ?? '',
-          episode,
+          result.status === 'completed' ? 'success' : result.status === 'budget_exhausted' ? 'partial' : 'failed',
+          toolsUsed,
+          {
+            stepsCompleted: result.stepResults.filter(s => s.success).length,
+            totalSteps: result.stepResults.length,
+            energyUsed: result.efficiencyReport?.actualEnergyWh ?? 0,
+            carbonUsed: result.efficiencyReport?.actualCarbonGrams ?? 0,
+            costUsd: result.budgetUsed?.costUsd ?? 0,
+            tags: toolsUsed,
+            context: task.description,
+            lessonsLearned: result.status === 'failed' ? result.error : undefined,
+          },
         );
-      }
 
-      // Extract failure patterns from failed steps
-      await this.extractFailurePatterns(task, result);
+        // Auto-extract facts from the interaction
+        if (this.factExtractor) {
+          await this.factExtractor.learnFromExecution(
+            task.description,
+            result.result ?? '',
+            episode,
+          );
+        }
+
+        // Extract failure patterns from failed steps
+        await this.extractFailurePatterns(task, result);
+      } finally {
+        // Flush all dirty items in a single SQLite transaction
+        this.memory.optimized.disableBatchMode();
+        this.memory.optimized.flushDirty();
+      }
     } catch {
       // Learning is best-effort — don't fail the task
     }
