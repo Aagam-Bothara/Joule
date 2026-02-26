@@ -92,7 +92,23 @@ BROWSER AUTOMATION — Critical Rules:
 - When you don't know the exact selector, use generic selectors with aria-labels, data attributes, or text content
 - After each step, the reactive system will analyze the page and inject additional steps if obstacles are detected (ads, popups, cookie banners, login walls, etc.) — so you don't need to pre-plan for every obstacle
 
-Example — "Play Tere Bina on YouTube":
+PREFERRED BROWSER WORKFLOW (Layered Page Intelligence):
+- After browser_navigate, call browser_snapshot (level 0) to get indexed interactive elements with [index] numbers
+- Use browser_act to interact by element index: {"action": "click", "element": 3} or {"action": "type", "element": 5, "text": "hello"}
+- browser_act returns a DELTA showing what changed on the page — no need to re-snapshot after every action
+- Only re-snapshot if URL changed, many elements appeared/disappeared, or you need higher intelligence levels
+- This workflow is 27x cheaper than screenshots and 5x cheaper than full page observation
+
+Example — "Play Tere Bina on YouTube" (preferred — using browser_snapshot + browser_act):
+{"steps": [
+  {"description": "Navigate to YouTube", "toolName": "browser_navigate", "toolArgs": {"url": "https://www.youtube.com"}},
+  {"description": "Snapshot the page to find interactive elements", "toolName": "browser_snapshot", "toolArgs": {"level": 0}},
+  {"description": "Type search query in the search box", "toolName": "browser_act", "toolArgs": {"action": "type", "element": 0, "text": "Tere Bina", "submit": true}},
+  {"description": "Snapshot results page to find videos", "toolName": "browser_snapshot", "toolArgs": {"level": 0}},
+  {"description": "Click the first video result", "toolName": "browser_act", "toolArgs": {"action": "click", "element": 0}}
+]}
+
+Example — "Play Tere Bina on YouTube" (fallback — using CSS selectors):
 {"steps": [
   {"description": "Navigate to YouTube", "toolName": "browser_navigate", "toolArgs": {"url": "https://www.youtube.com"}},
   {"description": "Search for the song", "toolName": "browser_type", "toolArgs": {"selector": "input[name='search_query']", "text": "Tere Bina", "submit": true}},
@@ -635,20 +651,22 @@ For critical steps, you MAY add a "verify" field: {"type": "output_check"|"dom_c
 
       // Plan enrichment: if the plan is a single browser_navigate step but the task
       // clearly requires more interaction (send message, fill form, search, etc.),
-      // inject a browser_observe step so the reactive loop can generate the remaining
-      // steps based on actual page content. This makes the agent work on ANY website
-      // even if the SLM doesn't know the site's specific selectors.
+      // inject a browser_snapshot (preferred) or browser_observe step so the reactive
+      // loop can generate the remaining steps based on actual page content.
       if (
         plan.steps.length === 1 &&
         plan.steps[0].toolName === 'browser_navigate' &&
         actionFloor >= 0.7 &&
-        this.tools.has('browser_observe')
+        (this.tools.has('browser_snapshot') || this.tools.has('browser_observe'))
       ) {
+        const useSnapshot = this.tools.has('browser_snapshot');
         plan.steps.push({
           index: 1,
-          description: 'Observe the page to identify interactive elements for the next action',
-          toolName: 'browser_observe',
-          toolArgs: { purpose: task.description },
+          description: useSnapshot
+            ? 'Snapshot the page to get indexed interactive elements'
+            : 'Observe the page to identify interactive elements for the next action',
+          toolName: useSnapshot ? 'browser_snapshot' : 'browser_observe',
+          toolArgs: useSnapshot ? { level: 0, purpose: task.description } : { purpose: task.description },
         });
 
         this.tracer.logEvent(traceId, 'info', {
@@ -770,10 +788,35 @@ Create a recovery plan to complete the original task.`;
         ? output.content.slice(0, 2000)
         : '';
 
-      // If the last step was browser_observe, include the interactive elements
-      // so the reactive planner can use real CSS selectors
+      // If the last step was browser_observe or browser_snapshot, include the interactive elements
+      // so the reactive planner can use real CSS selectors or element indices
       let observeContext = '';
-      if (lastStepResult.toolName === 'browser_observe' && output.interactiveElements) {
+      const isSnapshot = lastStepResult.toolName === 'browser_snapshot';
+      const isObserve = lastStepResult.toolName === 'browser_observe';
+
+      if (isSnapshot && output.elements) {
+        // browser_snapshot: indexed elements with state and bounding boxes
+        const elements = output.elements as Array<{ index: number; tag: string; text: string; selector: string; ariaLabel?: string; placeholder?: string; type?: string; state?: { disabled?: boolean; focused?: boolean } }>;
+        if (elements.length > 0) {
+          observeContext = `\nIndexed interactive elements (use browser_act with element index):\n${elements.slice(0, 50).map(e => {
+            const stateInfo = e.state ? `${e.state.disabled ? ' DISABLED' : ''}${e.state.focused ? ' FOCUSED' : ''}` : '';
+            return `  [${e.index}] <${e.tag}${e.type ? ` type="${e.type}"` : ''}> "${e.text}"${e.ariaLabel ? ` aria-label="${e.ariaLabel}"` : ''}${e.placeholder ? ` placeholder="${e.placeholder}"` : ''}${stateInfo}`;
+          }).join('\n')}`;
+        } else {
+          observeContext = '\nNo interactive elements found — the page may still be loading or is a heavy SPA.';
+        }
+        // Include delta if present
+        if (output.delta) {
+          const d = output.delta as { added: number[]; removed: number[]; changed: Array<{ index: number; field: string; from: string; to: string }> };
+          if (d.added.length > 0 || d.removed.length > 0 || d.changed.length > 0) {
+            observeContext += `\nDelta since last snapshot: +${d.added.length} added, -${d.removed.length} removed, ~${d.changed.length} changed`;
+          }
+        }
+        const forms = output.forms as Array<{ action: string; method: string; inputs: string[] }> | undefined;
+        if (forms && forms.length > 0) {
+          observeContext += `\nForms: ${forms.map(f => `${f.method} ${f.action} — fields: ${f.inputs.join(', ')}`).join('; ')}`;
+        }
+      } else if (isObserve && output.interactiveElements) {
         const elements = output.interactiveElements as Array<{ index: number; tag: string; text: string; selector: string; ariaLabel?: string; placeholder?: string }>;
         if (elements.length > 0) {
           observeContext = `\nInteractive elements found on the page:\n${elements.slice(0, 50).map(e =>
@@ -788,15 +831,34 @@ Create a recovery plan to complete the original task.`;
         }
       }
 
+      // If the last step was browser_act, include its delta
+      let actDeltaContext = '';
+      if (lastStepResult.toolName === 'browser_act' && output.delta) {
+        const d = output.delta as { added: Array<{ index: number; tag: string; text: string }>; removed: Array<{ index: number; tag: string; text: string }>; changed: Array<{ index: number; field: string; from: string; to: string }>; urlChanged: boolean; newUrl?: string; titleChanged: boolean; newTitle?: string };
+        const parts: string[] = [];
+        if (d.urlChanged) parts.push(`URL changed to: ${d.newUrl}`);
+        if (d.titleChanged) parts.push(`Title changed to: ${d.newTitle}`);
+        if (d.added.length > 0) parts.push(`New elements appeared:\n${d.added.slice(0, 10).map(e => `  [${e.index}] <${e.tag}> "${e.text}"`).join('\n')}`);
+        if (d.removed.length > 0) parts.push(`Elements removed: ${d.removed.map(e => `[${e.index}]`).join(', ')}`);
+        if (d.changed.length > 0) parts.push(`Elements changed:\n${d.changed.slice(0, 10).map(c => `  [${c.index}] ${c.field}: "${c.from}" → "${c.to}"`).join('\n')}`);
+        if (parts.length > 0) {
+          actDeltaContext = `\nPage changes after action:\n${parts.join('\n')}`;
+        }
+      }
+
       const remainingSummary = remainingSteps.length > 0
         ? `Remaining planned steps:\n${remainingSteps.map((s, i) => `  ${i + 1}. ${s.description} (${s.toolName})`).join('\n')}`
         : 'No more planned steps.';
 
       const systemPrompt = `You are a reactive agent planner for an autonomous browser agent. After a browser step was executed, you analyze the current page state and decide what to do next.
 
-You have TWO responsibilities:
+You have THREE responsibilities:
 1. OBSTACLE HANDLING: Detect and handle obstacles (ads, popups, cookie banners, login walls)
-2. NEXT ACTION PLANNING: If the last step was browser_observe, you now have the page's interactive elements with their CSS selectors. Use this information to plan the NEXT steps needed to complete the user's task. Pick the correct elements from the list and create steps using their exact selectors.
+2. NEXT ACTION PLANNING: If the last step was browser_snapshot or browser_observe, you now have the page's interactive elements. Plan the NEXT steps to complete the user's task.
+3. DELTA ANALYSIS: If the last step was browser_act, analyze the delta (what changed) to decide if more actions are needed or if the task is complete.
+
+PREFERRED: Use browser_act with element [index] numbers from browser_snapshot. Example: {"toolName": "browser_act", "toolArgs": {"action": "click", "element": 3}}
+FALLBACK: Use browser_click/browser_type with CSS selectors from browser_observe.
 
 Respond with ONLY a raw JSON object (no markdown, no code fences):
 {"additionalSteps": [{"description": "...", "toolName": "...", "toolArgs": {...}}], "reason": "..."}
@@ -814,7 +876,7 @@ You are a SMART agent. Analyze the page content and detect:
 8. Page not fully loaded: if content seems empty, add a wait step
 9. Form validation errors: re-fill or correct fields
 
-If the page shows a login form and the user's task requires being logged in, add an observation step (browser_observe) to understand the page better before proceeding.
+If the page shows a login form and the user's task requires being logged in, add a snapshot step (browser_snapshot) to understand the page better before proceeding.
 
 IMPORTANT: Only add steps for obstacles you can CLEARLY see in the page content. Don't add unnecessary steps. Be efficient.
 
@@ -826,11 +888,11 @@ ${toolDescriptions}`;
 Last step executed: ${lastStepResult.toolName} — ${lastStepResult.success ? 'SUCCESS' : 'FAILED'}
 ${pageContext}
 Page content (truncated): ${pageContent || '(not available)'}
-${observeContext}
+${observeContext}${actDeltaContext}
 
 ${remainingSummary}
 
-${observeContext ? 'Using the interactive elements above, plan the next steps to complete the task. Use the exact selectors from the element list.' : 'Analyze: are there any obstacles on the current page that need handling before continuing?'}`;
+${observeContext ? (isSnapshot ? 'Using the indexed elements above, plan the next steps using browser_act with element indices.' : 'Using the interactive elements above, plan the next steps to complete the task. Use the exact selectors from the element list.') : actDeltaContext ? 'Analyze the delta above. Decide if additional actions are needed or if the task is complete.' : 'Analyze: are there any obstacles on the current page that need handling before continuing?'}`;
 
       // Use higher complexity for observe results (need smarter model to pick selectors)
       const reactiveComplexity = lastStepResult.toolName === 'browser_observe' ? 0.8 : 0.5;
@@ -1054,6 +1116,18 @@ ${observeContext ? 'Using the interactive elements above, plan the next steps to
     }
 
     if (steps.length === 0) return null;
+
+    // If the fallback plan ends with only a navigate step, enrich with browser_snapshot
+    // so the reactive loop can generate interaction steps based on actual page content.
+    const lastStep = steps[steps.length - 1];
+    if (lastStep.toolName === 'browser_navigate' && this.tools.has('browser_snapshot')) {
+      steps.push({
+        index: steps.length,
+        description: 'Snapshot the page to get indexed interactive elements',
+        toolName: 'browser_snapshot',
+        toolArgs: { level: 0 },
+      });
+    }
 
     return { taskId, complexity: 0.75, steps, rawResponse: '[fallback-plan]' };
   }

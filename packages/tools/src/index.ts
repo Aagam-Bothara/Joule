@@ -15,6 +15,8 @@ export {
   browserExtractTool,
   browserObserveTool,
   browserEvaluateTool,
+  browserSnapshotTool,
+  browserActTool,
   configureBrowser,
   closeBrowser,
 } from './builtin/browser.js';

@@ -26,6 +26,8 @@ import {
   browserExtractTool,
   browserObserveTool,
   browserEvaluateTool,
+  browserSnapshotTool,
+  browserActTool,
   configureBrowser,
   iotMqttPublishTool,
   iotMqttSubscribeTool,
@@ -126,6 +128,8 @@ export async function setupJoule(joule: Joule): Promise<void> {
       joule.tools.register(browserExtractTool, 'builtin');
       joule.tools.register(browserObserveTool, 'builtin');
       joule.tools.register(browserEvaluateTool, 'builtin');
+      joule.tools.register(browserSnapshotTool, 'builtin');
+      joule.tools.register(browserActTool, 'builtin');
     } catch (err) {
       // Playwright not installed — browser tools unavailable
       if (process.env.JOULE_DEBUG) {
