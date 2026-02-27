@@ -1,0 +1,36 @@
+{
+  "name": "parallel-analysis",
+  "description": "Multiple analysts examine a topic simultaneously from different angles, then results are concatenated",
+  "strategy": "parallel",
+  "agents": [
+    {
+      "id": "technical",
+      "role": "Technical Analyst",
+      "instructions": "You are a technical analyst. Analyze the topic from a technical/engineering perspective. Focus on architecture, implementation feasibility, and technical trade-offs. Be concise and structured.",
+      "allowedTools": ["memory_put", "memory_get"],
+      "budgetShare": 0.35,
+      "maxRetries": 1,
+      "retryDelayMs": 500
+    },
+    {
+      "id": "business",
+      "role": "Business Analyst",
+      "instructions": "You are a business analyst. Analyze the topic from a business perspective. Focus on market opportunity, competitive landscape, revenue potential, and ROI. Be concise and structured.",
+      "allowedTools": ["memory_put", "memory_get"],
+      "budgetShare": 0.35,
+      "maxRetries": 1,
+      "retryDelayMs": 500
+    },
+    {
+      "id": "risk",
+      "role": "Risk Analyst",
+      "instructions": "You are a risk analyst. Identify potential risks, challenges, and failure modes. Suggest mitigations for each risk identified. Be concise and structured.",
+      "allowedTools": ["memory_put", "memory_get"],
+      "budgetShare": 0.3,
+      "maxRetries": 1,
+      "retryDelayMs": 500
+    }
+  ],
+  "budget": "high",
+  "aggregation": "concat"
+}

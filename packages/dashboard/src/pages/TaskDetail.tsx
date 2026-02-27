@@ -1,8 +1,10 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import { useTask } from '../hooks/useTasks.ts';
 import { TraceTree } from '../components/TraceTree.tsx';
 import { BudgetGauge } from '../components/BudgetGauge.tsx';
 import { EnergyBadge } from '../components/EnergyBadge.tsx';
+import { CanvasViewer } from '../components/CanvasViewer.tsx';
+import { fetchArtifactHtml } from '../api/client.ts';
 
 const styles = {
   backButton: { padding: '6px 12px', background: '#333', border: 'none', borderRadius: 6, color: '#ccc', cursor: 'pointer', fontSize: 13, marginBottom: 16, display: 'inline-block' } as React.CSSProperties,
@@ -31,6 +33,23 @@ interface TaskDetailProps {
 
 export function TaskDetail({ taskId, onBack }: TaskDetailProps) {
   const { task, loading, error } = useTask(taskId);
+  const [canvasArtifacts, setCanvasArtifacts] = useState<Array<{ id: string; title: string; html: string }>>([]);
+
+  useEffect(() => {
+    if (!task?.stepResults) return;
+    const ids = task.stepResults
+      .filter((s: any) => s.toolName?.startsWith('canvas_') && s.output?.artifactId)
+      .map((s: any) => s.output.artifactId as string);
+    const unique = [...new Set(ids)];
+    if (unique.length === 0) { setCanvasArtifacts([]); return; }
+
+    Promise.all(unique.map(async (id) => {
+      try {
+        const html = await fetchArtifactHtml(id);
+        return { id, title: task.stepResults.find((s: any) => s.output?.artifactId === id)?.output?.title || 'Canvas', html };
+      } catch { return null; }
+    })).then(results => setCanvasArtifacts(results.filter(Boolean) as any));
+  }, [task]);
 
   if (!taskId) {
     return <div style={styles.empty}>No task selected</div>;
@@ -103,6 +122,15 @@ export function TaskDetail({ taskId, onBack }: TaskDetailProps) {
         <div style={styles.section}>
           <div style={styles.sectionTitle}>Synthesis</div>
           <div style={styles.synthesis}>{task.synthesis}</div>
+        </div>
+      )}
+
+      {canvasArtifacts.length > 0 && (
+        <div style={styles.section}>
+          <div style={styles.sectionTitle}>Canvas Output</div>
+          {canvasArtifacts.map(a => (
+            <CanvasViewer key={a.id} html={a.html} title={a.title} artifactId={a.id} />
+          ))}
         </div>
       )}
 

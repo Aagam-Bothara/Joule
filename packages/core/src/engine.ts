@@ -1,4 +1,4 @@
-import type { Task, TaskResult, JouleConfig, ToolDefinition, EnergyConfig } from '@joule/shared';
+import { generateId, type Task, type TaskResult, type JouleConfig, type ToolDefinition, type EnergyConfig } from '@joule/shared';
 import type { ProgressCallback, StreamEvent } from './task-executor.js';
 import { ModelProviderRegistry } from '@joule/models';
 import { initializeStore, closeDatabase, type JouleStore } from '@joule/store';
@@ -15,6 +15,8 @@ import { ConstitutionEnforcer } from './constitution.js';
 import { DecisionGraphBuilder } from './decision-graph.js';
 import { SubTaskOrchestrator } from './sub-task-orchestrator.js';
 import { ComputerAgent, type ComputerAgentOptions, type ComputerAgentResult } from './computer-agent.js';
+import { CrewOrchestrator } from './crew-orchestrator.js';
+import type { CrewDefinition, CrewResult, CrewStreamEvent } from '@joule/shared';
 
 export class Joule {
   readonly config: ConfigManager;
@@ -323,6 +325,131 @@ export class Joule {
 
     const envelope = this.budget.createEnvelope(options?.budget ?? 'high');
     return agent.run(task, envelope);
+  }
+
+  /**
+   * Execute a multi-agent crew against a task.
+   * Each agent gets its own budget sub-envelope, filtered tools, and role context.
+   * Budget usage mirrors upward: total crew cost is always tracked.
+   */
+  async executeCrew(
+    crew: CrewDefinition,
+    task: Task,
+    onProgress?: ProgressCallback,
+  ): Promise<CrewResult> {
+    if (!this.initialized) {
+      await this.initialize();
+    }
+
+    // Pre-execution: inject memory context
+    const enrichedTask = await this.enrichTaskWithMemory(task);
+
+    // Create crew-level budget envelope
+    const envelope = this.budget.createEnvelope(crew.budget ?? 'high');
+
+    // Create trace
+    const traceId = generateId('trace');
+    this.tracer.createTrace(traceId, task.id, envelope.envelope);
+
+    const crewOrchestrator = new CrewOrchestrator(
+      this.planner,
+      this.budget,
+      this.router,
+      this.tracer,
+      this.tools,
+      this.providers,
+      this.memory,
+      this.config.get('energy'),
+      this.config.get('routing'),
+      this.constitution,
+    );
+
+    const result = await crewOrchestrator.executeCrew(
+      crew,
+      enrichedTask,
+      envelope,
+      traceId,
+      onProgress,
+    );
+
+    // Post-execution: learn from crew result
+    if (result.agentResults.length > 0) {
+      const syntheticTaskResult: TaskResult = {
+        id: result.id,
+        taskId: task.id,
+        traceId,
+        status: result.status === 'completed' ? 'completed' : 'failed',
+        result: result.result,
+        stepResults: result.agentResults.flatMap(ar => ar.taskResult.stepResults),
+        budgetUsed: result.budgetUsed,
+        trace: result.trace,
+        completedAt: result.completedAt,
+        error: result.error,
+      };
+      await this.learnFromResult(task, syntheticTaskResult);
+    }
+
+    return result;
+  }
+
+  /**
+   * Stream crew execution events as an async generator.
+   */
+  async *executeCrewStream(
+    crew: CrewDefinition,
+    task: Task,
+  ): AsyncGenerator<CrewStreamEvent, CrewResult, undefined> {
+    if (!this.initialized) {
+      await this.initialize();
+    }
+
+    const enrichedTask = await this.enrichTaskWithMemory(task);
+    const envelope = this.budget.createEnvelope(crew.budget ?? 'high');
+    const traceId = generateId('trace');
+    this.tracer.createTrace(traceId, task.id, envelope.envelope);
+
+    const crewOrchestrator = new CrewOrchestrator(
+      this.planner,
+      this.budget,
+      this.router,
+      this.tracer,
+      this.tools,
+      this.providers,
+      this.memory,
+      this.config.get('energy'),
+      this.config.get('routing'),
+      this.constitution,
+    );
+
+    const stream = crewOrchestrator.executeCrewStream(crew, enrichedTask, envelope, traceId);
+    let result: CrewResult | undefined;
+
+    while (true) {
+      const { value, done } = await stream.next();
+      if (done) {
+        result = value;
+        break;
+      }
+      yield value;
+    }
+
+    if (result && result.agentResults.length > 0) {
+      const syntheticTaskResult: TaskResult = {
+        id: result.id,
+        taskId: task.id,
+        traceId,
+        status: result.status === 'completed' ? 'completed' : 'failed',
+        result: result.result,
+        stepResults: result.agentResults.flatMap(ar => ar.taskResult.stepResults),
+        budgetUsed: result.budgetUsed,
+        trace: result.trace,
+        completedAt: result.completedAt,
+        error: result.error,
+      };
+      await this.learnFromResult(task, syntheticTaskResult);
+    }
+
+    return result!;
   }
 
   registerTool(tool: ToolDefinition): void {

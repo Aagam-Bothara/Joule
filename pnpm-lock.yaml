@@ -173,6 +173,9 @@ importers:
       '@joule/store':
         specifier: workspace:*
         version: link:../store
+      '@joule/tools':
+        specifier: workspace:*
+        version: link:../tools
       hono:
         specifier: ^4.7.0
         version: 4.12.0

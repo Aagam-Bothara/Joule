@@ -138,6 +138,33 @@ export class ToolRegistry {
     }
   }
 
+  /**
+   * Create a new ToolRegistry containing only the specified tools.
+   * Used for per-agent tool isolation in multi-agent crews.
+   * The returned registry shares the same ConstitutionEnforcer.
+   */
+  createFiltered(allowedTools?: string[]): ToolRegistry {
+    const filtered = new ToolRegistry();
+    if (this.constitution) {
+      filtered.setConstitution(this.constitution);
+    }
+
+    if (!allowedTools || allowedTools.length === 0) {
+      for (const [, registered] of this.tools) {
+        filtered.register(registered.definition, registered.source);
+      }
+    } else {
+      for (const toolName of allowedTools) {
+        const registered = this.tools.get(toolName);
+        if (registered) {
+          filtered.register(registered.definition, registered.source);
+        }
+      }
+    }
+
+    return filtered;
+  }
+
   unregister(name: string): boolean {
     return this.tools.delete(name);
   }

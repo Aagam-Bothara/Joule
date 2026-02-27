@@ -42,5 +42,28 @@ export {
   osClipboardTool,
   configureOsAutomation,
 } from './builtin/os-automation.js';
+export {
+  canvasRenderTool,
+  canvasChartTool,
+  canvasTableTool,
+  canvasUpdateTool,
+  canvasCodeTool,
+  getArtifact,
+  getArtifactVersion,
+  listArtifacts,
+} from './builtin/canvas.js';
+export type { CanvasArtifact } from './builtin/canvas.js';
+export {
+  configureGoogle,
+  gmailSearchTool,
+  gmailReadTool,
+  gmailSendTool,
+  gmailModifyTool,
+  gmailDraftTool,
+  calendarListTool,
+  calendarCreateTool,
+  calendarUpdateTool,
+  calendarDeleteTool,
+} from './builtin/google-workspace.js';
 export { McpClient, type McpServerConfig, jsonSchemaToZod, mcpToolToJouleToolDefinition } from './mcp/index.js';
 export { PluginManager } from './plugin-manager.js';

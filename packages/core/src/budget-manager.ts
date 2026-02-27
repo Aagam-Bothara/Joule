@@ -197,10 +197,10 @@ export class BudgetManager {
 
     const subEnvelope: BudgetEnvelope = {
       maxTokens: Math.floor(remaining.tokensRemaining * clampedShare),
-      maxToolCalls: Math.floor(remaining.toolCallsRemaining * clampedShare),
+      maxToolCalls: remaining.toolCallsRemaining,  // Not split — each agent independently decides tool usage
       maxEscalations: Math.max(1, Math.floor(remaining.escalationsRemaining * clampedShare)),
       costCeilingUsd: remaining.costRemaining * clampedShare,
-      maxLatencyMs: remaining.latencyRemaining * clampedShare,
+      maxLatencyMs: remaining.latencyRemaining,     // Not split — wall-clock time, each agent needs full duration
       maxEnergyWh: parent.envelope.maxEnergyWh !== undefined
         ? (remaining.energyRemaining ?? 0) * clampedShare
         : undefined,

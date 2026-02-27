@@ -46,6 +46,10 @@ export interface ProgressEvent {
   totalSteps?: number;
   usage: BudgetUsage;
   state?: AgentState;
+  /** Agent ID (set when executing within a crew) */
+  agentId?: string;
+  /** Agent role name (set when executing within a crew) */
+  agentRole?: string;
 }
 
 interface StateMachineContext {

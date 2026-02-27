@@ -1,0 +1,36 @@
+{
+  "name": "multi-task-demo",
+  "description": "3 agents working in parallel: one plays a song on YouTube, one creates a PowerPoint, one writes an Excel spreadsheet",
+  "strategy": "parallel",
+  "agents": [
+    {
+      "id": "youtube_dj",
+      "role": "YouTube DJ",
+      "instructions": "You are a YouTube DJ agent. Your ONLY task is to play a popular song on YouTube. Steps: 1) Use browser_navigate to go to https://www.youtube.com 2) Use browser_type to search for 'Shape of You Ed Sheeran official video' in the search box (selector: input#search or input[name=search_query]) and submit 3) Wait a moment, then use browser_click to click the first video result (selector: ytd-video-renderer a#video-title or a.ytd-video-renderer) 4) The video should start playing. Take a browser_screenshot to confirm. Do NOT use any other tools. Be direct and fast.",
+      "allowedTools": ["browser_navigate", "browser_screenshot", "browser_click", "browser_type", "browser_wait_and_click", "browser_observe", "browser_act", "browser_snapshot"],
+      "budgetShare": 0.35,
+      "maxRetries": 2,
+      "retryDelayMs": 1000
+    },
+    {
+      "id": "ppt_creator",
+      "role": "PowerPoint Creator",
+      "instructions": "You are a PowerPoint presentation creator. Your task is to create a simple 3-slide presentation about 'AI in 2026'. Steps: 1) Use os_open to launch PowerPoint (target: 'powerpnt'). 2) Wait for it to open, then use os_keyboard to interact: click on 'Blank Presentation' if prompted. 3) Type a title 'AI in 2026 - Key Trends' on the first slide using os_keyboard with action 'type'. 4) Use os_keyboard with hotkey Ctrl+M to add a new slide, then type content about 'Large Language Models'. 5) Add one more slide with Ctrl+M about 'AI Agents'. 6) Save the file with Ctrl+S, type the filename 'AI_2026_Presentation' and press Enter. 7) Take an os_screenshot to confirm. Be direct and fast.",
+      "allowedTools": ["os_open", "os_keyboard", "os_mouse", "os_screenshot", "os_window", "os_clipboard"],
+      "budgetShare": 0.35,
+      "maxRetries": 2,
+      "retryDelayMs": 1000
+    },
+    {
+      "id": "excel_writer",
+      "role": "Excel Writer",
+      "instructions": "You are an Excel spreadsheet agent. Your task is to create a simple sales data spreadsheet. Steps: 1) Use os_open to launch Excel (target: 'excel'). 2) Wait for it to open, then click on 'Blank workbook' if prompted. 3) Use os_keyboard to type headers: Type 'Product' then press Tab, type 'Q1 Sales' then press Tab, type 'Q2 Sales' then press Enter. 4) Type data rows: 'Widget A', Tab, '15000', Tab, '18000', Enter. Then 'Widget B', Tab, '22000', Tab, '25000', Enter. Then 'Widget C', Tab, '8000', Tab, '12000', Enter. 5) Save with Ctrl+S, type filename 'Sales_Report_2026' and press Enter. 6) Take an os_screenshot to confirm. Be direct and fast.",
+      "allowedTools": ["os_open", "os_keyboard", "os_mouse", "os_screenshot", "os_window", "os_clipboard"],
+      "budgetShare": 0.3,
+      "maxRetries": 2,
+      "retryDelayMs": 1000
+    }
+  ],
+  "budget": "high",
+  "aggregation": "concat"
+}

@@ -1,6 +1,8 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useTaskStream } from '../hooks/useTaskStream.ts';
 import { StreamOutput } from '../components/StreamOutput.tsx';
+import { CanvasViewer } from '../components/CanvasViewer.tsx';
+import { fetchArtifactHtml } from '../api/client.ts';
 
 const styles = {
   title: { fontSize: 24, fontWeight: 700, marginBottom: 24 } as React.CSSProperties,
@@ -22,6 +24,27 @@ export function LiveStream() {
   const [description, setDescription] = useState('');
   const [budget, setBudget] = useState('medium');
   const { chunks, fullText, progress, result, streaming, error, startStream, stopStream } = useTaskStream();
+  const [canvasArtifacts, setCanvasArtifacts] = useState<Array<{ id: string; title: string; html: string }>>([]);
+
+  // Detect canvas artifacts from step results when task completes
+  useEffect(() => {
+    if (!result?.stepResults) return;
+    const artifactIds = result.stepResults
+      .filter((s: any) => s.toolName?.startsWith('canvas_') && s.output?.artifactId)
+      .map((s: any) => s.output.artifactId as string);
+
+    const unique = [...new Set(artifactIds)];
+    if (unique.length === 0) return;
+
+    Promise.all(unique.map(async (id) => {
+      try {
+        const html = await fetchArtifactHtml(id);
+        return { id, title: result.stepResults.find((s: any) => s.output?.artifactId === id)?.output?.title || 'Canvas', html };
+      } catch { return null; }
+    })).then(results => {
+      setCanvasArtifacts(results.filter(Boolean) as any);
+    });
+  }, [result]);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -80,6 +103,10 @@ export function LiveStream() {
       {(streaming || fullText) && (
         <StreamOutput text={fullText} streaming={streaming} />
       )}
+
+      {canvasArtifacts.map(a => (
+        <CanvasViewer key={a.id} html={a.html} title={a.title} artifactId={a.id} />
+      ))}
 
       {result && (
         <div style={styles.resultSection}>

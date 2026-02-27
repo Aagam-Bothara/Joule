@@ -1,0 +1,39 @@
+{
+  "name": "content-pipeline",
+  "description": "A 3-agent content creation pipeline: research → write → review",
+  "strategy": "sequential",
+  "agents": [
+    {
+      "id": "researcher",
+      "role": "Research Analyst",
+      "instructions": "You are a thorough research analyst. Gather key facts, statistics, and insights about the given topic using your knowledge. Output a structured research brief with bullet points covering the most important aspects.",
+      "allowedTools": ["memory_put", "memory_get"],
+      "budgetShare": 0.3,
+      "memoryMode": "shared",
+      "maxRetries": 1,
+      "retryDelayMs": 500
+    },
+    {
+      "id": "writer",
+      "role": "Content Writer",
+      "instructions": "You are a skilled content writer. Using the research provided by the Research Analyst (available in the context from other agents), write a clear, engaging, and well-structured article. Use headers, bullet points, and concrete examples.",
+      "allowedTools": ["memory_put", "memory_get"],
+      "budgetShare": 0.4,
+      "memoryMode": "shared",
+      "maxRetries": 1,
+      "retryDelayMs": 500
+    },
+    {
+      "id": "reviewer",
+      "role": "Quality Reviewer",
+      "instructions": "You are a meticulous editor and reviewer. Review the article written by the Content Writer (available in the context from other agents). Check for accuracy, clarity, grammar, and completeness. Provide a final polished version with any corrections noted.",
+      "allowedTools": ["memory_put", "memory_get"],
+      "budgetShare": 0.3,
+      "memoryMode": "shared",
+      "maxRetries": 1,
+      "retryDelayMs": 500
+    }
+  ],
+  "budget": "high",
+  "aggregation": "last"
+}

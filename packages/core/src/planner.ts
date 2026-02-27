@@ -21,6 +21,8 @@ import type { ConstitutionEnforcer } from './constitution.js';
 
 export interface PlannerOptions {
   constitution?: ConstitutionEnforcer;
+  agentRole?: string;
+  agentInstructions?: string;
 }
 
 export interface ExecutionPlan {
@@ -163,6 +165,37 @@ Example — "Switch to Chrome and copy the URL":
   {"description": "Read the clipboard content", "toolName": "os_clipboard", "toolArgs": {"action": "read"}}
 ]}
 
+CANVAS / VISUAL OUTPUT:
+- When the user asks to SHOW, DISPLAY, VISUALIZE, RENDER, or CREATE a visual, prefer canvas tools
+- canvas_render: Custom HTML/CSS/JS — interactive UIs, dashboards, forms
+- canvas_chart: Charts (bar, line, pie, doughnut) — supports multi-dataset via datasets[] parameter
+- canvas_table: Styled tables — supports sorting (sortable:true), search/filter (searchable:true), column alignment
+- canvas_update: Partially update an existing artifact (just CSS, JS, or HTML) without full rewrite
+- canvas_code: Syntax-highlighted code display with line numbers and line highlighting
+- Use canvas_code for code snippets >10 lines, canvas_chart for data, canvas_table for structured data
+
+Example — "Show me a comparison chart of sales vs costs":
+{"steps": [
+  {"description": "Render multi-series bar chart", "toolName": "canvas_chart", "toolArgs": {"type": "bar", "title": "Sales vs Costs", "labels": ["Q1", "Q2", "Q3"], "datasets": [{"label": "Sales", "values": [1200, 1800, 1500]}, {"label": "Costs", "values": [800, 1000, 900]}]}}
+]}
+
+EMAIL & CALENDAR (Gmail + Google Calendar):
+- When the user asks about email, inbox, or messages, use gmail_* tools
+- When the user asks about schedule, meetings, events, or calendar, use calendar_* tools
+- gmail_send and calendar_create require confirmation — always confirm before sending
+- Use gmail_search with Gmail query syntax (e.g., "is:unread", "from:boss@company.com")
+- IMPORTANT: Prefer gmail_* tools over browser-based Gmail when available — they are faster and cheaper
+
+Example — "Check my unread emails":
+{"steps": [
+  {"description": "Search for unread emails", "toolName": "gmail_search", "toolArgs": {"query": "is:unread", "maxResults": 10}}
+]}
+
+Example — "What meetings do I have tomorrow":
+{"steps": [
+  {"description": "List tomorrow's calendar events", "toolName": "calendar_list", "toolArgs": {"timeMin": "2026-02-27T00:00:00Z", "timeMax": "2026-02-27T23:59:59Z"}}
+]}
+
 Available tools:
 `;
 
@@ -239,6 +272,8 @@ Issues should describe specific problems (e.g., "Step 2 uses wrong selector", "M
 
 export class Planner {
   private constitution?: ConstitutionEnforcer;
+  private agentRole?: string;
+  private agentInstructions?: string;
 
   constructor(
     private router: ModelRouter,
@@ -249,6 +284,8 @@ export class Planner {
     options?: PlannerOptions,
   ) {
     this.constitution = options?.constitution;
+    this.agentRole = options?.agentRole;
+    this.agentInstructions = options?.agentInstructions;
   }
 
   /**
@@ -515,6 +552,11 @@ Available tools: ${this.tools.listNames().join(', ')}`;
         .join('\n');
 
       let systemPrompt = PLANNER_SYSTEM_PROMPT_PREFIX + toolDescriptions;
+
+      // Inject agent role context for multi-agent crews
+      if (this.agentRole) {
+        systemPrompt = `[AGENT ROLE: ${this.agentRole}]\n[AGENT INSTRUCTIONS: ${this.agentInstructions ?? ''}]\n\n${systemPrompt}`;
+      }
 
       // Inject failure context from learned patterns
       if (failureContext) {

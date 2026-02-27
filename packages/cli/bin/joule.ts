@@ -12,6 +12,8 @@ import { channelsCommand } from '../src/commands/channels.js';
 import { scheduleCommand } from '../src/commands/schedule.js';
 import { voiceCommand } from '../src/commands/voice.js';
 import { doCommand } from '../src/commands/do.js';
+import { authCommand } from '../src/commands/auth.js';
+import { crewCommand } from '../src/commands/crew.js';
 
 const program = new Command();
 
@@ -32,5 +34,7 @@ program.addCommand(channelsCommand);
 program.addCommand(scheduleCommand);
 program.addCommand(voiceCommand);
 program.addCommand(doCommand);
+program.addCommand(authCommand);
+program.addCommand(crewCommand);
 
 program.parse();

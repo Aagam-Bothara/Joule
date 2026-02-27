@@ -45,6 +45,21 @@ import {
   osOpenTool,
   osClipboardTool,
   configureOsAutomation,
+  canvasRenderTool,
+  canvasChartTool,
+  canvasTableTool,
+  canvasUpdateTool,
+  canvasCodeTool,
+  configureGoogle,
+  gmailSearchTool,
+  gmailReadTool,
+  gmailSendTool,
+  gmailModifyTool,
+  gmailDraftTool,
+  calendarListTool,
+  calendarCreateTool,
+  calendarUpdateTool,
+  calendarDeleteTool,
   McpClient,
 } from '@joule/tools';
 
@@ -105,6 +120,13 @@ export async function setupJoule(joule: Joule): Promise<void> {
     joule.tools.register(memoryPreferencesTool, 'builtin');
     joule.tools.register(memoryStatsTool, 'builtin');
 
+    // Register canvas / visual output tools
+    joule.tools.register(canvasRenderTool, 'builtin');
+    joule.tools.register(canvasChartTool, 'builtin');
+    joule.tools.register(canvasTableTool, 'builtin');
+    joule.tools.register(canvasUpdateTool, 'builtin');
+    joule.tools.register(canvasCodeTool, 'builtin');
+
     // Register CAPTCHA solving tools
     joule.tools.register(captchaSolveImageTool, 'builtin');
     joule.tools.register(captchaSolveMathTool, 'builtin');
@@ -160,6 +182,25 @@ export async function setupJoule(joule: Joule): Promise<void> {
       joule.tools.register(iotMqttSubscribeTool, 'builtin');
     } catch {
       // MQTT not installed — MQTT tools unavailable
+    }
+
+    // Register Google Workspace tools (Gmail + Calendar) if OAuth configured
+    const googleOAuth = config.googleOAuth;
+    if (googleOAuth?.clientId && googleOAuth?.clientSecret && googleOAuth?.refreshToken) {
+      configureGoogle({
+        clientId: googleOAuth.clientId,
+        clientSecret: googleOAuth.clientSecret,
+        refreshToken: googleOAuth.refreshToken,
+      });
+      joule.tools.register(gmailSearchTool, 'builtin');
+      joule.tools.register(gmailReadTool, 'builtin');
+      joule.tools.register(gmailSendTool, 'builtin');
+      joule.tools.register(gmailModifyTool, 'builtin');
+      joule.tools.register(gmailDraftTool, 'builtin');
+      joule.tools.register(calendarListTool, 'builtin');
+      joule.tools.register(calendarCreateTool, 'builtin');
+      joule.tools.register(calendarUpdateTool, 'builtin');
+      joule.tools.register(calendarDeleteTool, 'builtin');
     }
   }
 

@@ -172,6 +172,13 @@ export interface McpConfig {
   servers: Record<string, McpServerConfigEntry>;
 }
 
+export interface GoogleOAuthConfig {
+  clientId: string;
+  clientSecret: string;
+  refreshToken?: string;
+  redirectUri?: string;
+}
+
 export interface BrowserConfig {
   headless?: boolean;
   screenshotDir?: string;
@@ -197,4 +204,5 @@ export interface JouleConfig {
   proactive?: ProactiveConfig;
   osAutomation?: OsAutomationConfig;
   constitution?: Constitution;
+  googleOAuth?: GoogleOAuthConfig;
 }

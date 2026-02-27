@@ -55,3 +55,15 @@ export async function fetchMetrics() {
   if (!res.ok) throw new Error(`Failed to fetch metrics: ${res.statusText}`);
   return res.json();
 }
+
+export async function fetchArtifacts() {
+  const res = await fetch(`${BASE_URL}/artifacts`);
+  if (!res.ok) throw new Error(`Failed to fetch artifacts: ${res.statusText}`);
+  return res.json();
+}
+
+export async function fetchArtifactHtml(id: string): Promise<string> {
+  const res = await fetch(`${BASE_URL}/artifacts/${id}`);
+  if (!res.ok) throw new Error(`Failed to fetch artifact: ${res.statusText}`);
+  return res.text();
+}

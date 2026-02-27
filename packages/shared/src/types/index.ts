@@ -12,3 +12,4 @@ export * from './plugin.js';
 export * from './scheduler.js';
 export * from './voice.js';
 export * from './constitution.js';
+export * from './crew.js';

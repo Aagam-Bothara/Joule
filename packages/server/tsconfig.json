@@ -8,6 +8,7 @@
   "references": [
     { "path": "../shared" },
     { "path": "../store" },
-    { "path": "../core" }
+    { "path": "../core" },
+    { "path": "../tools" }
   ]
 }

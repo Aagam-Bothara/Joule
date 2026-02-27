@@ -7,10 +7,12 @@ import { toolsRoutes } from './routes/tools.js';
 import { healthRoutes } from './routes/health.js';
 import { authRoutes } from './routes/auth.js';
 import { usersRoutes } from './routes/users.js';
+import { artifactsRoutes } from './routes/artifacts.js';
 import { UserStore } from './auth/user-store.js';
 import { authMiddleware, adminMiddleware, rateLimitMiddleware } from './auth/middleware.js';
 import type { Joule } from '@joule/core';
 import type { AuthConfig } from '@joule/shared';
+import { getArtifact, listArtifacts, getArtifactVersion } from '@joule/tools';
 import { existsSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -96,6 +98,7 @@ export async function createApp(joule: Joule) {
   app.route('/tasks', tasksRoutes(joule, joule.store?.tasks));
   app.route('/tools', toolsRoutes(joule));
   app.route('/health', healthRoutes(joule));
+  app.route('/artifacts', artifactsRoutes(getArtifact, listArtifacts, getArtifactVersion));
 
   // Dashboard static files
   const dashboardDir = findDashboardDir();
@@ -126,6 +129,8 @@ export async function startServer(joule: Joule): Promise<void> {
     console.log(`  GET    /tasks/:id/trace - Get execution trace`);
     console.log(`  GET    /tools          - List available tools`);
     console.log(`  GET    /health         - Health check`);
+    console.log(`  GET    /artifacts      - List canvas artifacts`);
+    console.log(`  GET    /artifacts/:id  - Get canvas artifact HTML`);
     if (authConfig?.enabled) {
       console.log(`  POST   /auth/login     - Login`);
       console.log(`  POST   /auth/register  - Register`);
