@@ -67,3 +67,5 @@ export {
 } from './builtin/google-workspace.js';
 export { McpClient, type McpServerConfig, jsonSchemaToZod, mcpToolToJouleToolDefinition } from './mcp/index.js';
 export { PluginManager } from './plugin-manager.js';
+export { SiteKnowledgeRegistry, getSiteKnowledgeRegistry } from './site-knowledge/index.js';
+export type { SiteKnowledge, SiteAction, SelectorInfo } from './site-knowledge/index.js';

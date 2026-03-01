@@ -6,6 +6,7 @@ import {
   type BudgetPresetName,
   type CrewDefinition,
 } from '@joule/shared';
+import { getSiteKnowledgeRegistry } from '@joule/tools';
 import { Joule } from '@joule/core';
 import type { ProgressCallback } from '@joule/core';
 import { formatProgressLine, formatBudgetSummary, formatEfficiencyReport } from '../output/formatter.js';
@@ -174,5 +175,63 @@ crewCommand
       if (agent.maxRetries) console.log(`    Retry: ${agent.maxRetries}x (${agent.retryDelayMs ?? 1000}ms base)`);
       if (agent.maxIterations) console.log(`    Max Iterations: ${agent.maxIterations}`);
       if (agent.outputSchema) console.log(`    Output Schema: ${JSON.stringify(Object.keys((agent.outputSchema as any).properties ?? {}))}`);
+    }
+  });
+
+// --- joule crew sites ---
+crewCommand
+  .command('sites')
+  .description('List pre-loaded site knowledge (the "Bible" of common websites)')
+  .option('-s, --site <id>', 'Show detailed knowledge for a specific site')
+  .action((options: { site?: string }) => {
+    const registry = getSiteKnowledgeRegistry();
+
+    if (options.site) {
+      const site = registry.get(options.site);
+      if (!site) {
+        console.error(`Unknown site: ${options.site}`);
+        console.error(`Available: ${registry.listIds().join(', ')}`);
+        process.exit(1);
+      }
+
+      console.log(`\n=== ${site.name} ===`);
+      console.log(`URL: ${site.baseUrl}`);
+      console.log(`Patterns: ${site.urlPatterns.join(', ')}`);
+      console.log(`Last verified: ${site.lastVerified}`);
+
+      console.log('\nSelectors:');
+      for (const [name, sel] of Object.entries(site.selectors)) {
+        console.log(`  ${name}: ${sel.primary}`);
+        if (sel.fallbacks?.length) {
+          console.log(`    Fallbacks: ${sel.fallbacks.join(', ')}`);
+        }
+        console.log(`    ${sel.description}`);
+      }
+
+      console.log('\nActions:');
+      for (const action of site.actions) {
+        console.log(`  ${action.name}:`);
+        action.steps.forEach((step, i) => console.log(`    ${i + 1}. ${step}`));
+        if (action.tips?.length) {
+          action.tips.forEach(tip => console.log(`    Tip: ${tip}`));
+        }
+      }
+
+      if (site.tips.length > 0) {
+        console.log('\nTips:');
+        site.tips.forEach(tip => console.log(`  - ${tip}`));
+      }
+
+      if (site.gotchas?.length) {
+        console.log('\nGotchas:');
+        site.gotchas.forEach(g => console.log(`  - ${g}`));
+      }
+    } else {
+      const sites = registry.listAll();
+      console.log(`\n=== Site Knowledge Bible (${sites.length} sites) ===\n`);
+      for (const site of sites) {
+        console.log(`  ${site.id.padEnd(12)} ${site.name.padEnd(16)} ${site.baseUrl.padEnd(30)} ${site.actionCount} actions`);
+      }
+      console.log(`\nUse: joule crew sites -s <id> for details`);
     }
   });

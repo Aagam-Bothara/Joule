@@ -206,6 +206,7 @@ export class CrewOrchestrator {
     let crewResult: CrewResult | undefined;
     let crewDone = false;
 
+    let crewError: string | undefined;
     crewPromise.then(result => {
       crewResult = result;
       crewDone = true;
@@ -213,7 +214,8 @@ export class CrewOrchestrator {
         resolveWaiting();
         resolveWaiting = undefined;
       }
-    }).catch(() => {
+    }).catch((err) => {
+      crewError = err instanceof Error ? err.message : String(err);
       crewDone = true;
       if (resolveWaiting) {
         resolveWaiting();
@@ -252,7 +254,7 @@ export class CrewOrchestrator {
       return crewResult;
     }
 
-    // Fallback: crew failed entirely
+    // Fallback: crew failed entirely — preserve the actual error
     const failedResult: CrewResult = {
       id: generateId('crew-result'),
       crewName: crew.name,
@@ -262,7 +264,7 @@ export class CrewOrchestrator {
       trace: this.tracer.getTrace(traceId, this.budget.getUsage(parentEnvelope)),
       blackboard: { entries: {} },
       completedAt: isoNow(),
-      error: 'Crew execution failed',
+      error: crewError ?? 'Crew execution failed',
     };
 
     yield {
@@ -435,14 +437,17 @@ export class CrewOrchestrator {
     }
 
     // Phase 2: Worker execution in manager-specified order
-    const workerMap = new Map(workers.map(w => [w.id, w]));
-    for (const workerId of delegationOrder) {
-      const worker = workerMap.get(workerId);
-      if (!worker) continue;
+    // Workers get their own sub-envelopes from the parent (not the full parent)
+    const workerAgents = delegationOrder
+      .map(id => workers.find(w => w.id === id))
+      .filter((w): w is AgentDefinition => !!w);
+    const workerEnvelopes = this.allocateBudgets(workerAgents, parentEnvelope);
 
+    for (const worker of workerAgents) {
       const workerSpanId = this.tracer.startSpan(traceId, `agent-${worker.id}`);
-      const workerResult = await this.executeAgent(
-        worker, task, parentEnvelope, traceId, blackboard, onProgress,
+      const workerEnvelope = workerEnvelopes.get(worker.id)!;
+      const workerResult = await this.executeAgentWithRetry(
+        worker, task, workerEnvelope, traceId, blackboard, onProgress,
       );
       results.push(workerResult);
       this.writeToBlackboard(blackboard, worker.id, workerResult.taskResult.result);
@@ -604,6 +609,12 @@ export class CrewOrchestrator {
         if (agent.outputSchema && !this.validateAgentOutput(result.taskResult.result, agent.outputSchema)) {
           lastResult = result;
           if (attempt < maxRetries) {
+            // Enrich the task description with validation feedback so the agent knows what went wrong
+            const validationErrors = this.describeValidationErrors(result.taskResult.result, agent.outputSchema);
+            task = {
+              ...task,
+              description: `${task.description}\n\n[RETRY: Your previous output failed schema validation: ${validationErrors}. Please fix your output to match the required schema.]`,
+            };
             await new Promise(r => setTimeout(r, baseDelay * Math.pow(2, attempt)));
             continue;
           }
@@ -1020,17 +1031,86 @@ export class CrewOrchestrator {
   // ---------------------------------------------------------------------------
 
   /**
-   * Validate agent output against a JSON schema (lightweight key-existence check).
+   * Validate agent output against a JSON schema.
+   * Checks key existence, type conformance, and required fields.
    */
   private validateAgentOutput(output: string | undefined, schema: Record<string, unknown>): boolean {
     if (!output) return false;
     try {
       const parsed = JSON.parse(output);
-      const properties = schema.properties as Record<string, unknown> | undefined;
+      if (typeof parsed !== 'object' || parsed === null) return false;
+
+      const properties = schema.properties as Record<string, Record<string, unknown>> | undefined;
       const requiredKeys = (schema.required as string[]) ?? Object.keys(properties ?? {});
-      return requiredKeys.every(key => key in parsed);
+
+      // Check all required keys exist
+      if (!requiredKeys.every(key => key in parsed)) return false;
+
+      // Type-check each property if types are declared
+      if (properties) {
+        for (const [key, propSchema] of Object.entries(properties)) {
+          if (!(key in parsed)) continue;
+          const value = parsed[key];
+          const expectedType = propSchema.type as string | undefined;
+          if (!expectedType) continue;
+
+          if (expectedType === 'string' && typeof value !== 'string') return false;
+          if (expectedType === 'number' && typeof value !== 'number') return false;
+          if (expectedType === 'integer' && (typeof value !== 'number' || !Number.isInteger(value))) return false;
+          if (expectedType === 'boolean' && typeof value !== 'boolean') return false;
+          if (expectedType === 'array' && !Array.isArray(value)) return false;
+          if (expectedType === 'object' && (typeof value !== 'object' || value === null || Array.isArray(value))) return false;
+
+          // Enum check
+          if (propSchema.enum && Array.isArray(propSchema.enum)) {
+            if (!propSchema.enum.includes(value)) return false;
+          }
+        }
+      }
+
+      return true;
     } catch {
       return false;
+    }
+  }
+
+  /**
+   * Describe what's wrong with the output for retry feedback.
+   */
+  private describeValidationErrors(output: string | undefined, schema: Record<string, unknown>): string {
+    if (!output) return 'Output was empty';
+    try {
+      const parsed = JSON.parse(output);
+      if (typeof parsed !== 'object' || parsed === null) return 'Output must be a JSON object';
+
+      const properties = schema.properties as Record<string, Record<string, unknown>> | undefined;
+      const requiredKeys = (schema.required as string[]) ?? Object.keys(properties ?? {});
+      const errors: string[] = [];
+
+      // Check missing keys
+      for (const key of requiredKeys) {
+        if (!(key in parsed)) errors.push(`Missing required key: "${key}"`);
+      }
+
+      // Check types
+      if (properties) {
+        for (const [key, propSchema] of Object.entries(properties)) {
+          if (!(key in parsed)) continue;
+          const expectedType = propSchema.type as string | undefined;
+          if (!expectedType) continue;
+          const actualType = Array.isArray(parsed[key]) ? 'array' : typeof parsed[key];
+          if (expectedType !== actualType && !(expectedType === 'integer' && actualType === 'number')) {
+            errors.push(`"${key}" should be ${expectedType} but got ${actualType}`);
+          }
+          if (propSchema.enum && Array.isArray(propSchema.enum) && !propSchema.enum.includes(parsed[key])) {
+            errors.push(`"${key}" must be one of: ${propSchema.enum.join(', ')}`);
+          }
+        }
+      }
+
+      return errors.length > 0 ? errors.join('; ') : 'Unknown validation error';
+    } catch {
+      return 'Output is not valid JSON';
     }
   }
 

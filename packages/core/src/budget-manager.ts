@@ -238,4 +238,24 @@ export class BudgetManager {
       usage: this.getUsage(instance),
     };
   }
+
+  /**
+   * Clean up a budget envelope and all its children.
+   * Call this after crew execution to prevent memory leaks.
+   */
+  cleanup(instance: BudgetEnvelopeInstance): void {
+    // Find and clean up all children first
+    const childIds: string[] = [];
+    for (const [childId, parent] of this.parentMap.entries()) {
+      if (parent.id === instance.id) {
+        childIds.push(childId);
+      }
+    }
+    for (const childId of childIds) {
+      const child = this.envelopes.get(childId);
+      if (child) this.cleanup(child);
+    }
+    this.envelopes.delete(instance.id);
+    this.parentMap.delete(instance.id);
+  }
 }
