@@ -444,10 +444,10 @@ This is roughly where we're headed. Priorities might shift based on what people 
 
 ### v0.6 — Making it nicer to use
 - [x] `joule init` — interactive project scaffolding with config generation
-- [ ] Hot reload for config changes (no restart)
-- [ ] Hosted skill registry — install skills from npm or GitHub
-- [ ] Better error messages — tell people what went wrong *and how to fix it*
-- [ ] OpenAPI spec generation from tool schemas
+- [x] Hot reload for config changes (no restart)
+- [x] Hosted skill registry — install skills from npm or GitHub
+- [x] Better error messages — tell people what went wrong *and how to fix it*
+- [x] OpenAPI spec generation from tool schemas
 
 ### v0.7 — Making it smarter
 - [ ] Real embeddings — optional integration with local embedding models like `nomic-embed-text`

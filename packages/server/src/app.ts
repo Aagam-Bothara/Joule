@@ -8,6 +8,7 @@ import { healthRoutes } from './routes/health.js';
 import { authRoutes } from './routes/auth.js';
 import { usersRoutes } from './routes/users.js';
 import { artifactsRoutes } from './routes/artifacts.js';
+import { openApiRoutes } from './routes/openapi.js';
 import { UserStore } from './auth/user-store.js';
 import { authMiddleware, adminMiddleware, rateLimitMiddleware } from './auth/middleware.js';
 import { type Joule, Logger } from '@joule/core';
@@ -102,6 +103,7 @@ export async function createApp(joule: Joule) {
   app.route('/tools', toolsRoutes(joule));
   app.route('/health', healthRoutes(joule));
   app.route('/artifacts', artifactsRoutes(getArtifact, listArtifacts, getArtifactVersion));
+  app.route('/openapi', openApiRoutes(joule));
 
   // Dashboard static files
   const dashboardDir = findDashboardDir();
@@ -135,6 +137,7 @@ export async function startServer(joule: Joule): Promise<void> {
     console.log(`  GET    /health         - Health check`);
     console.log(`  GET    /artifacts      - List canvas artifacts`);
     console.log(`  GET    /artifacts/:id  - Get canvas artifact HTML`);
+    console.log(`  GET    /openapi       - OpenAPI 3.1 spec (JSON)`);
     if (authConfig?.enabled) {
       console.log(`  POST   /auth/login     - Login`);
       console.log(`  POST   /auth/register  - Register`);

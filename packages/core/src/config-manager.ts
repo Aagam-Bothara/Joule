@@ -1,6 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import { resolve, dirname } from 'node:path';
-import { existsSync } from 'node:fs';
+import { existsSync, watch, type FSWatcher } from 'node:fs';
 import { parse as parseYaml } from 'yaml';
 import {
   type JouleConfig,
@@ -9,8 +9,14 @@ import {
   ConfigError,
 } from '@joule/shared';
 
+export type ConfigChangeListener = (config: JouleConfig, changedKeys: string[]) => void;
+
 export class ConfigManager {
   private config: JouleConfig = DEFAULT_CONFIG;
+  private configFilePath: string | null = null;
+  private watcher: FSWatcher | null = null;
+  private listeners: ConfigChangeListener[] = [];
+  private reloadDebounce: ReturnType<typeof setTimeout> | null = null;
 
   async load(options?: { configPath?: string }): Promise<JouleConfig> {
     // 1. Start with defaults
@@ -53,9 +59,79 @@ export class ConfigManager {
     ) as unknown as JouleConfig;
   }
 
+  /** Register a listener that fires when config reloads from disk. */
+  onChange(listener: ConfigChangeListener): void {
+    this.listeners.push(listener);
+  }
+
+  /** Start watching the config file for changes. Debounced to avoid rapid reloads. */
+  watch(): void {
+    if (this.watcher || !this.configFilePath) return;
+
+    try {
+      this.watcher = watch(this.configFilePath, () => {
+        // Debounce: editors often write files in multiple steps
+        if (this.reloadDebounce) clearTimeout(this.reloadDebounce);
+        this.reloadDebounce = setTimeout(() => this.reload(), 300);
+      });
+    } catch {
+      // Watch failed (unsupported FS, permission, etc.) — silently skip
+    }
+  }
+
+  /** Stop watching the config file. */
+  unwatch(): void {
+    if (this.watcher) {
+      this.watcher.close();
+      this.watcher = null;
+    }
+    if (this.reloadDebounce) {
+      clearTimeout(this.reloadDebounce);
+      this.reloadDebounce = null;
+    }
+  }
+
+  /** Reload config from disk, merge with env vars, validate, and notify listeners. */
+  async reload(): Promise<JouleConfig | null> {
+    if (!this.configFilePath) return null;
+
+    try {
+      const oldConfig = structuredClone(this.config);
+
+      let merged: Record<string, unknown> = structuredClone(DEFAULT_CONFIG) as unknown as Record<string, unknown>;
+      const fileConfig = await this.parseConfigFile(this.configFilePath);
+      merged = deepMerge(merged, fileConfig);
+      merged = deepMerge(merged, this.loadEnvVars());
+
+      const result = jouleConfigSchema.safeParse(merged);
+      if (!result.success) return null; // Invalid config — keep the old one
+
+      this.config = result.data as JouleConfig;
+
+      // Figure out which top-level keys changed
+      const changedKeys: string[] = [];
+      for (const key of Object.keys(this.config) as (keyof JouleConfig)[]) {
+        if (JSON.stringify(this.config[key]) !== JSON.stringify(oldConfig[key])) {
+          changedKeys.push(key);
+        }
+      }
+
+      if (changedKeys.length > 0) {
+        for (const listener of this.listeners) {
+          try { listener(this.config, changedKeys); } catch { /* listener error — skip */ }
+        }
+      }
+
+      return this.config;
+    } catch {
+      return null; // Reload failed — keep old config
+    }
+  }
+
   private async loadConfigFile(configPath?: string): Promise<Record<string, unknown> | null> {
     if (configPath) {
       if (existsSync(configPath)) {
+        this.configFilePath = resolve(configPath);
         return this.parseConfigFile(configPath);
       }
       return null;
@@ -69,6 +145,7 @@ export class ConfigManager {
       for (const name of names) {
         const p = resolve(dir, name);
         if (existsSync(p)) {
+          this.configFilePath = p;
           return this.parseConfigFile(p);
         }
       }

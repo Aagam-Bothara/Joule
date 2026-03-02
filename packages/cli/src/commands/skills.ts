@@ -51,15 +51,33 @@ skillsCommand
   });
 
 skillsCommand
-  .command('install <path>')
-  .description('Install a skill from a local markdown file')
-  .action((filePath: string) => {
+  .command('install <source>')
+  .description('Install a skill from a file, npm package, or URL')
+  .action(async (source: string) => {
     const registry = new SkillRegistry();
     registry.loadLocal();
 
-    const skill = registry.installFromFile(filePath);
+    let skill;
+
+    if (source.startsWith('http://') || source.startsWith('https://')) {
+      // URL — GitHub gist, raw file, etc.
+      console.log(`Fetching skill from ${source}...`);
+      skill = await registry.installFromUrl(source);
+    } else if (source.startsWith('joule-skill-') || source.startsWith('@')) {
+      // npm package
+      console.log(`Installing skill from npm: ${source}...`);
+      skill = registry.installFromNpm(source);
+    } else if (source.match(/^[\w-]+\/[\w.-]+$/) && !source.endsWith('.md')) {
+      // GitHub shorthand: user/repo
+      console.log(`Fetching skill from github.com/${source}...`);
+      skill = await registry.installFromUrl(source);
+    } else {
+      // Local file path
+      skill = registry.installFromFile(source);
+    }
+
     if (!skill) {
-      console.error('Failed to parse skill file. Ensure it has valid YAML frontmatter.');
+      console.error('Failed to install skill. Check that the source is valid and contains a skill with YAML frontmatter.');
       process.exitCode = 1;
       return;
     }
@@ -72,7 +90,7 @@ skillsCommand
       }
     }
 
-    console.log(`Installed skill: ${skill.name} v${skill.version}`);
+    console.log(`Installed skill: ${skill.name} v${skill.version} (source: ${skill.source})`);
   });
 
 skillsCommand

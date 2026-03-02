@@ -1,5 +1,6 @@
 import { Command } from 'commander';
 import { Joule } from '@joule/core';
+import { formatErrorForCli } from '@joule/shared';
 import { formatWh, formatCarbon } from '../output/formatter.js';
 import { setupJoule } from '../setup.js';
 
@@ -75,7 +76,7 @@ export const doCommand = new Command('do')
         }
       }
     } catch (err) {
-      console.error(`\nAgent error: ${err instanceof Error ? err.message : String(err)}`);
+      console.error(formatErrorForCli(err));
       process.exit(1);
     } finally {
       await joule.shutdown();

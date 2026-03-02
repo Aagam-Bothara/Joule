@@ -8,6 +8,7 @@
 import { readFileSync, writeFileSync, readdirSync, existsSync, mkdirSync, unlinkSync } from 'node:fs';
 import { join, basename, extname } from 'node:path';
 import { homedir } from 'node:os';
+import { execSync } from 'node:child_process';
 import type { SkillDefinition, AgentDefinition } from '@joule/shared';
 
 /** Default skills directory. */
@@ -162,6 +163,117 @@ ${description}
 
 Add your skill instructions here. This text will be injected into the agent's system prompt.
 `;
+  }
+
+  /**
+   * Install a skill from an npm package.
+   * Convention: packages named `joule-skill-*` should contain a skill.md at their root.
+   * Usage: installFromNpm('joule-skill-code-reviewer') or installFromNpm('@org/joule-skill-writer')
+   */
+  installFromNpm(packageName: string): SkillDefinition | null {
+    const tmpDir = join(this.skillsDir, '.tmp-npm');
+    try {
+      mkdirSync(tmpDir, { recursive: true });
+
+      // Use npm pack to download without installing globally
+      execSync(`npm pack ${packageName} --pack-destination "${tmpDir}"`, {
+        stdio: 'pipe',
+        timeout: 30_000,
+      });
+
+      // Find the downloaded tarball
+      const tarballs = readdirSync(tmpDir).filter(f => f.endsWith('.tgz'));
+      if (tarballs.length === 0) return null;
+
+      // Extract and find skill.md
+      const tarball = join(tmpDir, tarballs[0]);
+      execSync(`tar -xzf "${tarball}" -C "${tmpDir}"`, { stdio: 'pipe', timeout: 10_000 });
+
+      // npm pack extracts to a `package/` directory
+      const skillPath = join(tmpDir, 'package', 'skill.md');
+      if (!existsSync(skillPath)) {
+        // Also check for README.md with frontmatter as fallback
+        const readmePath = join(tmpDir, 'package', 'README.md');
+        if (!existsSync(readmePath)) return null;
+        return this.installFromFileWithSource(readmePath, 'npm');
+      }
+
+      return this.installFromFileWithSource(skillPath, 'npm');
+    } catch {
+      return null;
+    } finally {
+      // Clean up temp directory
+      try {
+        execSync(`rm -rf "${tmpDir}"`, { stdio: 'pipe' });
+      } catch {
+        // Best-effort cleanup
+      }
+    }
+  }
+
+  /**
+   * Install a skill from a GitHub gist or raw URL.
+   * Accepts:
+   *   - GitHub gist URL: https://gist.github.com/user/id
+   *   - GitHub raw file URL: https://raw.githubusercontent.com/...
+   *   - Any URL ending in .md
+   *   - GitHub shorthand: user/repo (looks for skill.md in repo root)
+   */
+  async installFromUrl(url: string): Promise<SkillDefinition | null> {
+    try {
+      let fetchUrl = url;
+
+      // GitHub gist — convert to raw URL
+      const gistMatch = url.match(/gist\.github\.com\/[\w-]+\/([a-f0-9]+)/);
+      if (gistMatch) {
+        fetchUrl = `https://gist.githubusercontent.com/${url.split('gist.github.com/')[1]}/raw`;
+      }
+
+      // GitHub shorthand: user/repo → raw skill.md from main branch
+      if (/^[\w-]+\/[\w.-]+$/.test(url) && !url.startsWith('http')) {
+        fetchUrl = `https://raw.githubusercontent.com/${url}/main/skill.md`;
+      }
+
+      const response = await fetch(fetchUrl);
+      if (!response.ok) return null;
+
+      const content = await response.text();
+      const filename = fetchUrl.split('/').pop() || 'skill.md';
+      const skill = this.parseSkillMarkdown(content, filename);
+      if (!skill) return null;
+
+      // Save to skills directory
+      if (!existsSync(this.skillsDir)) {
+        mkdirSync(this.skillsDir, { recursive: true });
+      }
+
+      skill.source = 'gist';
+      const targetPath = join(this.skillsDir, `${skill.name}.md`);
+      writeFileSync(targetPath, content, 'utf-8');
+
+      this.skills.set(skill.name, skill);
+      return skill;
+    } catch {
+      return null;
+    }
+  }
+
+  private installFromFileWithSource(filePath: string, source: SkillDefinition['source']): SkillDefinition | null {
+    const content = readFileSync(filePath, 'utf-8');
+    const skill = this.parseSkillMarkdown(content, basename(filePath));
+    if (!skill) return null;
+
+    skill.source = source;
+
+    if (!existsSync(this.skillsDir)) {
+      mkdirSync(this.skillsDir, { recursive: true });
+    }
+
+    const targetPath = join(this.skillsDir, `${skill.name}.md`);
+    writeFileSync(targetPath, content, 'utf-8');
+
+    this.skills.set(skill.name, skill);
+    return skill;
   }
 
   // ── Private helpers ──────────────────────────────────────────

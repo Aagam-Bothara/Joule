@@ -13,3 +13,4 @@ export {
 } from './errors.js';
 export type { BudgetDimension } from './errors.js';
 export { calculateEnergy, estimateEnergy, calculateCarbon, getEnergyEfficiency, buildEfficiencyReport } from './energy.js';
+export { getErrorHint, formatErrorForCli } from './error-hints.js';

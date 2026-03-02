@@ -4,6 +4,7 @@ import {
   BUDGET_PRESETS,
   type BudgetPresetName,
   type BudgetEnvelope,
+  formatErrorForCli,
 } from '@joule/shared';
 import { Joule } from '@joule/core';
 import type { ProgressCallback } from '@joule/core';
@@ -23,7 +24,9 @@ export const runCommand = new Command('run')
   .option('--energy', 'Show energy efficiency report')
   .option('--no-energy', 'Disable energy tracking')
   .action(async (description: string, options) => {
-    const joule = new Joule();
+    let joule: Joule | undefined;
+    try {
+    joule = new Joule();
     await joule.initialize();
     await setupJoule(joule);
 
@@ -110,5 +113,10 @@ export const runCommand = new Command('run')
       }
     }
 
-    await joule.shutdown();
+    } catch (err) {
+      console.error(formatErrorForCli(err));
+      process.exitCode = 1;
+    } finally {
+      if (joule) await joule.shutdown();
+    }
   });

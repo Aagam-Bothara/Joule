@@ -4,7 +4,7 @@ export { BudgetManager, type BudgetEnvelopeInstance } from './budget-manager.js'
 export { ModelRouter, type RoutingDecision, type RoutingPurpose, type RoutingContext } from './model-router.js';
 export { TraceLogger } from './trace-logger.js';
 export { ToolRegistry } from './tool-registry.js';
-export { ConfigManager } from './config-manager.js';
+export { ConfigManager, type ConfigChangeListener } from './config-manager.js';
 export { Planner, type ExecutionPlan, type PlanStep } from './planner.js';
 export type { ProgressCallback, ProgressEvent, StreamEvent } from './task-executor.js';
 export { SessionManager } from './session-manager.js';
