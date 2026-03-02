@@ -26,6 +26,19 @@ export function healthRoutes(joule: Joule) {
   });
 
   router.get('/metrics', (c) => {
+    // Prometheus text format if Accept header requests it
+    const accept = c.req.header('Accept') ?? '';
+    if (accept.includes('text/plain') || accept.includes('application/openmetrics-text')) {
+      try {
+        const prometheusText = joule.metrics.toPrometheusText();
+        return c.text(prometheusText, 200, {
+          'Content-Type': 'text/plain; version=0.0.4; charset=utf-8',
+        });
+      } catch {
+        // Fall through to JSON
+      }
+    }
+
     return c.json({
       uptime: process.uptime(),
       memory: process.memoryUsage(),

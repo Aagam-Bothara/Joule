@@ -7,6 +7,7 @@ import {
   monotonicNow,
 } from '@joule/shared';
 import type { ConstitutionEnforcer } from './constitution.js';
+import type { ApprovalManager } from './approval-manager.js';
 
 interface RegisteredTool {
   definition: ToolDefinition;
@@ -16,10 +17,16 @@ interface RegisteredTool {
 export class ToolRegistry {
   private tools = new Map<string, RegisteredTool>();
   private constitution?: ConstitutionEnforcer;
+  private approvalManager?: ApprovalManager;
 
   /** Attach a constitution enforcer — called once during initialization */
   setConstitution(enforcer: ConstitutionEnforcer): void {
     this.constitution = enforcer;
+  }
+
+  /** Attach an approval manager for human-in-the-loop enforcement */
+  setApprovalManager(manager: ApprovalManager): void {
+    this.approvalManager = manager;
   }
 
   register(tool: ToolDefinition, source: 'builtin' | 'plugin' | 'mcp' | 'programmatic' = 'programmatic'): void {
@@ -103,6 +110,32 @@ export class ToolRegistry {
       }
     }
 
+    // APPROVAL GUARD — check before execution (after constitution)
+    if (this.approvalManager && registered.definition.requiresConfirmation) {
+      try {
+        const toolArgs = (invocation.input && typeof invocation.input === 'object'
+          ? invocation.input as Record<string, unknown>
+          : {}) as Record<string, unknown>;
+        const request = this.approvalManager.createToolCallRequest(
+          invocation.toolName,
+          toolArgs,
+        );
+        if (this.approvalManager.needsApproval(request.type, request.context)) {
+          const decision = await this.approvalManager.requestApproval(request);
+          if (!decision.approved) {
+            return {
+              toolName: invocation.toolName,
+              success: false,
+              error: `Tool execution denied: ${decision.reason ?? 'Approval rejected'}`,
+              durationMs: 0,
+            };
+          }
+        }
+      } catch {
+        // Approval check failure — don't block tool execution
+      }
+    }
+
     const tool = registered.definition;
     const startTime = monotonicNow();
     const timeoutMs = invocation.timeoutMs ?? tool.timeoutMs ?? 30_000;
@@ -147,6 +180,9 @@ export class ToolRegistry {
     const filtered = new ToolRegistry();
     if (this.constitution) {
       filtered.setConstitution(this.constitution);
+    }
+    if (this.approvalManager) {
+      filtered.setApprovalManager(this.approvalManager);
     }
 
     if (!allowedTools || allowedTools.length === 0) {

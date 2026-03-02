@@ -69,3 +69,4 @@ export { McpClient, type McpServerConfig, jsonSchemaToZod, mcpToolToJouleToolDef
 export { PluginManager } from './plugin-manager.js';
 export { SiteKnowledgeRegistry, getSiteKnowledgeRegistry } from './site-knowledge/index.js';
 export type { SiteKnowledge, SiteAction, SelectorInfo } from './site-knowledge/index.js';
+export { SkillRegistry } from './skill-registry.js';

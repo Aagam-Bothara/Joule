@@ -16,6 +16,10 @@ import { DecisionGraphBuilder } from './decision-graph.js';
 import { SubTaskOrchestrator } from './sub-task-orchestrator.js';
 import { ComputerAgent, type ComputerAgentOptions, type ComputerAgentResult } from './computer-agent.js';
 import { CrewOrchestrator } from './crew-orchestrator.js';
+import { ApprovalManager } from './approval-manager.js';
+import { Logger } from './logger.js';
+import { MetricsCollector } from './metrics-collector.js';
+import { ShutdownManager } from './shutdown-manager.js';
 import type { CrewDefinition, CrewResult, CrewStreamEvent } from '@joule/shared';
 
 export class Joule {
@@ -34,6 +38,8 @@ export class Joule {
   private graphBuilder!: DecisionGraphBuilder;
   private orchestrator!: SubTaskOrchestrator;
   private constitution?: ConstitutionEnforcer;
+  private approvalManager?: ApprovalManager;
+  private shutdownManager?: ShutdownManager;
   private initialized = false;
 
   constructor(private configOverrides?: Partial<JouleConfig>) {
@@ -58,6 +64,23 @@ export class Joule {
     const constitutionConfig = this.config.get('constitution');
     this.constitution = new ConstitutionEnforcer(constitutionConfig ?? undefined);
     this.tools.setConstitution(this.constitution);
+
+    // Wire up approval manager (human-in-the-loop)
+    const approvalConfig = this.config.get('approval');
+    if (approvalConfig) {
+      this.approvalManager = new ApprovalManager(approvalConfig);
+      this.tools.setApprovalManager(this.approvalManager);
+    }
+
+    // Wire up structured logger
+    const loggingConfig = this.config.get('logging');
+    const logger = Logger.getInstance();
+    if (loggingConfig?.level) {
+      logger.setLevel(loggingConfig.level);
+    }
+
+    // Wire up shutdown manager
+    this.shutdownManager = new ShutdownManager();
 
     // Wire up model router
     const energyConfig = this.config.get('energy');
@@ -456,12 +479,27 @@ export class Joule {
     this.tools.register(tool, 'programmatic');
   }
 
+  /** Get the metrics collector singleton (for server /metrics endpoint). */
+  get metrics(): MetricsCollector {
+    return MetricsCollector.getInstance();
+  }
+
   async shutdown(): Promise<void> {
-    this.memory.optimized.stopConsolidation();
-    try {
-      closeDatabase();
-    } catch {
-      // Best-effort cleanup
+    if (this.shutdownManager) {
+      this.shutdownManager.registerCallback('memory', async () => {
+        this.memory.optimized.stopConsolidation();
+      });
+      this.shutdownManager.registerCallback('database', async () => {
+        try { closeDatabase(); } catch { /* best-effort */ }
+      });
+      await this.shutdownManager.shutdown();
+    } else {
+      this.memory.optimized.stopConsolidation();
+      try {
+        closeDatabase();
+      } catch {
+        // Best-effort cleanup
+      }
     }
     this.initialized = false;
   }

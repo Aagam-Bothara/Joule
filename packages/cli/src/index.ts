@@ -5,3 +5,5 @@ export { toolsCommand } from './commands/tools.js';
 export { serveCommand } from './commands/serve.js';
 export { chatCommand } from './commands/chat.js';
 export { doCommand } from './commands/do.js';
+export { doctorCommand } from './commands/doctor.js';
+export { skillsCommand } from './commands/skills.js';

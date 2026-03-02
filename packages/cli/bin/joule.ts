@@ -14,6 +14,8 @@ import { voiceCommand } from '../src/commands/voice.js';
 import { doCommand } from '../src/commands/do.js';
 import { authCommand } from '../src/commands/auth.js';
 import { crewCommand } from '../src/commands/crew.js';
+import { doctorCommand } from '../src/commands/doctor.js';
+import { skillsCommand } from '../src/commands/skills.js';
 
 const program = new Command();
 
@@ -36,5 +38,7 @@ program.addCommand(voiceCommand);
 program.addCommand(doCommand);
 program.addCommand(authCommand);
 program.addCommand(crewCommand);
+program.addCommand(doctorCommand);
+program.addCommand(skillsCommand);
 
 program.parse();

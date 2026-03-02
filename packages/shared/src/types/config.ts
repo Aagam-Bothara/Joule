@@ -6,6 +6,7 @@ import type { PluginConfig } from './plugin.js';
 import type { ScheduleConfig } from './scheduler.js';
 import type { VoiceConfig } from './voice.js';
 import type { Constitution } from './constitution.js';
+import type { ApprovalPolicy } from './approval.js';
 
 export interface ChannelsConfig {
   slack?: {
@@ -205,4 +206,18 @@ export interface JouleConfig {
   osAutomation?: OsAutomationConfig;
   constitution?: Constitution;
   googleOAuth?: GoogleOAuthConfig;
+  approval?: ApprovalPolicy;
+  cache?: {
+    enabled: boolean;
+    ttlMs?: number;
+    maxEntries?: number;
+    skipStreaming?: boolean;
+  };
+  rateLimit?: {
+    tiers?: Record<string, { name: string; requestsPerMinute: number; requestsPerHour?: number; costPerMinuteUsd?: number }>;
+    defaultTier?: string;
+    perEndpoint?: Record<string, { requestsPerMinute: number }>;
+    adaptiveEnabled?: boolean;
+    adaptiveThreshold?: number;
+  };
 }

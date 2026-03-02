@@ -32,6 +32,10 @@ export type {
 export { UserRepository } from './repositories/user.repository.js';
 export type { UserData, ApiKeyData } from './repositories/user.repository.js';
 
+// ── Vector Index ────────────────────────────────────────────────
+export { VectorIndex, hashEmbed } from './vector-index.js';
+export type { VectorSearchResult } from './vector-index.js';
+
 // ── Store ────────────────────────────────────────────────────────
 
 import type Database from 'better-sqlite3';

@@ -10,7 +10,7 @@ import { usersRoutes } from './routes/users.js';
 import { artifactsRoutes } from './routes/artifacts.js';
 import { UserStore } from './auth/user-store.js';
 import { authMiddleware, adminMiddleware, rateLimitMiddleware } from './auth/middleware.js';
-import type { Joule } from '@joule/core';
+import { type Joule, Logger } from '@joule/core';
 import type { AuthConfig } from '@joule/shared';
 import { getArtifact, listArtifacts, getArtifactVersion } from '@joule/tools';
 import { existsSync } from 'node:fs';
@@ -41,17 +41,20 @@ export async function createApp(joule: Joule) {
     allowHeaders: ['Content-Type', 'Authorization'],
   }));
 
-  // Request logging
+  // Request logging (structured)
+  const logger = Logger.getInstance();
   app.use('*', async (c, next) => {
     const start = Date.now();
     await next();
     const ms = Date.now() - start;
-    console.log(`${c.req.method} ${c.req.path} ${c.res.status} ${ms}ms`);
+    logger.info(`${c.req.method} ${c.req.path} ${c.res.status} ${ms}ms`, {
+      component: 'server',
+    });
   });
 
   // Error handling
   app.onError((err, c) => {
-    console.error('Server error:', err);
+    logger.error(`Server error: ${err.message}`, { component: 'server' });
     return c.json({ error: 'Internal server error' }, 500);
   });
 
@@ -117,9 +120,10 @@ export async function startServer(joule: Joule): Promise<void> {
 
   const dashboardDir = findDashboardDir();
 
-  console.log(`Starting Joule server...`);
+  const serverLogger = Logger.getInstance();
+  serverLogger.info('Starting Joule server...', { component: 'server' });
   serve({ fetch: app.fetch, port, hostname: host }, () => {
-    console.log(`Joule server listening on http://${host}:${port}`);
+    serverLogger.info(`Joule server listening on http://${host}:${port}`, { component: 'server' });
     console.log('');
     console.log('Endpoints:');
     console.log(`  POST   /tasks          - Submit a task`);
