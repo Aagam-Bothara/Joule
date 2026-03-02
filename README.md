@@ -292,7 +292,16 @@ pnpm build
 
 ### Configure
 
-Create `joule.config.yaml` in the project root:
+The quickest way — run `joule init` and answer a few questions:
+
+```bash
+pnpm exec tsx packages/cli/bin/joule.ts init
+
+# or accept all defaults (ollama-only, medium budget):
+pnpm exec tsx packages/cli/bin/joule.ts init -y
+```
+
+This generates a `joule.config.yaml` with sensible defaults and helpful comments. You can also create one manually:
 
 ```yaml
 # Local only — no cloud needed
@@ -312,7 +321,7 @@ providers:
       default: claude-sonnet-4-20250514
 ```
 
-Or use environment variables:
+Environment variables work too:
 
 | Variable | What it does |
 |---|---|
@@ -356,6 +365,7 @@ docker run -p 3927:3927 \
 
 | Command | What it does |
 |---|---|
+| `joule init` | Set up a new project — generates joule.config.yaml |
 | `joule do <task>` | Computer agent — controls your desktop |
 | `joule run <task>` | One-shot task with budget |
 | `joule chat` | Interactive chat with history |
@@ -433,7 +443,7 @@ pnpm dev           # watch mode
 This is roughly where we're headed. Priorities might shift based on what people actually need.
 
 ### v0.6 — Making it nicer to use
-- [ ] `joule init` — interactive project scaffolding with config generation
+- [x] `joule init` — interactive project scaffolding with config generation
 - [ ] Hot reload for config changes (no restart)
 - [ ] Hosted skill registry — install skills from npm or GitHub
 - [ ] Better error messages — tell people what went wrong *and how to fix it*

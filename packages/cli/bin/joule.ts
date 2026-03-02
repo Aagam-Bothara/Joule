@@ -16,6 +16,7 @@ import { authCommand } from '../src/commands/auth.js';
 import { crewCommand } from '../src/commands/crew.js';
 import { doctorCommand } from '../src/commands/doctor.js';
 import { skillsCommand } from '../src/commands/skills.js';
+import { initCommand } from '../src/commands/init.js';
 
 const program = new Command();
 
@@ -24,6 +25,7 @@ program
   .description('Joule - Energy-aware AI agent runtime')
   .version('0.5.0');
 
+program.addCommand(initCommand);
 program.addCommand(runCommand);
 program.addCommand(traceCommand);
 program.addCommand(configCommand);

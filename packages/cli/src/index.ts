@@ -7,3 +7,4 @@ export { chatCommand } from './commands/chat.js';
 export { doCommand } from './commands/do.js';
 export { doctorCommand } from './commands/doctor.js';
 export { skillsCommand } from './commands/skills.js';
+export { initCommand } from './commands/init.js';
