@@ -6,3 +6,6 @@ export { OllamaProvider } from './providers/ollama.js';
 export { AnthropicProvider } from './providers/anthropic.js';
 export { OpenAIProvider } from './providers/openai.js';
 export { GoogleProvider } from './providers/google.js';
+export { EmbeddingProvider } from './embedding-provider.js';
+export type { EmbeddingResult } from './embedding-provider.js';
+export { OllamaEmbeddingProvider } from './providers/ollama-embedding.js';

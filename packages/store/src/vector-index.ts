@@ -122,6 +122,11 @@ export class VectorIndex {
     return this.available;
   }
 
+  /** Return the configured vector dimensions. */
+  getDims(): number {
+    return this.dims;
+  }
+
   /** Insert a vector with an external ID. */
   insert(id: string, vector: number[]): void {
     if (!this.available) return;

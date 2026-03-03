@@ -204,6 +204,15 @@ export const voiceConfigSchema = z.object({
   openaiApiKey: z.string().optional(),
 });
 
+export const embeddingsConfigSchema = z.object({
+  provider: z.enum(['ollama', 'openai']).default('ollama'),
+  model: z.string().default('nomic-embed-text'),
+  dimensions: z.number().int().positive().default(768),
+  baseUrl: z.string().url().optional(),
+  batchSize: z.number().int().positive().default(32),
+  enabled: z.boolean().default(false),
+});
+
 export const jouleConfigSchema = z.object({
   providers: providersConfigSchema.default({}),
   budgets: budgetsConfigSchema.default({}),
@@ -225,6 +234,7 @@ export const jouleConfigSchema = z.object({
     homeAssistantToken: z.string().optional(),
   }).optional(),
   osAutomation: osAutomationConfigSchema.optional(),
+  embeddings: embeddingsConfigSchema.optional(),
   proactive: z.object({
     enabled: z.boolean().default(false).optional(),
     tickIntervalMs: z.number().int().min(10_000).default(60_000).optional(),

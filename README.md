@@ -109,7 +109,7 @@ We're not going to pretend Joule does everything well:
 - No mobile apps. OpenClaw has iOS/Android, we don't.
 - Tiny community compared to OpenClaw or the Python ecosystem.
 - Not as polished for pure web automation as Browser-Use or Skyvern.
-- RAG uses hash-based embeddings. They're fast and free, but they're not transformer-quality. We're working on optional model-based embeddings.
+- RAG defaults to hash-based embeddings (fast, free, no setup). Real model-based embeddings are now supported via Ollama (`nomic-embed-text`, `all-minilm`, etc.) — just enable them in config.
 - Skill registry supports npm and GitHub now, but there's no curated marketplace or verification yet.
 - The governed orchestration layer (trust scoring, policy engine, governor agent) is designed but not implemented yet — it's the v0.8 milestone.
 
@@ -652,7 +652,7 @@ This is roughly where we're headed. Priorities might shift based on what people 
 - [x] OpenAPI spec generation from tool schemas
 
 ### v0.7 — Making it smarter
-- [ ] Real embeddings — optional integration with local embedding models like `nomic-embed-text`
+- [x] Real embeddings — optional integration with local embedding models like `nomic-embed-text`
 - [ ] Long-term memory — agent remembers what worked and what didn't across runs
 - [ ] Adaptive routing — learn which models handle which tasks best over time
 - [ ] Crew templates — pre-built agent teams for common jobs (code review, research, content)

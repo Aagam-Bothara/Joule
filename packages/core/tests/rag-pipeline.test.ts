@@ -169,14 +169,14 @@ describe('RagEngine', () => {
         'python.txt',
       );
 
-      const results = engine.search('TypeScript JavaScript');
+      const results = await engine.search('TypeScript JavaScript');
 
       expect(results.length).toBeGreaterThanOrEqual(1);
       expect(results[0].score).toBeGreaterThan(0);
     });
 
-    it('should return empty for no matches', () => {
-      const results = engine.search('quantum physics');
+    it('should return empty for no matches', async () => {
+      const results = await engine.search('quantum physics');
       expect(results.length).toBe(0);
     });
   });
@@ -185,7 +185,7 @@ describe('RagEngine', () => {
     it('should build a formatted context string', async () => {
       await engine.indexText('React is a UI library for building user interfaces.', 'react.txt');
 
-      const results = engine.search('React UI');
+      const results = await engine.search('React UI');
       const prompt = engine.buildContextPrompt(results);
 
       expect(prompt).toContain('Relevant Context');

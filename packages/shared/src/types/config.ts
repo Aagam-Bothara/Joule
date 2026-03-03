@@ -101,6 +101,15 @@ export interface OsAutomationConfig {
   commandTimeoutMs?: number;
 }
 
+export interface EmbeddingsConfig {
+  provider: 'ollama' | 'openai';
+  model: string;
+  dimensions: number;
+  baseUrl?: string;
+  batchSize: number;
+  enabled: boolean;
+}
+
 export interface ProvidersConfig {
   ollama?: {
     baseUrl: string;
@@ -204,6 +213,7 @@ export interface JouleConfig {
   iot?: IoTConfig;
   proactive?: ProactiveConfig;
   osAutomation?: OsAutomationConfig;
+  embeddings?: EmbeddingsConfig;
   constitution?: Constitution;
   googleOAuth?: GoogleOAuthConfig;
   approval?: ApprovalPolicy;

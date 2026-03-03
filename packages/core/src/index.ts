@@ -26,4 +26,5 @@ export { MetricsCollector, type MetricLabels } from './metrics-collector.js';
 export { ResponseCache, type ResponseCacheConfig } from './response-cache.js';
 export { ShutdownManager } from './shutdown-manager.js';
 export { RagEngine } from './rag/rag-engine.js';
+export type { RagSearchResult, RagStats, RagEmbeddingProvider } from './rag/rag-engine.js';
 export { DocumentProcessor, type DocumentChunk } from './rag/document-processor.js';
