@@ -1,4 +1,14 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterAll } from 'vitest';
+
+// Force win32 platform before module loads — tests mock PowerShell-style output
+const originalPlatform = process.platform;
+vi.hoisted(() => {
+  Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
+});
+
+afterAll(() => {
+  Object.defineProperty(process, 'platform', { value: originalPlatform, configurable: true });
+});
 
 // Mock child_process before importing tools
 vi.mock('node:child_process', () => ({
