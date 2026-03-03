@@ -52,6 +52,7 @@ OpenClaw (100K+ GitHub stars) is the closest comparison. Both are TypeScript, bo
 | **Energy tracking** | Tracks Wh and gCO₂ per task | No |
 | **Desktop automation** | COM for Office + mouse/keyboard + vision | Shell + browser (no Office-specific path) |
 | **Multi-agent** | 4 strategies with per-agent budgets | No |
+| **Agent governance** | Trust scoring, reward/punish, policy engine (v0.8) | No |
 | **Approval workflows** | 3 modes — automatic, manual, hybrid | No |
 | **RAG** | Built-in document chunking + vector search | No |
 | **Response caching** | SQLite-backed with TTL | No |
@@ -70,7 +71,7 @@ OpenClaw (100K+ GitHub stars) is the closest comparison. Both are TypeScript, bo
 
 **OpenHands** — Better for coding agents and repo-level tasks. Pick this for software engineering workflows.
 
-**CrewAI** — Joule now has 4 orchestration strategies (sequential, parallel, hierarchical, debate) with full budget enforcement per agent. CrewAI doesn't do budgets. If you need agents that stop when money runs out, that's Joule.
+**CrewAI** — Joule has 4 orchestration strategies (sequential, parallel, hierarchical, debate) with full budget enforcement per agent. CrewAI doesn't do budgets. We're also building a governed orchestration layer where agents earn trust through behavior — trust scoring, reward/punishment loops, policy engines. Nobody else in this space is doing that.
 
 **LangChain** — More mature RAG ecosystem, bigger community, Python. Joule is TypeScript-native and lighter weight. LangChain doesn't track energy or carbon.
 
@@ -86,6 +87,7 @@ Most of these exist individually in other tools. Nobody else does all of them to
 - **Output validation.** A separate critic LLM scores the result and sends it back for fixes if it's not good enough.
 - **Fully offline.** Ollama only. Your data never leaves your machine.
 - **Observability out of the box.** Prometheus metrics, structured JSON logs, OpenTelemetry spans. Plug into Grafana or Datadog without writing glue code.
+- **Governed orchestration.** Agents earn autonomy through a trust system. Good behavior unlocks tools and budget. Violations get punished — reduced access, quarantine, or termination. The governance layer itself learns and adapts.
 - **Everything in one install.** Channels, voice, scheduling, browser, IoT, RAG, caching, skills, dashboard — no plugin circus.
 
 ### When to use something else
@@ -108,7 +110,8 @@ We're not going to pretend Joule does everything well:
 - Tiny community compared to OpenClaw or the Python ecosystem.
 - Not as polished for pure web automation as Browser-Use or Skyvern.
 - RAG uses hash-based embeddings. They're fast and free, but they're not transformer-quality. We're working on optional model-based embeddings.
-- Skill marketplace is local-only for now — no hosted registry.
+- Skill registry supports npm and GitHub now, but there's no curated marketplace or verification yet.
+- The governed orchestration layer (trust scoring, policy engine, governor agent) is designed but not implemented yet — it's the v0.8 milestone.
 
 ### Full comparison table
 
@@ -127,6 +130,7 @@ For the people who want every detail side by side:
 | Voice | Built-in | Built-in | No | No | No | No | No |
 | Mobile | No | iOS/Android | No | No | No | No | No |
 | Multi-agent | 4 strategies | No | No | No | Yes | Yes | Yes |
+| Agent governance | Trust scoring + reward/punish loop | No | No | No | No | No | No |
 | HITL approvals | 3 modes | No | No | No | No | No | No |
 | RAG | Built-in | No | No | No | No | No | Yes |
 | Response cache | SQLite | No | No | No | No | No | No |
@@ -218,6 +222,204 @@ joule doctor
 # [PASS] Tool registry (47 tools)
 # ...
 ```
+
+---
+
+## Governed Agent Orchestration
+
+Most agent frameworks let agents do things. Joule makes agents *earn the right* to do things.
+
+We're building a governance-first orchestration layer where every agent starts with minimal trust and earns autonomy through a track record of clean behavior. Think of it like separation of powers — but for AI agents.
+
+### How it works
+
+```
+┌──────────────────────────────────────────────────┐
+│              CONSTITUTION                         │
+│   Hard boundaries, soft boundaries, principles    │
+├──────────────────────────────────────────────────┤
+│              POLICY ENGINE                        │
+│   Compiled rules, conflict resolution, scoping    │
+├──────────────────────────────────────────────────┤
+│            GOVERNOR AGENT                         │
+│   ┌──────────┬───────────┬────────────────┐      │
+│   │Pre-check │ Monitor   │ Post-evaluate  │      │
+│   └──────────┴───────────┴────────────────┘      │
+│          ↕            ↕            ↕              │
+│   ┌──────────────────────────────────────┐       │
+│   │        AGENT TRUST PROFILES          │       │
+│   │  scores, history, streaks, tier      │       │
+│   └──────────────────────────────────────┘       │
+├──────────────────────────────────────────────────┤
+│   SME AGENTS (bounded by trust profiles)          │
+│   ┌───────┐ ┌───────┐ ┌───────┐ ┌───────┐       │
+│   │ Code  │ │ Data  │ │ Infra │ │  ...  │       │
+│   └───────┘ └───────┘ └───────┘ └───────┘       │
+├──────────────────────────────────────────────────┤
+│              VAULT                                │
+│   JIT credential access, scoped tokens, expiry    │
+├──────────────────────────────────────────────────┤
+│          ACCOUNTABILITY CHAIN                     │
+│   Full provenance trail for every decision        │
+└──────────────────────────────────────────────────┘
+```
+
+### Constitution — the immutable layer
+
+Not just a single file anymore. The constitution has three tiers:
+
+- **Hard boundaries** — never violated, no override possible. "Never expose PII." "Never run destructive ops without human approval."
+- **Soft boundaries** — can be overridden with sufficient authority + an audit trail. "Prefer local models" can be relaxed if Ollama is down.
+- **Aspirational principles** — guide behavior but don't block execution. "Minimize token usage where possible."
+
+The constitution is version-controlled and append-only. You can add amendments, but you can never silently delete a principle.
+
+### Policy engine — the law layer
+
+Policies are derived from the constitution but are more granular and dynamic:
+
+```yaml
+policy: data-access
+derived_from: constitution.hard.no-pii-exposure
+rules:
+  - agent_role: analyst
+    can_access: [aggregated_metrics, anonymized_logs]
+    cannot_access: [raw_user_data, credentials]
+    requires_approval: [financial_records]
+  - agent_role: admin
+    can_access: [all]
+    requires_approval: [deletion_ops]
+    audit_level: full
+```
+
+Policies are written in natural language or structured YAML, then compiled into enforceable runtime constraints. When two policies conflict, the one closer to a hard constitutional boundary wins. If still ambiguous, it escalates to the Governor, then to a human.
+
+### Governor agent — the judiciary
+
+The Governor isn't just a task router — it's a runtime authority:
+
+- **Pre-flight checks** — validates every action against policies before an SME agent runs it
+- **Runtime monitoring** — watches agent behavior mid-execution, can intervene or halt
+- **Post-task evaluation** — scores agent performance in the background after each task
+- **Escalation handler** — when an SME agent hits a boundary, Governor decides: allow, deny, or escalate to human
+- **Trust management** — adjusts agent trust scores based on behavior over time
+
+For larger setups, Governors can be hierarchical — domain governors for finance, engineering, data, each reporting to a chief governor.
+
+### SME agents — specialists with boundaries
+
+Every agent has a bounded authority envelope:
+
+```yaml
+agent: code-reviewer
+domain: engineering
+trust_level: 3        # out of 5
+autonomy: medium      # low / medium / high / full
+tools_allowed: [grep, read, analyze]
+tools_denied: [bash, write, deploy]
+budget:
+  max_tokens_per_task: 50000
+  max_tool_calls: 20
+escalation_target: governor-engineering
+```
+
+For high-stakes decisions, multiple SME agents must agree (consensus mechanism):
+
+```yaml
+consensus:
+  - action: deploy_to_production
+    requires: [code-reviewer, security-auditor, test-runner]
+    quorum: 3/3   # unanimous
+```
+
+### Trust scoring — agents earn their autonomy
+
+This is the part that makes the whole thing self-improving. After every task, the Governor evaluates agent performance in the background:
+
+```yaml
+evaluation:
+  agent: code-reviewer
+  checks:
+    policy_compliance: true     # stayed within allowed resources
+    quality: 0.91               # output quality score
+    budget_adherence: true      # didn't blow the budget
+    self_reported_errors: true  # was honest about mistakes
+    escalated_when_unsure: true # didn't guess when uncertain
+  verdict: clean
+  trust_delta: +0.05
+```
+
+**Good behavior gets rewarded:**
+- Trust level goes up → more autonomy, fewer pre-flight checks
+- Tool access expands → agent earns access to more powerful tools
+- Budget increases → higher token and tool call limits
+- Oversight decreases → Governor spot-checks instead of checking every action
+- Delegation rights → high-trust agents can sub-delegate without Governor approval
+
+**Violations get punished:**
+- Trust level drops → more oversight, mandatory pre-approval
+- Tool access restricted → dangerous tools revoked
+- Budget cut → fewer tokens, fewer tool calls
+- Quarantine → agent suspended, tasks rerouted to a peer
+- Retraining → system prompt updated with explicit warnings about the violation
+
+Violation severity is tiered:
+
+| Tier | Example | Impact |
+|---|---|---|
+| **Warning** | Exceeded token budget, slow response | Trust -0.05, logged |
+| **Strike** | Accessed data outside scope, skipped escalation | Trust -0.15, increased oversight for 10 tasks |
+| **Suspension** | Attempted policy bypass, leaked sensitive data | Trust -0.40, agent quarantined |
+| **Termination** | Repeated Tier 3 violations, constitutional breach | Trust → 0, permanently deactivated |
+
+### The promotion cycle
+
+```
+New agent (trust: 0.50) → Probation: every action monitored
+  → 20 clean tasks → trust 0.65 → Standard: spot-checked every 5th task
+  → 50 clean tasks → trust 0.80 → Trusted: minimal oversight, more tools
+  → 100 clean tasks → trust 0.90 → Senior: can delegate, can approve others
+  → Violation at any point → demoted one tier, must earn it back
+```
+
+### Vault — access that expires
+
+Not just secrets storage — a full access governance system:
+
+- **Least-privilege by default** — agents get zero access until explicitly granted
+- **Just-in-time credentials** — agents request access at runtime, Governor approves, Vault issues a scoped token
+- **Auto-expiry** — tokens expire after task completion, not on a timer
+- **Revocation** — Governor can yank access mid-task if something looks wrong
+- **Full audit trail** — every credential checkout logged with who, what, when, why, and approved-by
+
+### System-level learning
+
+The Governor doesn't just evaluate individual agents — it spots patterns across the whole system:
+
+```yaml
+system_insights:
+  - pattern: "agents exceed token budget on refactoring tasks"
+    frequency: 12/100
+    response: "increased default budget for refactoring by 30%"
+    # the system recognized the policy was too tight, not the agents
+
+  - pattern: "agents that self-report uncertainty have 40% fewer errors"
+    response: "added self-reporting to constitution as encouraged behavior"
+    # the system discovered a good pattern and codified it
+```
+
+The governance system itself evolves — not just the agents.
+
+### Why this matters
+
+Nobody else is doing this. Current frameworks:
+
+- **CrewAI / AutoGen** — agents collaborate, but no governance feedback loop
+- **LangGraph** — stateful workflows, but no trust or consequence model
+- **Guardrails AI** — validates outputs, but doesn't learn from violations
+- **OpenAI Assistants** — no multi-agent governance at all
+
+Joule is the first framework where agents earn trust through behavior, not configuration. *Autonomy with accountability.*
 
 ---
 
@@ -456,22 +658,31 @@ This is roughly where we're headed. Priorities might shift based on what people 
 - [ ] Crew templates — pre-built agent teams for common jobs (code review, research, content)
 - [ ] Streaming RAG — ingest documents as they change, not just at startup
 
-### v0.8 — Making it scale
+### v0.8 — Governed orchestration (the big one)
+- [ ] Tiered constitution — hard boundaries, soft boundaries, aspirational principles
+- [ ] Policy engine — YAML-defined rules compiled into runtime constraints, conflict resolution
+- [ ] Governor agent — pre-flight checks, runtime monitoring, post-task evaluation
+- [ ] Agent trust profiles — trust scores, violation history, streaks, promotion tiers
+- [ ] Reward/punishment loop — good behavior unlocks tools and budget, violations restrict access
+- [ ] Vault — JIT credential access with scoped tokens, auto-expiry, and revocation
+- [ ] Accountability chain — full provenance trail for every decision (agent → governor → policy → constitution)
+- [ ] Consensus mechanism — multi-agent agreement required for high-stakes actions
+- [ ] System-level learning — Governor spots patterns across all agents and adapts policies
+
+### v0.9 — Making it scale
 - [ ] Distributed task queue (Redis/BullMQ) for multi-worker setups
 - [ ] Persistent task state — pick up where you left off after a crash
 - [ ] Approval requests via Slack/Teams/email (not just in-process callbacks)
 - [ ] Circuit breakers — automatic failover when a provider's API goes down
 - [ ] Horizontal scaling — stateless server with shared storage (Litestream or Postgres)
-
-### v0.9 — Enterprise stuff
 - [ ] Proper RBAC beyond just admin/user
-- [ ] Audit logging — immutable record of every tool call, approval, and data access
 - [ ] SSO (SAML/OIDC)
 - [ ] Compliance mode — data retention policies, PII redaction, geo constraints
 - [ ] Multi-tenant isolation — separate budgets, configs, and data per tenant
 
 ### v1.0 — Ship it
 - [ ] Feature freeze — bugs and hardening only
+- [ ] Audit logging — immutable record of every tool call, approval, and data access (built on accountability chain)
 - [ ] Published benchmarks (latency, throughput, cost per task)
 - [ ] Third-party security audit
 - [ ] Migration guides from LangChain, CrewAI, and OpenClaw
