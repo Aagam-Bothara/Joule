@@ -653,10 +653,10 @@ This is roughly where we're headed. Priorities might shift based on what people 
 
 ### v0.7 — Making it smarter
 - [x] Real embeddings — optional integration with local embedding models like `nomic-embed-text`
-- [ ] Long-term memory — agent remembers what worked and what didn't across runs
-- [ ] Adaptive routing — learn which models handle which tasks best over time
-- [ ] Crew templates — pre-built agent teams for common jobs (code review, research, content)
-- [ ] Streaming RAG — ingest documents as they change, not just at startup
+- [x] Long-term memory — agent remembers what worked and what didn't across runs
+- [x] Adaptive routing — learn which models handle which tasks best over time
+- [x] Crew templates — pre-built agent teams for common jobs (code review, research, content)
+- [x] Streaming RAG — ingest documents as they change, not just at startup
 
 ### v0.8 — Governed orchestration (the big one)
 - [ ] Tiered constitution — hard boundaries, soft boundaries, aspirational principles
