@@ -15,3 +15,4 @@ export * from './constitution.js';
 export * from './crew.js';
 export * from './approval.js';
 export * from './skill.js';
+export * from './governance.js';

@@ -7,6 +7,7 @@ import type { ScheduleConfig } from './scheduler.js';
 import type { VoiceConfig } from './voice.js';
 import type { Constitution } from './constitution.js';
 import type { ApprovalPolicy } from './approval.js';
+import type { GovernanceConfig } from './governance.js';
 
 export interface ChannelsConfig {
   slack?: {
@@ -230,4 +231,5 @@ export interface JouleConfig {
     adaptiveEnabled?: boolean;
     adaptiveThreshold?: number;
   };
+  governance?: GovernanceConfig;
 }

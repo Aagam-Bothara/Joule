@@ -8,6 +8,7 @@ import {
 } from '@joule/shared';
 import type { ConstitutionEnforcer } from './constitution.js';
 import type { ApprovalManager } from './approval-manager.js';
+import type { Governor } from './governance/governor.js';
 
 interface RegisteredTool {
   definition: ToolDefinition;
@@ -18,6 +19,9 @@ export class ToolRegistry {
   private tools = new Map<string, RegisteredTool>();
   private constitution?: ConstitutionEnforcer;
   private approvalManager?: ApprovalManager;
+  private governor?: Governor;
+  /** Agent ID for governance context — set per-agent in crew execution. */
+  private activeAgentId?: string;
 
   /** Attach a constitution enforcer — called once during initialization */
   setConstitution(enforcer: ConstitutionEnforcer): void {
@@ -27,6 +31,16 @@ export class ToolRegistry {
   /** Attach an approval manager for human-in-the-loop enforcement */
   setApprovalManager(manager: ApprovalManager): void {
     this.approvalManager = manager;
+  }
+
+  /** Attach a governance governor for trust-based enforcement */
+  setGovernor(governor: Governor): void {
+    this.governor = governor;
+  }
+
+  /** Set the active agent ID for governance context */
+  setActiveAgent(agentId: string): void {
+    this.activeAgentId = agentId;
   }
 
   register(tool: ToolDefinition, source: 'builtin' | 'plugin' | 'mcp' | 'programmatic' = 'programmatic'): void {
@@ -110,6 +124,25 @@ export class ToolRegistry {
       }
     }
 
+    // GOVERNOR GUARD — trust-based enforcement (after constitution)
+    if (this.governor && this.activeAgentId) {
+      try {
+        const govDecision = this.governor.validateToolCall(this.activeAgentId, invocation);
+        if (govDecision.decision === 'deny' || govDecision.decision === 'escalate') {
+          return {
+            toolName: invocation.toolName,
+            success: false,
+            error: govDecision.decision === 'escalate'
+              ? `Governor escalated (consensus required): ${govDecision.reason}`
+              : `Governor denied: ${govDecision.reason}`,
+            durationMs: 0,
+          };
+        }
+      } catch {
+        // Governor check failure — don't block tool execution
+      }
+    }
+
     // APPROVAL GUARD — check before execution (after constitution)
     if (this.approvalManager && registered.definition.requiresConfirmation) {
       try {
@@ -183,6 +216,9 @@ export class ToolRegistry {
     }
     if (this.approvalManager) {
       filtered.setApprovalManager(this.approvalManager);
+    }
+    if (this.governor) {
+      filtered.setGovernor(this.governor);
     }
 
     if (!allowedTools || allowedTools.length === 0) {

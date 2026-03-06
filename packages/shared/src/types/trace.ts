@@ -28,7 +28,14 @@ export type TraceEventType =
   | 'simulation_issue'
   | 'decision_point'
   | 'decomposition'
-  | 'strategy_selected';
+  | 'strategy_selected'
+  | 'governance_preflight'
+  | 'governance_runtime'
+  | 'governance_post_task'
+  | 'trust_update'
+  | 'policy_evaluation'
+  | 'vault_access'
+  | 'consensus_vote';
 
 export interface TraceEvent {
   id: string;

@@ -20,6 +20,17 @@ import { ApprovalManager } from './approval-manager.js';
 import { Logger } from './logger.js';
 import { MetricsCollector } from './metrics-collector.js';
 import { ShutdownManager } from './shutdown-manager.js';
+import {
+  Governor,
+  TrustManager,
+  PolicyEngine,
+  TieredConstitution,
+  Vault,
+  AccountabilityChain,
+  RewardEngine,
+  ConsensusMechanism,
+  SystemLearner,
+} from './governance/index.js';
 import type { CrewDefinition, CrewResult, CrewStreamEvent } from '@joule/shared';
 
 export class Joule {
@@ -40,6 +51,7 @@ export class Joule {
   private constitution?: ConstitutionEnforcer;
   private approvalManager?: ApprovalManager;
   private shutdownManager?: ShutdownManager;
+  private governor?: Governor;
   private initialized = false;
 
   constructor(private configOverrides?: Partial<JouleConfig>) {
@@ -70,6 +82,25 @@ export class Joule {
     if (approvalConfig) {
       this.approvalManager = new ApprovalManager(approvalConfig);
       this.tools.setApprovalManager(this.approvalManager);
+    }
+
+    // Wire up governance (optional — gated by config)
+    const governanceConfig = this.config.get('governance');
+    if (governanceConfig?.enabled && this.constitution) {
+      const trustManager = new TrustManager(this.memory, governanceConfig);
+      const policyEngine = new PolicyEngine(governanceConfig.policies);
+      const tieredConstitution = new TieredConstitution(this.constitution);
+      const vault = new Vault(governanceConfig.vault);
+      const accountability = new AccountabilityChain();
+      const rewardEngine = new RewardEngine(trustManager);
+      const consensus = new ConsensusMechanism(governanceConfig.consensus);
+      const systemLearner = new SystemLearner(trustManager, this.memory, governanceConfig.learning);
+
+      this.governor = new Governor({
+        trustManager, policyEngine, constitution: tieredConstitution,
+        vault, accountability, rewardEngine, consensus, systemLearner,
+      });
+      this.tools.setGovernor(this.governor);
     }
 
     // Wire up structured logger
@@ -385,6 +416,7 @@ export class Joule {
       this.config.get('energy'),
       this.config.get('routing'),
       this.constitution,
+      this.governor,
     );
 
     const result = await crewOrchestrator.executeCrew(
@@ -442,6 +474,7 @@ export class Joule {
       this.config.get('energy'),
       this.config.get('routing'),
       this.constitution,
+      this.governor,
     );
 
     const stream = crewOrchestrator.executeCrewStream(crew, enrichedTask, envelope, traceId);

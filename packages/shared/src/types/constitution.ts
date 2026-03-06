@@ -17,6 +17,8 @@ export interface ConstitutionRule {
   severity: 'critical' | 'high' | 'medium';
   category: ConstitutionCategory;
   enforcement: RuleEnforcement;
+  /** Governance tier — defaults derived from severity if not set (critical→hard, high→soft, medium→aspirational) */
+  tier?: 'hard' | 'soft' | 'aspirational';
 }
 
 export type ConstitutionCategory =

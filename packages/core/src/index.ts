@@ -32,3 +32,9 @@ export { StreamingRag, type StreamingRagOptions, type StreamingRagEvent, type St
 export { LongTermMemory, type TaskOutcome, type ToolEffectiveness, type TaskRecommendation, type LearningStats } from './long-term-memory.js';
 export { AdaptiveRouter, type ModelPerformanceRecord, type PerformanceReport, type AdaptiveStats } from './adaptive-router.js';
 export { CREW_TEMPLATES, CODE_REVIEW_CREW, RESEARCH_CREW, CONTENT_CREW, getCrewTemplate, listCrewTemplates } from './crew-templates.js';
+export {
+  Governor, type GovernorOptions,
+  TrustManager, PolicyEngine, TieredConstitution, type TieredValidationResult,
+  Vault, AccountabilityChain, type AccountabilityQuery,
+  RewardEngine, ConsensusMechanism, SystemLearner,
+} from './governance/index.js';

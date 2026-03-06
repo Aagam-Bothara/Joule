@@ -111,7 +111,7 @@ We're not going to pretend Joule does everything well:
 - Not as polished for pure web automation as Browser-Use or Skyvern.
 - RAG defaults to hash-based embeddings (fast, free, no setup). Real model-based embeddings are now supported via Ollama (`nomic-embed-text`, `all-minilm`, etc.) — just enable them in config.
 - Skill registry supports npm and GitHub now, but there's no curated marketplace or verification yet.
-- The governed orchestration layer (trust scoring, policy engine, governor agent) is designed but not implemented yet — it's the v0.8 milestone.
+- The governed orchestration layer (trust scoring, policy engine, governor agent) is implemented in v0.8 but still maturing — expect API refinements in future releases.
 
 ### Full comparison table
 
@@ -659,15 +659,15 @@ This is roughly where we're headed. Priorities might shift based on what people 
 - [x] Streaming RAG — ingest documents as they change, not just at startup
 
 ### v0.8 — Governed orchestration (the big one)
-- [ ] Tiered constitution — hard boundaries, soft boundaries, aspirational principles
-- [ ] Policy engine — YAML-defined rules compiled into runtime constraints, conflict resolution
-- [ ] Governor agent — pre-flight checks, runtime monitoring, post-task evaluation
-- [ ] Agent trust profiles — trust scores, violation history, streaks, promotion tiers
-- [ ] Reward/punishment loop — good behavior unlocks tools and budget, violations restrict access
-- [ ] Vault — JIT credential access with scoped tokens, auto-expiry, and revocation
-- [ ] Accountability chain — full provenance trail for every decision (agent → governor → policy → constitution)
-- [ ] Consensus mechanism — multi-agent agreement required for high-stakes actions
-- [ ] System-level learning — Governor spots patterns across all agents and adapts policies
+- [x] Tiered constitution — hard boundaries, soft boundaries, aspirational principles
+- [x] Policy engine — YAML-defined rules compiled into runtime constraints, conflict resolution
+- [x] Governor agent — pre-flight checks, runtime monitoring, post-task evaluation
+- [x] Agent trust profiles — trust scores, violation history, streaks, promotion tiers
+- [x] Reward/punishment loop — good behavior unlocks tools and budget, violations restrict access
+- [x] Vault — JIT credential access with scoped tokens, auto-expiry, and revocation
+- [x] Accountability chain — full provenance trail for every decision (agent → governor → policy → constitution)
+- [x] Consensus mechanism — multi-agent agreement required for high-stakes actions
+- [x] System-level learning — Governor spots patterns across all agents and adapts policies
 
 ### v0.9 — Making it scale
 - [ ] Distributed task queue (Redis/BullMQ) for multi-worker setups

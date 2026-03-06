@@ -239,4 +239,47 @@ export const jouleConfigSchema = z.object({
     enabled: z.boolean().default(false).optional(),
     tickIntervalMs: z.number().int().min(10_000).default(60_000).optional(),
   }).optional(),
+  governance: z.object({
+    enabled: z.boolean().default(false),
+    defaultTrustScore: z.number().min(0).max(1).default(0.5).optional(),
+    trustThresholds: z.object({
+      probation: z.number().min(0).max(1).default(0.3),
+      trusted: z.number().min(0).max(1).default(0.6),
+      senior: z.number().min(0).max(1).default(0.8),
+    }).optional(),
+    policies: z.array(z.object({
+      id: z.string(),
+      name: z.string(),
+      description: z.string().optional(),
+      constitutionRef: z.string().optional(),
+      tier: z.enum(['hard', 'soft', 'aspirational']),
+      conditions: z.array(z.object({
+        field: z.string(),
+        operator: z.enum(['eq', 'neq', 'gt', 'lt', 'gte', 'lte', 'in', 'matches']),
+        value: z.union([z.string(), z.number(), z.array(z.string())]),
+      })),
+      actions: z.array(z.object({
+        type: z.enum(['block', 'allow', 'require_approval', 'log', 'reduce_budget', 'require_consensus']),
+        params: z.record(z.unknown()).optional(),
+      })),
+      priority: z.number().int().default(0),
+    })).optional(),
+    consensus: z.object({
+      enabled: z.boolean().default(false),
+      requiredFor: z.array(z.string()).optional(),
+      votingMode: z.enum(['majority', 'unanimous']).default('majority').optional(),
+      timeoutMs: z.number().int().positive().default(30_000).optional(),
+    }).optional(),
+    vault: z.object({
+      enabled: z.boolean().default(false),
+      defaultTtlMs: z.number().int().positive().default(300_000).optional(),
+      maxTokensPerAgent: z.number().int().positive().default(10).optional(),
+    }).optional(),
+    learning: z.object({
+      enabled: z.boolean().default(false),
+      autoAdjustPolicies: z.boolean().default(false).optional(),
+      minDataPoints: z.number().int().positive().default(5).optional(),
+      analysisIntervalTasks: z.number().int().positive().default(10).optional(),
+    }).optional(),
+  }).optional(),
 });

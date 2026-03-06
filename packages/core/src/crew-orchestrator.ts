@@ -29,6 +29,7 @@ import { TaskExecutor, type ProgressCallback } from './task-executor.js';
 import { DirectExecutor } from './direct-executor.js';
 import type { AgentMemory } from './agent-memory.js';
 import type { ConstitutionEnforcer } from './constitution.js';
+import type { Governor } from './governance/governor.js';
 import { createAgentContext } from './agent-context.js';
 
 const MANAGER_DELEGATION_PROMPT = `You are the manager agent. Analyze the task and delegate to your workers.
@@ -70,6 +71,7 @@ export class CrewOrchestrator {
     private energyConfig?: EnergyConfig,
     private routingConfig?: RoutingConfig,
     private constitution?: ConstitutionEnforcer,
+    private governor?: Governor,
   ) {}
 
   /** Active crew budget — set at start of executeCrew, used by agent context factory. */
@@ -587,6 +589,17 @@ export class CrewOrchestrator {
     blackboard: Blackboard,
     onProgress?: ProgressCallback,
   ): Promise<AgentResult> {
+    // GOVERNOR PRE-FLIGHT — check trust and policies before execution
+    if (this.governor) {
+      const preDecision = this.governor.preflight(agent.id, task);
+      if (preDecision.decision === 'deny') {
+        return this.failedAgentResult(agent, new Error(`Governor denied: ${preDecision.reason}`));
+      }
+      // Budget adjustments are informational — the caller can use them to
+      // scale the envelope. Active agent is set on the filtered registry
+      // in executeAgentWithEnvelope to avoid race conditions in parallel execution.
+    }
+
     const sequentialMinRetries = this.activeStrategy === 'sequential' ? 2 : 0;
     const maxRetries = agent.maxRetries ?? sequentialMinRetries;
     const baseDelay = agent.retryDelayMs ?? 1000;
@@ -618,8 +631,12 @@ export class CrewOrchestrator {
             await new Promise(r => setTimeout(r, baseDelay * Math.pow(2, attempt)));
             continue;
           }
+          // GOVERNOR POST-TASK — schema validation exhausted retries
+          if (this.governor) this.governor.postTask(agent.id, lastResult);
           return lastResult;
         }
+        // GOVERNOR POST-TASK — successful completion
+        if (this.governor) this.governor.postTask(agent.id, result);
         return result;
       }
 
@@ -633,6 +650,11 @@ export class CrewOrchestrator {
       if (attempt < maxRetries) {
         await new Promise(r => setTimeout(r, baseDelay * Math.pow(2, attempt)));
       }
+    }
+
+    // GOVERNOR POST-TASK — evaluate outcome and update trust
+    if (this.governor && lastResult) {
+      this.governor.postTask(agent.id, lastResult);
     }
 
     return lastResult!;
@@ -659,6 +681,11 @@ export class CrewOrchestrator {
       constitution: this.constitution,
       crewBudget: this.activCrewBudget,
     });
+
+    // Set active agent on filtered registry so governor tool checks use the correct agent
+    if (this.governor) {
+      ctx.filteredTools.setActiveAgent(agent.id);
+    }
 
     // Wrap progress callback with agent identity
     const wrappedProgress: ProgressCallback | undefined = onProgress
