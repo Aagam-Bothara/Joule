@@ -196,6 +196,18 @@ export interface BrowserConfig {
   idleTimeoutMs?: number;
 }
 
+export interface TraceExportConfig {
+  langfuse?: {
+    publicKey: string;
+    secretKey: string;
+    baseUrl?: string;
+  };
+  otlp?: {
+    endpoint: string;
+    headers?: Record<string, string>;
+  };
+}
+
 export interface JouleConfig {
   providers: ProvidersConfig;
   budgets: BudgetsConfig;
@@ -232,4 +244,5 @@ export interface JouleConfig {
     adaptiveThreshold?: number;
   };
   governance?: GovernanceConfig;
+  traceExport?: TraceExportConfig;
 }

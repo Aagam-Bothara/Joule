@@ -1,4 +1,5 @@
 export { Joule } from './engine.js';
+export { simple, simpleStream, type SimpleOptions } from './simple.js';
 export { TaskExecutor } from './task-executor.js';
 export { BudgetManager, type BudgetEnvelopeInstance } from './budget-manager.js';
 export { ModelRouter, type RoutingDecision, type RoutingPurpose, type RoutingContext } from './model-router.js';
@@ -38,3 +39,7 @@ export {
   Vault, AccountabilityChain, type AccountabilityQuery,
   RewardEngine, ConsensusMechanism, SystemLearner,
 } from './governance/index.js';
+export type { TraceExporter } from './trace-exporters/exporter.js';
+export { LangfuseExporter, type LangfuseExporterConfig } from './trace-exporters/langfuse-exporter.js';
+export { OtlpExporter, type OtlpExporterConfig } from './trace-exporters/otlp-exporter.js';
+export { replayTask, computeDiff, type ReplayOptions, type ReplayResult, type ReplayDiff } from './replay.js';

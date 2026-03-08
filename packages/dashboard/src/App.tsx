@@ -5,6 +5,7 @@ import { TaskDetail } from './pages/TaskDetail.tsx';
 import { LiveStream } from './pages/LiveStream.tsx';
 import { Analytics } from './pages/Analytics.tsx';
 import { ChannelStatus } from './pages/ChannelStatus.tsx';
+import { TraceTimeline } from './pages/TraceTimeline.tsx';
 
 export function App() {
   const [page, setPage] = useState('tasks');
@@ -32,6 +33,13 @@ export function App() {
         return <ChannelStatus />;
       case 'analytics':
         return <Analytics />;
+      case 'timeline':
+        return (
+          <TraceTimeline
+            taskId={selectedTaskId}
+            onBack={() => setPage('tasks')}
+          />
+        );
       default:
         return <TaskList onSelectTask={handleSelectTask} />;
     }

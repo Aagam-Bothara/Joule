@@ -3,6 +3,7 @@ import * as readline from 'node:readline';
 import { existsSync, mkdirSync } from 'node:fs';
 import { writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
+import { runWizard, wizardToConfig, getCrewTemplateName } from './init-wizard.js';
 
 interface InitOptions {
   providers: {
@@ -14,6 +15,8 @@ interface InitOptions {
   budget: string;
   preferLocal: boolean;
   serverPort: number;
+  useCase?: string;
+  governance?: boolean;
 }
 
 function ask(rl: readline.Interface, question: string, fallback?: string): Promise<string> {
@@ -154,6 +157,32 @@ function generateConfigYaml(opts: InitOptions): string {
   lines.push('  host: "127.0.0.1"');
   lines.push('');
 
+  // ── Crew Template (if use case selected) ──────────────
+  if (opts.useCase) {
+    const templateName = getCrewTemplateName(opts.useCase);
+    if (templateName) {
+      lines.push('# ── Crew Template ────────────────────────────────────────');
+      lines.push(`# Use case: ${opts.useCase}`);
+      lines.push(`# Built-in template: ${templateName}`);
+      lines.push(`# Run with: joule crew run --template ${opts.useCase}`);
+      lines.push('');
+    }
+  }
+
+  // ── Governance (if advanced) ──────────────────────────
+  if (opts.governance) {
+    lines.push('# ── Governance ───────────────────────────────────────────');
+    lines.push('# Trust-based agent autonomy, policy enforcement, accountability');
+    lines.push('governance:');
+    lines.push('  enabled: true');
+    lines.push('  defaultTrustScore: 0.5');
+    lines.push('  trustThresholds:');
+    lines.push('    probation: 0.3');
+    lines.push('    trusted: 0.6');
+    lines.push('    senior: 0.8');
+    lines.push('');
+  }
+
   return lines.join('\n');
 }
 
@@ -192,78 +221,14 @@ export const initCommand = new Command('init')
         serverPort: 3927,
       };
     } else {
+      // Enhanced 3-question wizard
       const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-
-      console.log('');
-      console.log('  Joule Project Setup');
-      console.log('  ===================');
-      console.log('');
-
-      // Q1: Providers
-      console.log('  Which providers do you want to use?');
-      console.log('    1. ollama     — local, free (needs Ollama running)');
-      console.log('    2. anthropic  — Claude (needs API key)');
-      console.log('    3. openai     — GPT (needs API key)');
-      console.log('    4. google     — Gemini (needs API key)');
-      console.log('');
-      const providerInput = await ask(rl, '  Enter numbers, comma-separated', '1');
-      const picks = providerInput.split(',').map(s => s.trim());
-
-      let useOllama = picks.includes('1');
-      const useAnthropic = picks.includes('2');
-      const useOpenai = picks.includes('3');
-      const useGoogle = picks.includes('4');
-
-      // If nothing valid was selected, fall back to ollama
-      if (!useOllama && !useAnthropic && !useOpenai && !useGoogle) {
-        console.log('  No valid selection — defaulting to ollama.');
-        useOllama = true;
-      }
-
-      console.log('');
-
-      // Q2: API keys (conditional)
-      let anthropicKey: string | undefined;
-      let openaiKey: string | undefined;
-      let googleKey: string | undefined;
-
-      if (useAnthropic) {
-        anthropicKey = (await ask(rl, '  Anthropic API key (Enter to skip — set env var later)')) || undefined;
-      }
-      if (useOpenai) {
-        openaiKey = (await ask(rl, '  OpenAI API key (Enter to skip — set env var later)')) || undefined;
-      }
-      if (useGoogle) {
-        googleKey = (await ask(rl, '  Google API key (Enter to skip — set env var later)')) || undefined;
-      }
-
-      if (useAnthropic || useOpenai || useGoogle) console.log('');
-
-      // Q3: Budget
-      const budget = await ask(rl, '  Default budget (low / medium / high / unlimited)', 'medium');
-      const validBudgets = ['low', 'medium', 'high', 'unlimited'];
-      const finalBudget = validBudgets.includes(budget) ? budget : 'medium';
-
-      // Q4: Prefer local
-      const localPref = await ask(rl, '  Prefer local models over cloud? (Y/n)', 'Y');
-      const preferLocal = localPref.toLowerCase() !== 'n';
-
-      // Q5: Server port
-      const portInput = await ask(rl, '  Server port', '3927');
-      const serverPort = parseInt(portInput, 10) || 3927;
-
+      const answers = await runWizard(rl);
       rl.close();
 
+      const wizardConfig = wizardToConfig(answers);
       options = {
-        providers: {
-          ollama: useOllama,
-          anthropic: { enabled: useAnthropic, apiKey: anthropicKey },
-          openai: { enabled: useOpenai, apiKey: openaiKey },
-          google: { enabled: useGoogle, apiKey: googleKey },
-        },
-        budget: finalBudget,
-        preferLocal,
-        serverPort,
+        ...wizardConfig,
       };
     }
 

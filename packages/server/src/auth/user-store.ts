@@ -1,7 +1,7 @@
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { createHash, randomBytes } from 'node:crypto';
+import { randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
 import type { JouleUser, ApiKey, MonthlyBudgetQuota } from '@joule/shared';
 import { generateId } from '@joule/shared';
 import type { UserRepository, UserData } from '@joule/store';
@@ -131,15 +131,26 @@ export class UserStore {
   }
 
   static hashPassword(password: string): string {
-    const salt = randomBytes(16).toString('hex');
-    const hash = createHash('sha256').update(salt + password).digest('hex');
-    return `${salt}:${hash}`;
+    const salt = randomBytes(32).toString('hex');
+    const derived = scryptSync(password, salt, 64, { N: 16384, r: 8, p: 1 });
+    return `scrypt:${salt}:${derived.toString('hex')}`;
   }
 
   static verifyPassword(password: string, passwordHash: string): boolean {
-    const [salt, hash] = passwordHash.split(':');
-    const computed = createHash('sha256').update(salt + password).digest('hex');
-    return computed === hash;
+    // Support legacy SHA256 hashes (two parts) and new scrypt hashes (three parts)
+    const parts = passwordHash.split(':');
+    if (parts[0] === 'scrypt' && parts.length === 3) {
+      const salt = parts[1];
+      const stored = Buffer.from(parts[2], 'hex');
+      const derived = scryptSync(password, salt, 64, { N: 16384, r: 8, p: 1 });
+      return timingSafeEqual(stored, derived);
+    }
+    // Legacy fallback: SHA256 salt:hash format — timing-safe compare
+    const { createHash } = require('node:crypto');
+    const [salt, hash] = parts;
+    const computed = Buffer.from(createHash('sha256').update(salt + password).digest('hex'));
+    const expected = Buffer.from(hash);
+    return computed.length === expected.length && timingSafeEqual(computed, expected);
   }
 
   async createUser(username: string, password: string, role: 'user' | 'admin' = 'user'): Promise<JouleUser> {

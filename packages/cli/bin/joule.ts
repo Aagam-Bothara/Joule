@@ -17,6 +17,7 @@ import { crewCommand } from '../src/commands/crew.js';
 import { doctorCommand } from '../src/commands/doctor.js';
 import { skillsCommand } from '../src/commands/skills.js';
 import { initCommand } from '../src/commands/init.js';
+import { replayCommand } from '../src/commands/replay.js';
 
 const program = new Command();
 
@@ -42,5 +43,6 @@ program.addCommand(authCommand);
 program.addCommand(crewCommand);
 program.addCommand(doctorCommand);
 program.addCommand(skillsCommand);
+program.addCommand(replayCommand);
 
 program.parse();

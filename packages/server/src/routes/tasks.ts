@@ -9,12 +9,19 @@ import {
 import type { Joule } from '@joule/core';
 import type { TaskRepository } from '@joule/store';
 
+const MAX_CACHED_RESULTS = 1000;
+
 export function tasksRoutes(joule: Joule, taskRepo?: TaskRepository) {
   const router = new Hono();
   const taskResults = new Map<string, TaskResult>();
 
   // Helper: persist result to both in-memory map and SQLite
   function storeResult(taskId: string, result: TaskResult) {
+    // LRU eviction: if map is at capacity, delete the oldest entry
+    if (taskResults.size >= MAX_CACHED_RESULTS) {
+      const oldest = taskResults.keys().next().value!;
+      taskResults.delete(oldest);
+    }
     taskResults.set(taskId, result);
     if (taskRepo) {
       try {
@@ -123,6 +130,11 @@ export function tasksRoutes(joule: Joule, taskRepo?: TaskRepository) {
             event: 'chunk',
             data: JSON.stringify(event.chunk),
           });
+        } else if (event.type === 'budget_update') {
+          await stream.writeSSE({
+            event: 'budget_update',
+            data: JSON.stringify(event.budgetUpdate),
+          });
         } else if (event.type === 'result') {
           storeResult(task.id, event.result!);
           await stream.writeSSE({
@@ -155,11 +167,21 @@ export function tasksRoutes(joule: Joule, taskRepo?: TaskRepository) {
   });
 
   router.get('/:id/trace', (c) => {
-    const result = taskResults.get(c.req.param('id'));
-    if (!result) {
-      return c.json({ error: 'Task not found' }, 404);
+    const id = c.req.param('id');
+
+    // Try in-memory first
+    const result = taskResults.get(id);
+    if (result?.trace) {
+      return c.json(result.trace);
     }
-    return c.json(result.trace);
+
+    // Fall back to SQLite via TraceLogger
+    const dbTrace = joule.tracer.loadTraceByTaskId(id);
+    if (dbTrace) {
+      return c.json(dbTrace);
+    }
+
+    return c.json({ error: 'Trace not found' }, 404);
   });
 
   return router;

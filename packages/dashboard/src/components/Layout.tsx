@@ -25,6 +25,7 @@ const pages = [
   { id: 'channels', label: 'Channels' },
   { id: 'tools', label: 'Tools' },
   { id: 'analytics', label: 'Analytics' },
+  { id: 'timeline', label: 'Trace Timeline' },
 ];
 
 export function Layout({ currentPage, onNavigate, children }: LayoutProps) {

@@ -14,13 +14,25 @@ import {
   type ToolResult,
 } from '@joule/shared';
 import type { TraceRepository, TraceData, SpanData, EventData } from '@joule/store';
+import type { TraceExporter } from './trace-exporters/exporter.js';
 
 export class TraceLogger {
   private traces = new Map<string, TraceState>();
   private repo?: TraceRepository;
+  private exporters: TraceExporter[] = [];
 
   constructor(traceRepo?: TraceRepository) {
     this.repo = traceRepo;
+  }
+
+  /** Register a trace exporter (Langfuse, OTLP, etc.) */
+  addExporter(exporter: TraceExporter): void {
+    this.exporters.push(exporter);
+  }
+
+  /** Shutdown all exporters — flush pending data */
+  async shutdownExporters(): Promise<void> {
+    await Promise.allSettled(this.exporters.map(e => e.shutdown()));
   }
 
   createTrace(traceId: string, taskId: string, budget: BudgetEnvelope): void {
@@ -164,6 +176,11 @@ export class TraceLogger {
       }
     }
 
+    // Export to external backends (best-effort, non-blocking)
+    for (const exporter of this.exporters) {
+      exporter.export(trace).catch(() => { /* export is best-effort */ });
+    }
+
     // Clean up in-memory state
     this.traces.delete(traceId);
 
@@ -174,6 +191,14 @@ export class TraceLogger {
   loadTrace(traceId: string): ExecutionTrace | null {
     if (!this.repo) return null;
     const data = this.repo.load(traceId);
+    if (!data) return null;
+    return this.fromTraceData(data);
+  }
+
+  /** Load a trace by task ID from the database (for tasks no longer in memory) */
+  loadTraceByTaskId(taskId: string): ExecutionTrace | null {
+    if (!this.repo) return null;
+    const data = this.repo.getByTaskId?.(taskId);
     if (!data) return null;
     return this.fromTraceData(data);
   }

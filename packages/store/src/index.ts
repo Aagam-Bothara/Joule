@@ -36,6 +36,16 @@ export type { UserData, ApiKeyData } from './repositories/user.repository.js';
 export { VectorIndex, hashEmbed } from './vector-index.js';
 export type { VectorSearchResult } from './vector-index.js';
 
+// ── Vector Providers (pgvector, Chroma) ─────────────────────────
+export { PgVectorProvider } from './vector-providers/pgvector-provider.js';
+export type { PgVectorConfig } from './vector-providers/pgvector-provider.js';
+export { ChromaProvider } from './vector-providers/chroma-provider.js';
+export type { ChromaConfig } from './vector-providers/chroma-provider.js';
+export type {
+  VectorProvider, VectorDocument, VectorSearchOptions,
+  VectorSearchResult as ExternalVectorSearchResult,
+} from './vector-providers/vector-provider.js';
+
 // ── Store ────────────────────────────────────────────────────────
 
 import type Database from 'better-sqlite3';

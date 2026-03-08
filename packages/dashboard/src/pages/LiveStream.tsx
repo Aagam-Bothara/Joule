@@ -3,6 +3,7 @@ import { useTaskStream } from '../hooks/useTaskStream.ts';
 import { StreamOutput } from '../components/StreamOutput.tsx';
 import { CanvasViewer } from '../components/CanvasViewer.tsx';
 import { fetchArtifactHtml } from '../api/client.ts';
+import { LiveBudgetGauge } from '../components/LiveBudgetGauge.tsx';
 
 const styles = {
   title: { fontSize: 24, fontWeight: 700, marginBottom: 24 } as React.CSSProperties,
@@ -98,6 +99,14 @@ export function LiveStream() {
             </div>
           ))}
         </div>
+      )}
+
+      {streaming && (
+        <LiveBudgetGauge
+          taskId={result?.taskId ?? null}
+          staticBudget={result?.budgetUsed}
+          staticLimits={result?.budgetAllocated}
+        />
       )}
 
       {(streaming || fullText) && (

@@ -72,11 +72,19 @@ interface StateMachineContext {
   onProgress?: ProgressCallback;
 }
 
+export interface BudgetUpdateEvent {
+  agentId?: string;
+  agentRole?: string;
+  usage: BudgetUsage;
+  limits: Record<string, number>;
+}
+
 export interface StreamEvent {
-  type: 'progress' | 'chunk' | 'result';
+  type: 'progress' | 'chunk' | 'result' | 'budget_update';
   progress?: ProgressEvent;
   chunk?: StreamChunk;
   result?: TaskResult;
+  budgetUpdate?: BudgetUpdateEvent;
 }
 
 export class TaskExecutor {

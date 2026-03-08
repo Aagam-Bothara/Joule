@@ -1,5 +1,8 @@
 import { generateId, type Task, type TaskResult, type JouleConfig, type ToolDefinition, type EnergyConfig } from '@joule/shared';
 import type { ProgressCallback, StreamEvent } from './task-executor.js';
+import { simple, simpleStream, type SimpleOptions } from './simple.js';
+import { LangfuseExporter } from './trace-exporters/langfuse-exporter.js';
+import { OtlpExporter } from './trace-exporters/otlp-exporter.js';
 import { ModelProviderRegistry } from '@joule/models';
 import { initializeStore, closeDatabase, type JouleStore } from '@joule/store';
 import { ConfigManager } from './config-manager.js';
@@ -101,6 +104,15 @@ export class Joule {
         vault, accountability, rewardEngine, consensus, systemLearner,
       });
       this.tools.setGovernor(this.governor);
+    }
+
+    // Wire up trace exporters (Langfuse, OTLP)
+    const traceExportConfig = this.config.get('traceExport');
+    if (traceExportConfig?.langfuse) {
+      this.tracer.addExporter(new LangfuseExporter(traceExportConfig.langfuse));
+    }
+    if (traceExportConfig?.otlp) {
+      this.tracer.addExporter(new OtlpExporter(traceExportConfig.otlp));
     }
 
     // Wire up structured logger
@@ -508,6 +520,32 @@ export class Joule {
     return result!;
   }
 
+  /**
+   * Zero-config one-liner: execute a task with auto-detected providers.
+   *
+   * @example
+   * ```typescript
+   * const answer = await Joule.simple("What is 2+2?");
+   * ```
+   */
+  static async simple(description: string, options?: SimpleOptions): Promise<string> {
+    return simple(description, options);
+  }
+
+  /**
+   * Zero-config streaming: stream task execution with auto-detected providers.
+   *
+   * @example
+   * ```typescript
+   * for await (const event of Joule.simpleStream("Write a poem")) {
+   *   if (event.chunk) process.stdout.write(event.chunk.text ?? '');
+   * }
+   * ```
+   */
+  static async *simpleStream(description: string, options?: SimpleOptions): AsyncGenerator<StreamEvent> {
+    yield* simpleStream(description, options);
+  }
+
   registerTool(tool: ToolDefinition): void {
     this.tools.register(tool, 'programmatic');
   }
@@ -518,6 +556,9 @@ export class Joule {
   }
 
   async shutdown(): Promise<void> {
+    // Flush trace exporters before shutdown
+    await this.tracer.shutdownExporters();
+
     if (this.shutdownManager) {
       this.shutdownManager.registerCallback('memory', async () => {
         this.memory.optimized.stopConsolidation();

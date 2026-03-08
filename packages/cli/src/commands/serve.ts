@@ -46,6 +46,18 @@ export const serveCommand = new Command('serve')
     await joule.initialize();
     await setupJoule(joule);
 
+    // Graceful shutdown on SIGTERM/SIGINT
+    let shuttingDown = false;
+    const gracefulShutdown = async (signal: string) => {
+      if (shuttingDown) return;
+      shuttingDown = true;
+      console.log(`\n${signal} received — shutting down gracefully...`);
+      await joule.shutdown();
+      process.exit(0);
+    };
+    process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+    process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+
     await startServer(joule);
 
     // Start messaging channels if configured

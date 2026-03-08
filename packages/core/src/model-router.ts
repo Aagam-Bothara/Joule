@@ -128,6 +128,44 @@ export class ModelRouter {
     this.failureCounts.delete(provider);
   }
 
+  /**
+   * Execute a model call with circuit breaker protection.
+   * On failure, reports the failure and retries with a fallback provider if available.
+   */
+  async callWithCircuitBreaker<T>(
+    decision: RoutingDecision,
+    envelope: BudgetEnvelopeInstance,
+    fn: (provider: ModelProviderName, model: string) => Promise<T>,
+  ): Promise<T> {
+    try {
+      const result = await fn(decision.provider, decision.model);
+      this.reportSuccess(decision.provider);
+      return result;
+    } catch (err) {
+      this.reportFailure(decision.provider);
+
+      // Try fallback: re-route excluding the failed provider
+      try {
+        const fallback = await this.route(
+          'execute',
+          envelope,
+          { complexity: decision.tier === ModelTier.LLM ? 1.0 : 0.3 },
+        );
+
+        // Only retry if we got a different provider
+        if (fallback.provider !== decision.provider) {
+          const result = await fn(fallback.provider, fallback.model);
+          this.reportSuccess(fallback.provider);
+          return result;
+        }
+      } catch {
+        // No fallback available — rethrow original error
+      }
+
+      throw err;
+    }
+  }
+
   private isInCooldown(provider: ModelProviderName): boolean {
     const entry = this.failureCounts.get(provider);
     if (!entry) return false;

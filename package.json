@@ -1,7 +1,19 @@
 {
   "name": "joule",
   "private": true,
-  "description": "Energy-aware AI agent runtime",
+  "description": "AI agents with a budget, a constitution, and an off switch",
+  "keywords": [
+    "ai-agents",
+    "llm",
+    "multi-agent",
+    "governance",
+    "budget-enforcement",
+    "typescript",
+    "ollama",
+    "openai",
+    "anthropic",
+    "constitutional-ai"
+  ],
   "scripts": {
     "build": "pnpm -r build",
     "test": "vitest",

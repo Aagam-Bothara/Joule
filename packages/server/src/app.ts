@@ -9,6 +9,7 @@ import { authRoutes } from './routes/auth.js';
 import { usersRoutes } from './routes/users.js';
 import { artifactsRoutes } from './routes/artifacts.js';
 import { openApiRoutes } from './routes/openapi.js';
+import { replayRoutes } from './routes/replay.js';
 import { UserStore } from './auth/user-store.js';
 import { authMiddleware, adminMiddleware, rateLimitMiddleware } from './auth/middleware.js';
 import { type Joule, Logger } from '@joule/core';
@@ -104,6 +105,7 @@ export async function createApp(joule: Joule) {
   app.route('/health', healthRoutes(joule));
   app.route('/artifacts', artifactsRoutes(getArtifact, listArtifacts, getArtifactVersion));
   app.route('/openapi', openApiRoutes(joule));
+  app.route('/replay', replayRoutes(joule));
 
   // Dashboard static files
   const dashboardDir = findDashboardDir();
