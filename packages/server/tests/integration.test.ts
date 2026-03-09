@@ -57,6 +57,7 @@ async function createTestJoule(responses: string[], authEnabled = false) {
       complexityThreshold: 0.7,
       providerPriority: { slm: ['ollama'], llm: ['ollama'] },
       maxReplanDepth: 2,
+      unifiedPlanning: false,
     },
     ...(authEnabled ? {
       auth: {

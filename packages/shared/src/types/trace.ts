@@ -35,7 +35,9 @@ export type TraceEventType =
   | 'trust_update'
   | 'policy_evaluation'
   | 'vault_access'
-  | 'consensus_vote';
+  | 'consensus_vote'
+  | 'unified_plan_generated'
+  | 'unified_plan_failed';
 
 export interface TraceEvent {
   id: string;

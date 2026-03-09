@@ -47,6 +47,7 @@ const defaultRouting: RoutingConfig = {
   complexityThreshold: 0.7,
   providerPriority: { slm: ['ollama'], llm: ['ollama'] },
   maxReplanDepth: 2,
+  unifiedPlanning: false,
 };
 
 function makeTask(description = 'Test task'): Task {

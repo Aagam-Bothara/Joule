@@ -156,6 +156,8 @@ export interface RoutingConfig {
   preferEfficientModels?: boolean;
   energyWeight?: number;
   maxReplanDepth?: number;
+  /** Use unified planning (spec+classify+plan+critique in 1 LLM call). Default: true */
+  unifiedPlanning?: boolean;
 }
 
 export interface LoggingConfig {

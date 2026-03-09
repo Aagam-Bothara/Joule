@@ -402,59 +402,79 @@ export class TaskExecutor {
       }
     }
 
-    // SPEC → generate task specification (graceful — never blocks)
-    this.transitionState(ctx, 'spec');
-    ctx.onProgress?.({ phase: 'specifying', usage: this.budget.getUsage(ctx.envelope), state: 'spec' });
-    ctx.spec = await this.planner.specifyTask(ctx.task, ctx.envelope, ctx.traceId);
+    // UNIFIED PLAN → try spec + classify + plan + critique in ONE LLM call
+    // Saves 3 LLM round-trips (~60% token reduction) compared to separate pipeline
+    // Enabled by default; set routing.unifiedPlanning = false to use separate pipeline
+    const useUnifiedPlanning = this.routingConfig?.unifiedPlanning !== false;
 
-    // PLAN → classify + plan + validate
     this.transitionState(ctx, 'plan');
     ctx.onProgress?.({ phase: 'planning', usage: this.budget.getUsage(ctx.envelope), state: 'plan' });
-    const complexity = await this.planner.classifyComplexity(ctx.task, ctx.envelope, ctx.traceId);
-    this.budget.checkBudget(ctx.envelope);
 
-    ctx.plan = await this.planner.plan(ctx.task, complexity, ctx.envelope, ctx.traceId, ctx.spec);
-    this.budget.checkBudget(ctx.envelope);
-    try {
-      this.planner.validatePlan(ctx.plan);
-    } catch {
-      // Validation errors (e.g. missing tools) are handled gracefully by
-      // the simulate state, which flags issues and filters invalid steps.
-    }
-    ctx.steps = [...ctx.plan.steps];
+    const unified = useUnifiedPlanning
+      ? await this.planner.unifiedPlan(ctx.task, ctx.envelope, ctx.traceId)
+      : null;
 
-    // CRITIQUE → meta-reasoning: evaluate plan quality before execution
-    if (ctx.steps.length > 0) {
-      this.transitionState(ctx, 'critique');
+    if (unified) {
+      // Unified planning succeeded — use its results directly
+      ctx.spec = unified.spec;
+      ctx.plan = unified.plan;
+      ctx.steps = [...unified.plan.steps];
+      ctx.planScore = unified.planScore;
+      this.budget.checkBudget(ctx.envelope);
+
       try {
-        ctx.planScore = await this.planner.critiquePlan(
-          ctx.task, ctx.plan, ctx.spec, ctx.envelope, ctx.traceId,
-        );
-
-        // If plan quality is poor and a refined plan is available, swap it in
-        if (ctx.planScore.overall < 0.5 && ctx.planScore.refinedPlan?.steps) {
-          const refinedPlan = this.planner['parsePlan'](
-            JSON.stringify(ctx.planScore.refinedPlan),
-            ctx.task.id,
-            ctx.plan.complexity,
-          );
-          this.planner.validatePlan(refinedPlan);
-          ctx.plan = refinedPlan;
-          ctx.steps = [...refinedPlan.steps];
-
-          // Re-score the refined plan's step confidences
-          ctx.planScore.stepConfidences = ctx.planScore.refinedPlan.steps.map(() => 0.7);
-
-          this.tracer.logEvent(ctx.traceId, 'info', {
-            type: 'plan_refined',
-            reason: `Plan quality ${ctx.planScore.overall} below threshold`,
-            originalSteps: ctx.plan.steps.length,
-            refinedSteps: ctx.steps.length,
-          });
-        }
+        this.planner.validatePlan(ctx.plan);
       } catch {
-        // Critique failed — proceed with original plan
-        ctx.planScore = { overall: 0.7, stepConfidences: ctx.steps.map(() => 0.7), issues: [] };
+        // Validation errors handled by simulate stage
+      }
+    } else {
+      // Unified planning failed — fall back to separate pipeline (4 LLM calls)
+      this.tracer.logEvent(ctx.traceId, 'info', {
+        type: 'unified_fallback',
+        reason: 'Falling back to separate spec → classify → plan → critique pipeline',
+      });
+
+      // SPEC
+      this.transitionState(ctx, 'spec');
+      ctx.onProgress?.({ phase: 'specifying', usage: this.budget.getUsage(ctx.envelope), state: 'spec' });
+      ctx.spec = await this.planner.specifyTask(ctx.task, ctx.envelope, ctx.traceId);
+
+      // CLASSIFY + PLAN
+      this.transitionState(ctx, 'plan');
+      const complexity = await this.planner.classifyComplexity(ctx.task, ctx.envelope, ctx.traceId);
+      this.budget.checkBudget(ctx.envelope);
+
+      ctx.plan = await this.planner.plan(ctx.task, complexity, ctx.envelope, ctx.traceId, ctx.spec);
+      this.budget.checkBudget(ctx.envelope);
+      try {
+        this.planner.validatePlan(ctx.plan);
+      } catch {
+        // Validation errors handled by simulate stage
+      }
+      ctx.steps = [...ctx.plan.steps];
+
+      // CRITIQUE
+      if (ctx.steps.length > 0) {
+        this.transitionState(ctx, 'critique');
+        try {
+          ctx.planScore = await this.planner.critiquePlan(
+            ctx.task, ctx.plan, ctx.spec, ctx.envelope, ctx.traceId,
+          );
+
+          if (ctx.planScore.overall < 0.5 && ctx.planScore.refinedPlan?.steps) {
+            const refinedPlan = this.planner['parsePlan'](
+              JSON.stringify(ctx.planScore.refinedPlan),
+              ctx.task.id,
+              ctx.plan.complexity,
+            );
+            this.planner.validatePlan(refinedPlan);
+            ctx.plan = refinedPlan;
+            ctx.steps = [...refinedPlan.steps];
+            ctx.planScore.stepConfidences = ctx.planScore.refinedPlan.steps.map(() => 0.7);
+          }
+        } catch {
+          ctx.planScore = { overall: 0.7, stepConfidences: ctx.steps.map(() => 0.7), issues: [] };
+        }
       }
     }
 

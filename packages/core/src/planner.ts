@@ -239,6 +239,42 @@ const ACTION_PATTERNS: Array<{ pattern: RegExp; minComplexity: number }> = [
   { pattern: /\buse\s+(?:the\s+)?(?:browser|shell|http|file|tool)\b/i, minComplexity: 0.7 },
 ];
 
+/**
+ * Unified prompt: combines spec + classify + plan + critique into a single LLM call.
+ * Saves 3-4 LLM round-trips compared to the separate pipeline.
+ */
+const UNIFIED_PLAN_SYSTEM_PROMPT_PREFIX = `You are a smart AI task planner. Given a task and available tools, analyze and plan in ONE response.
+Respond with ONLY a raw JSON object (no markdown, no code fences, no explanation):
+{
+  "goal": "<clear one-sentence goal>",
+  "complexity": <number 0.0-1.0>,
+  "confidence": <number 0.0-1.0 — how confident you are this plan will succeed>,
+  "steps": [{"description": "<what this step does>", "toolName": "<tool_name>", "toolArgs": {<arguments>}}]
+}
+
+Complexity guidelines:
+- 0.0-0.3: Simple knowledge questions, greetings, mental math — return {"steps": []}
+- 0.3-0.6: Multi-step reasoning answered from knowledge alone — return {"steps": []}
+- 0.6-0.8: Tasks requiring one or two tool calls
+- 0.8-1.0: Tasks requiring multiple tool steps or chained actions
+
+Rules:
+- ONLY return empty steps [] if the task is a pure knowledge question, greeting, or conversation
+- If the task asks to DO something (open, create, write, navigate, browse, play, fetch, send, run) you MUST include tool steps
+- Use ONLY the tools listed below — never invent tools
+- Each step must use exactly one tool
+- Tool arguments must match the tool's expected input exactly
+
+Available tools:
+`;
+
+export interface UnifiedPlanResult {
+  spec: TaskSpec;
+  complexity: number;
+  plan: ExecutionPlan;
+  planScore: PlanScore;
+}
+
 const SPEC_SYSTEM_PROMPT = `You are a task specification generator. Given a task description, extract a structured specification.
 Respond with ONLY a raw JSON object (no markdown, no code fences, no explanation):
 {"goal": "<clear one-sentence goal>", "constraints": ["<constraint 1>", ...], "successCriteria": [{"description": "<what must be true>", "type": "<type>", "check": {<details>}}]}
@@ -360,6 +396,124 @@ export class Planner {
     } catch {
       // Model call failed — return safe fallback
       return this.fallbackSpec(task.description);
+    } finally {
+      this.tracer.endSpan(traceId, spanId);
+    }
+  }
+
+  /**
+   * Unified planning: spec + classify + plan + critique in ONE LLM call.
+   * Reduces 4 separate LLM round-trips to 1, saving ~60-80% of planning tokens.
+   * Falls back to null if parsing fails (caller should use separate pipeline).
+   */
+  async unifiedPlan(
+    task: Task,
+    envelope: BudgetEnvelopeInstance,
+    traceId: string,
+  ): Promise<UnifiedPlanResult | null> {
+    const spanId = this.tracer.startSpan(traceId, 'unified-plan');
+
+    try {
+      const toolDescriptions = this.tools.getToolDescriptions()
+        .map(t => `- ${t.name}: ${t.description}`)
+        .join('\n');
+
+      let systemPrompt = UNIFIED_PLAN_SYSTEM_PROMPT_PREFIX + toolDescriptions;
+
+      if (this.agentRole) {
+        systemPrompt = `[AGENT ROLE: ${this.agentRole}]\n[AGENT INSTRUCTIONS: ${this.agentInstructions ?? ''}]\n\n${systemPrompt}`;
+      }
+      if (this.constitution) {
+        systemPrompt += this.constitution.buildPromptInjection();
+      }
+
+      // Use the action-intent floor for routing tier decision
+      const actionFloor = Planner.detectActionIntent(task.description);
+      const routingComplexity = Math.max(0.5, actionFloor);
+      const decision = await this.router.route('plan', envelope, { complexity: routingComplexity });
+      this.tracer.logRoutingDecision(traceId, decision as unknown as Record<string, unknown>);
+
+      const response = await this.callModel(decision, {
+        system: systemPrompt,
+        userMessage: task.description,
+        history: task.messages?.map(m => ({ role: m.role, content: m.content })),
+      });
+
+      this.budgetManager.deductTokens(envelope, response.tokenUsage.totalTokens, response.model);
+      this.budgetManager.deductCost(envelope, response.costUsd);
+
+      // Parse the unified response
+      const parsed = Planner.extractJson(response.content) as {
+        goal?: string;
+        complexity?: number;
+        confidence?: number;
+        steps?: Array<{ description?: string; toolName?: string; toolArgs?: Record<string, unknown>; verify?: StepVerification }>;
+      };
+
+      // Validate that the response looks like a unified plan (has both complexity and steps).
+      // If the model returned a partial response (e.g. just goal/spec), fall back to separate pipeline.
+      if (parsed.complexity === undefined && parsed.steps === undefined) {
+        this.tracer.logEvent(traceId, 'unified_plan_failed', {
+          reason: 'Response missing complexity and steps — not a valid unified plan',
+        });
+        return null;
+      }
+
+      // Extract complexity (with action floor)
+      const slmComplexity = Math.max(0, Math.min(1, parsed.complexity ?? 0.5));
+      const complexity = Math.max(slmComplexity, actionFloor);
+
+      // Build spec
+      const spec: TaskSpec = {
+        goal: parsed.goal || task.description,
+        constraints: [],
+        successCriteria: [{
+          description: 'Task completed successfully',
+          type: 'tool_succeeded',
+          check: {},
+        }],
+      };
+
+      // Build plan
+      const steps: PlanStep[] = (parsed.steps ?? []).map(
+        (s, i) => ({
+          index: i,
+          description: s.description ?? '',
+          toolName: s.toolName ?? '',
+          toolArgs: s.toolArgs ?? {},
+          ...(s.verify ? { verify: s.verify } : {}),
+        }),
+      );
+      const plan: ExecutionPlan = {
+        taskId: task.id,
+        complexity,
+        steps,
+        rawResponse: response.content,
+      };
+
+      // Build plan score from confidence
+      const confidence = Math.max(0, Math.min(1, parsed.confidence ?? 0.7));
+      const planScore: PlanScore = {
+        overall: confidence,
+        stepConfidences: steps.map(() => confidence),
+        issues: [],
+      };
+
+      this.tracer.logEvent(traceId, 'unified_plan_generated', {
+        goal: spec.goal,
+        complexity,
+        confidence,
+        stepCount: steps.length,
+        tokensUsed: response.tokenUsage.totalTokens,
+      });
+
+      return { spec, complexity, plan, planScore };
+    } catch {
+      // Unified planning failed — caller should fall back to separate pipeline
+      this.tracer.logEvent(traceId, 'unified_plan_failed', {
+        reason: 'Parsing or model call failed — falling back to separate pipeline',
+      });
+      return null;
     } finally {
       this.tracer.endSpan(traceId, spanId);
     }

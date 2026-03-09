@@ -73,6 +73,7 @@ const defaultRoutingConfig: RoutingConfig = {
   complexityThreshold: 0.7,
   providerPriority: { slm: ['ollama'], llm: ['ollama'] },
   maxReplanDepth: 2,
+  unifiedPlanning: false,
 };
 
 describe('Agentic Re-planning', () => {
