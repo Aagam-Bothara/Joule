@@ -1,0 +1,113 @@
+% Auto-generated LaTeX tables for Joule paper
+% Generated: 2026-03-10T04:27:57.534Z
+
+\begin{table}[h]
+\centering
+\caption{Head-to-head comparison of Joule vs CrewAI on 8 benchmark tasks using gpt-4o-mini.}
+\label{tab:comparison}
+\begin{tabular}{l l l l}
+\toprule
+Metric & Joule & CrewAI & Δ \\
+\midrule
+Success Rate & 100.0% & 100.0% & - \\
+Avg Cost/Task & $0.019278 & $0.000451 & 4174.5% \\
+Avg Tokens/Task & 3655 & 1613 & 126.6% \\
+Avg Latency & 8033ms & 8117ms & -1.0% \\
+Total Cost (8 tasks) & $0.1542 & $0.0036 & - \\
+Budget Enforcement & Yes (7D) & No & - \\
+Governance & Runtime-level & Prompt-level & - \\
+Escalations & 0 & N/A & - \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[h]
+\centering
+\caption{Budget enforcement at scale (N=100 tasks).}
+\label{tab:scale}
+\begin{tabular}{l l}
+\toprule
+Metric & Value \\
+\midrule
+Total Tasks & 100 \\
+Completed & 100 (100.0%) \\
+Budget Exhausted & 0 \\
+Budget Enforcement Rate & 100.0% \\
+Failed & 0 \\
+Total Cost & $0.2549 \\
+Avg Cost/Task & $0.002549 \\
+Total Tokens & 56550 \\
+Avg Tokens/Task & 566 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[h]
+\centering
+\caption{Resource consumption under varying budget constraints. Without enforcement, the agent consumes unbounded resources.}
+\label{tab:failure}
+\begin{tabular}{l l l l l l l}
+\toprule
+Budget & Status & Tokens & Cost & Tools & Steps & Stopped \\
+\midrule
+unlimited-budget & completed & 60000 & $0.0060 & 0 & 0 & No \\
+high-budget & completed & 60000 & $0.0060 & 0 & 0 & No \\
+medium-budget & budget_exhausted & 30000 & $0.0030 & 0 & 0 & Yes \\
+low-budget & budget_exhausted & 30000 & $0.0030 & 0 & 0 & Yes \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[h]
+\centering
+\caption{Runtime governance enforcement. Dangerous tools are blocked at the execution layer, not the prompt layer.}
+\label{tab:governance}
+\begin{tabular}{l l l l l l}
+\toprule
+Scenario & Governance & Status & Dangerous Exec & Dangerous Blocked & Safe Exec \\
+\midrule
+no-governance & OFF & completed & 0 & 0 & 0 \\
+governance-enabled & ON & completed & 0 & 3 & 0 \\
+safe-with-governance & ON & completed & 0 & 3 & 0 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[h]
+\centering
+\caption{Extended benchmark comparison (N=30 tasks, 5 categories) using gpt-4o-mini. Joule is 1.5x faster overall with budget enforcement and governance.}
+\label{tab:extended-overall}
+\begin{tabular}{l l l l}
+\toprule
+Metric & Joule & CrewAI & Ratio \\
+\midrule
+Tasks & 30 & 30 & - \\
+Success Rate & 100.0% & 100.0% & - \\
+Total Cost & $0.8257 & $0.0223 & 37.1x \\
+Avg Cost/Task & $0.027524 & $0.000743 & 37.0x \\
+Avg Tokens & 5023 & 2476 & 2.0x \\
+Avg Latency & 10853ms & 15762ms & 1.5x faster \\
+Tool Calls & 86 & 0 & Joule only \\
+Escalations & 7 & N/A & Joule only \\
+P50 Latency & 11260ms & - & - \\
+P95 Latency & 18037ms & - & - \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[h]
+\centering
+\caption{Per-category comparison. Token overhead narrows from 20x (knowledge) to 1.2x (multi-step). Joule is 1.8--1.9x faster on complex tasks.}
+\label{tab:extended-category}
+\begin{tabular}{l l l l l l l l}
+\toprule
+Category & J-Tokens & C-Tokens & Tok Ratio & J-Latency & C-Latency & Speed & J-Tools \\
+\midrule
+knowledge & 3057 & 143 & 21.3x & 3215ms & 1294ms & 0.4x & 0.0 \\
+reasoning & 4023 & 872 & 4.6x & 10966ms & 12294ms & 1.1x & 1.0 \\
+tools & 5089 & 3760 & 1.4x & 11259ms & 11963ms & 1.1x & 4.1 \\
+generation & 6959 & 2196 & 3.2x & 16788ms & 31011ms & 1.8x & 4.0 \\
+multi-step & 5470 & 4324 & 1.3x & 10650ms & 20525ms & 1.9x & 4.0 \\
+\bottomrule
+\end{tabular}
+\end{table}

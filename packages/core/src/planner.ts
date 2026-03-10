@@ -243,20 +243,34 @@ const ACTION_PATTERNS: Array<{ pattern: RegExp; minComplexity: number }> = [
  * Unified prompt: combines spec + classify + plan + critique into a single LLM call.
  * Saves 3-4 LLM round-trips compared to the separate pipeline.
  */
+const PRE_SCREEN_SYSTEM_PROMPT = `You are a task screener. Determine if the user's request is a simple knowledge question, greeting, or mental math that you can answer directly WITHOUT any tools or external actions.
+Respond with ONLY a raw JSON object (no markdown, no code fences):
+{"direct": true, "answer": "<your complete answer>"} — if you can answer directly
+{"direct": false} — if the task requires tools, web search, file operations, code execution, or multi-step actions`;
+
+const SLIM_PLAN_SYSTEM_PROMPT = `You are a helpful AI assistant. The user's request appears to be a simple question or greeting.
+Respond with ONLY a raw JSON object (no markdown, no code fences):
+{"goal": "<one-sentence goal>", "complexity": <0.0-0.5>, "confidence": <0.0-1.0>, "steps": [], "directAnswer": "<your complete answer>"}
+
+If the task actually requires tools or multi-step actions, set complexity > 0.5, omit directAnswer, and describe needed steps.`;
+
 const UNIFIED_PLAN_SYSTEM_PROMPT_PREFIX = `You are a smart AI task planner. Given a task and available tools, analyze and plan in ONE response.
 Respond with ONLY a raw JSON object (no markdown, no code fences, no explanation):
 {
   "goal": "<clear one-sentence goal>",
   "complexity": <number 0.0-1.0>,
   "confidence": <number 0.0-1.0 — how confident you are this plan will succeed>,
-  "steps": [{"description": "<what this step does>", "toolName": "<tool_name>", "toolArgs": {<arguments>}}]
+  "steps": [{"description": "<what this step does>", "toolName": "<tool_name>", "toolArgs": {<arguments>}}],
+  "directAnswer": "<if complexity <= 0.5 and steps is empty, provide the answer here directly>"
 }
 
 Complexity guidelines:
-- 0.0-0.3: Simple knowledge questions, greetings, mental math — return {"steps": []}
-- 0.3-0.6: Multi-step reasoning answered from knowledge alone — return {"steps": []}
-- 0.6-0.8: Tasks requiring one or two tool calls
-- 0.8-1.0: Tasks requiring multiple tool steps or chained actions
+- 0.0-0.3: Simple knowledge questions, greetings, mental math — return {"steps": [], "directAnswer": "<your answer>"}
+- 0.3-0.6: Multi-step reasoning answered from knowledge alone — return {"steps": [], "directAnswer": "<your answer>"}
+- 0.6-0.8: Tasks requiring one or two tool calls — omit directAnswer
+- 0.8-1.0: Tasks requiring multiple tool steps or chained actions — omit directAnswer
+
+IMPORTANT: For tasks with complexity <= 0.5 and empty steps, you MUST include a "directAnswer" field with the complete answer. This avoids a second LLM call.
 
 Rules:
 - ONLY return empty steps [] if the task is a pure knowledge question, greeting, or conversation
@@ -273,6 +287,8 @@ export interface UnifiedPlanResult {
   complexity: number;
   plan: ExecutionPlan;
   planScore: PlanScore;
+  /** For low-complexity tasks with no steps, the LLM may return the answer inline */
+  directAnswer?: string;
 }
 
 const SPEC_SYSTEM_PROMPT = `You are a task specification generator. Given a task description, extract a structured specification.
@@ -402,6 +418,69 @@ export class Planner {
   }
 
   /**
+   * Lightweight pre-screen: determines if a task can be answered directly
+   * without the full planning prompt (no tool descriptions, no plan schema).
+   * Uses ~150 tokens of system prompt vs ~2900 for unified plan.
+   * Returns the direct answer string, or null if the task needs full planning.
+   */
+  async preScreen(
+    task: Task,
+    envelope: BudgetEnvelopeInstance,
+    traceId: string,
+  ): Promise<string | null> {
+    // Only pre-screen tasks with no action intent, no conversation history,
+    // no tools available (task-level or global), and short description
+    if (Planner.detectActionIntent(task.description) > 0) return null;
+    if (task.messages && task.messages.length > 0) return null;
+    if (task.description.length > 300) return null;
+    if (task.tools && task.tools.length > 0) return null;
+    if (this.tools.list().length > 0) return null;
+
+    const spanId = this.tracer.startSpan(traceId, 'pre-screen');
+
+    try {
+      const decision = await this.router.route('classify', envelope);
+
+      const response = await this.callModel(decision, {
+        system: PRE_SCREEN_SYSTEM_PROMPT,
+        userMessage: task.description,
+      });
+
+      this.budgetManager.deductTokens(envelope, response.tokenUsage.totalTokens, response.model);
+      this.budgetManager.deductCost(envelope, response.costUsd);
+
+      try {
+        const parsed = Planner.extractJson(response.content) as {
+          direct?: boolean;
+          answer?: string;
+        };
+
+        if (parsed.direct && parsed.answer) {
+          this.tracer.logEvent(traceId, 'pre_screen', {
+            result: 'direct_answer',
+            tokensUsed: response.tokenUsage.totalTokens,
+          });
+          return parsed.answer;
+        }
+
+        this.tracer.logEvent(traceId, 'pre_screen', {
+          result: 'needs_planning',
+          tokensUsed: response.tokenUsage.totalTokens,
+        });
+        return null;
+      } catch {
+        // Parse failed — fall through to full planning
+        return null;
+      }
+    } catch {
+      // Model call failed — fall through to full planning
+      return null;
+    } finally {
+      this.tracer.endSpan(traceId, spanId);
+    }
+  }
+
+  /**
    * Unified planning: spec + classify + plan + critique in ONE LLM call.
    * Reduces 4 separate LLM round-trips to 1, saving ~60-80% of planning tokens.
    * Falls back to null if parsing fails (caller should use separate pipeline).
@@ -414,11 +493,23 @@ export class Planner {
     const spanId = this.tracer.startSpan(traceId, 'unified-plan');
 
     try {
-      const toolDescriptions = this.tools.getToolDescriptions()
-        .map(t => `- ${t.name}: ${t.description}`)
-        .join('\n');
+      const actionFloor = Planner.detectActionIntent(task.description);
+      const isLikelySimple = actionFloor === 0
+        && task.description.length <= 300
+        && (!task.messages || task.messages.length === 0);
 
-      let systemPrompt = UNIFIED_PLAN_SYSTEM_PROMPT_PREFIX + toolDescriptions;
+      let systemPrompt: string;
+
+      if (isLikelySimple) {
+        // Slim prompt: omit tool descriptions for tasks with no action intent.
+        // Saves ~2500 tokens of system prompt for simple Q&A even when tools are registered.
+        systemPrompt = SLIM_PLAN_SYSTEM_PROMPT;
+      } else {
+        const toolDescriptions = this.tools.getToolDescriptions()
+          .map(t => `- ${t.name}: ${t.description}`)
+          .join('\n');
+        systemPrompt = UNIFIED_PLAN_SYSTEM_PROMPT_PREFIX + toolDescriptions;
+      }
 
       if (this.agentRole) {
         systemPrompt = `[AGENT ROLE: ${this.agentRole}]\n[AGENT INSTRUCTIONS: ${this.agentInstructions ?? ''}]\n\n${systemPrompt}`;
@@ -428,7 +519,6 @@ export class Planner {
       }
 
       // Use the action-intent floor for routing tier decision
-      const actionFloor = Planner.detectActionIntent(task.description);
       const routingComplexity = Math.max(0.5, actionFloor);
       const decision = await this.router.route('plan', envelope, { complexity: routingComplexity });
       this.tracer.logRoutingDecision(traceId, decision as unknown as Record<string, unknown>);
@@ -448,6 +538,7 @@ export class Planner {
         complexity?: number;
         confidence?: number;
         steps?: Array<{ description?: string; toolName?: string; toolArgs?: Record<string, unknown>; verify?: StepVerification }>;
+        directAnswer?: string;
       };
 
       // Validate that the response looks like a unified plan (has both complexity and steps).
@@ -499,15 +590,21 @@ export class Planner {
         issues: [],
       };
 
+      // Extract direct answer for low-complexity tasks (eliminates synthesis call)
+      const directAnswer = (complexity <= 0.5 && steps.length === 0 && parsed.directAnswer)
+        ? parsed.directAnswer
+        : undefined;
+
       this.tracer.logEvent(traceId, 'unified_plan_generated', {
         goal: spec.goal,
         complexity,
         confidence,
         stepCount: steps.length,
         tokensUsed: response.tokenUsage.totalTokens,
+        hasDirectAnswer: !!directAnswer,
       });
 
-      return { spec, complexity, plan, planScore };
+      return { spec, complexity, plan, planScore, directAnswer };
     } catch {
       // Unified planning failed — caller should fall back to separate pipeline
       this.tracer.logEvent(traceId, 'unified_plan_failed', {

@@ -37,7 +37,10 @@ export type TraceEventType =
   | 'vault_access'
   | 'consensus_vote'
   | 'unified_plan_generated'
-  | 'unified_plan_failed';
+  | 'unified_plan_failed'
+  | 'fast_path'
+  | 'direct_answer'
+  | 'pre_screen';
 
 export interface TraceEvent {
   id: string;

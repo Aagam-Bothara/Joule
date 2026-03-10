@@ -390,6 +390,35 @@ export class TaskExecutor {
     });
   }
 
+  /**
+   * Determine whether a task qualifies for the fast path (skip planning,
+   * go straight to a single direct-answer LLM call).
+   *
+   * Criteria:
+   * - No tools requested on the task AND no tools registered globally
+   * - No action intent detected via regex heuristics
+   * - No conversation history (single-turn)
+   * - Short description (under 200 chars — unlikely to need multi-step reasoning)
+   */
+  private isSimpleKnowledgeTask(task: Task): boolean {
+    // Task explicitly requests tools → not simple
+    if (task.tools && task.tools.length > 0) return false;
+
+    // Tools registered in the registry → planner might route to them
+    if (this.tools.list().length > 0) return false;
+
+    // Action intent detected → needs planning
+    if (Planner.detectActionIntent(task.description) > 0) return false;
+
+    // Multi-turn conversation → needs context-aware planning
+    if (task.messages && task.messages.length > 0) return false;
+
+    // Long descriptions likely need multi-step reasoning
+    if (task.description.length > 200) return false;
+
+    return true;
+  }
+
   private async runStateMachine(ctx: StateMachineContext): Promise<void> {
     // IDLE → constitution check
     this.transitionState(ctx, 'idle');
@@ -400,6 +429,34 @@ export class TaskExecutor {
         this.tracer.logEvent(ctx.traceId, 'constitution_violation', taskViolation as unknown as Record<string, unknown>);
         throw new ConstitutionViolationError(taskViolation.ruleId, taskViolation.ruleName, taskViolation.description);
       }
+    }
+
+    // ── FAST PATH: skip planning for simple knowledge tasks ──
+    // For pure knowledge questions (no tools, no action intent, short description),
+    // skip the entire planning phase and go straight to a single direct-answer call.
+    // This reduces 2 LLM calls → 1, cutting token usage by ~50% on simple tasks.
+    if (this.isSimpleKnowledgeTask(ctx.task)) {
+      this.tracer.logEvent(ctx.traceId, 'fast_path', {
+        reason: 'Simple knowledge task — skipping planning phase',
+        descriptionLength: ctx.task.description.length,
+      });
+
+      // Go straight to SYNTHESIZE with no step results (direct answer mode)
+      this.transitionState(ctx, 'synthesize');
+      ctx.onProgress?.({ phase: 'synthesizing', usage: this.budget.getUsage(ctx.envelope), state: 'synthesize' });
+      ctx.result = await this.synthesize(ctx.task, [], ctx.envelope, ctx.traceId);
+
+      // Constitution: validate output
+      if (this.constitution && ctx.result) {
+        const outputViolation = this.constitution.validateOutput(ctx.result);
+        if (outputViolation) {
+          this.tracer.logEvent(ctx.traceId, 'constitution_output_violation', outputViolation as unknown as Record<string, unknown>);
+          ctx.result = `[Response filtered by constitution rule ${outputViolation.ruleId}: ${outputViolation.ruleName}]`;
+        }
+      }
+
+      this.transitionState(ctx, 'done');
+      return;
     }
 
     // UNIFIED PLAN → try spec + classify + plan + critique in ONE LLM call
@@ -421,6 +478,31 @@ export class TaskExecutor {
       ctx.steps = [...unified.plan.steps];
       ctx.planScore = unified.planScore;
       this.budget.checkBudget(ctx.envelope);
+
+      // ── DIRECT ANSWER SHORTCUT ──
+      // If the unified plan returned a directAnswer (low-complexity, no steps),
+      // skip the synthesis call entirely — saves 1 LLM round-trip.
+      if (unified.directAnswer && ctx.steps.length === 0) {
+        this.tracer.logEvent(ctx.traceId, 'direct_answer', {
+          reason: 'Unified plan included directAnswer — skipping synthesis',
+          complexity: unified.complexity,
+        });
+
+        this.transitionState(ctx, 'synthesize');
+        ctx.result = unified.directAnswer;
+
+        // Constitution: validate output
+        if (this.constitution && ctx.result) {
+          const outputViolation = this.constitution.validateOutput(ctx.result);
+          if (outputViolation) {
+            this.tracer.logEvent(ctx.traceId, 'constitution_output_violation', outputViolation as unknown as Record<string, unknown>);
+            ctx.result = `[Response filtered by constitution rule ${outputViolation.ruleId}: ${outputViolation.ruleName}]`;
+          }
+        }
+
+        this.transitionState(ctx, 'done');
+        return;
+      }
 
       try {
         this.planner.validatePlan(ctx.plan);

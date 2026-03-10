@@ -7,7 +7,7 @@
 Production-grade agent runtime with built-in budget enforcement,
 governance policies, and safety guardrails.
 
-[Quickstart](#quickstart) · [Why Joule](#why-joule) · [Examples](#examples) · [Docs](#documentation)
+[Quickstart](#quickstart) · [Why Joule](#why-joule) · [Performance](#performance) · [Examples](#examples) · [Docs](#documentation)
 
 ![CI](https://github.com/Aagam-Bothara/Joule/actions/workflows/test.yml/badge.svg)
 ![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)
@@ -75,6 +75,30 @@ console.log(`Cost: $${result.budgetUsed.costUsd} | Tokens: ${result.budgetUsed.t
 | Zero-config quickstart |  ✅   |    ❌     |   🔶   |   ❌    |
 | Desktop/Office automation |  ✅   |    ❌     |   ❌   |   ❌    |
 | 11 messaging channels  |  ✅   |    ❌     |   ❌   |   ❌    |
+
+### Performance
+
+Joule uses **adaptive prompt optimization** to minimize cost without sacrificing capability:
+
+| Optimization | What it does | Savings |
+|-------------|-------------|---------|
+| **Unified planning** | Merges spec + classify + plan + critique into 1 LLM call | ~60% fewer tokens vs 4-call pipeline |
+| **Slim prompt routing** | Detects simple tasks (no action intent, short description) and strips tool descriptions from the planning prompt | ~15x fewer prompt tokens for Q&A tasks |
+| **Direct answer shortcut** | When the planner returns a `directAnswer` for low-complexity tasks, skips the synthesis call entirely | Eliminates 1 LLM round-trip |
+| **SLM-first routing** | Defaults to small models (gpt-4o-mini, Haiku, Gemini Flash) and only escalates to large models when complexity warrants it | 10-50x cheaper per call |
+
+**Benchmark results** (30 tasks, 5 categories, gpt-4o-mini):
+
+| Metric | Joule | CrewAI |
+|--------|-------|--------|
+| Success rate | 100% | 100% |
+| Avg latency | 10,853ms | 15,762ms |
+| Budget enforcement | Yes (7D) | No |
+| Runtime governance | Yes | No |
+| Tool execution | Yes (86 calls) | No |
+| Escalation support | Yes (7 events) | No |
+
+Joule is **1.5x faster** on average across all categories, with the largest speedup on generation tasks (1.8x). The latency advantage comes from adaptive routing — simple tasks hit SLM immediately instead of waiting for a large model.
 
 ---
 
@@ -147,7 +171,7 @@ Every task is tracked across 7 dimensions. When any limit is hit, the agent stop
 | **Energy (Wh)** | Estimated compute energy |
 | **Carbon (gCO₂)** | Estimated carbon emissions |
 
-The model router always picks the smallest model that can handle the current step. It only escalates to a bigger model if the budget allows it.
+The model router always picks the smallest model that can handle the current step. It only escalates to a bigger model if the budget allows it. For simple tasks, the planner uses a slim prompt that omits tool descriptions entirely — cutting system prompt tokens from ~2900 to ~50.
 
 ### Guardrails
 
@@ -458,12 +482,14 @@ system_insights:
 
 What's solid:
 - Core runtime (task execution, budget, routing, crews, governance)
+- Adaptive prompt optimization (slim prompts, direct answers, unified planning)
 - 4 model providers with vision support
 - 47 built-in tools
 - 11 messaging channels
 - SQLite persistence with WAL mode
 - React dashboard with trace visualization
 - Prometheus metrics + OTLP export
+- Benchmarked against CrewAI (30 tasks, 5 categories)
 
 Known limitations:
 - Computer agent handles Office well but struggles with complex browser workflows

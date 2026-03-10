@@ -1,0 +1,53 @@
+{
+  "scenarios": [
+    {
+      "scenario": "unlimited-budget",
+      "status": "completed",
+      "tokensUsed": 60000,
+      "costUsd": 0.006,
+      "toolCalls": 0,
+      "escalations": 0,
+      "durationMs": 106,
+      "steps": 0,
+      "budgetExhausted": false,
+      "stoppedByBudget": false
+    },
+    {
+      "scenario": "high-budget",
+      "status": "completed",
+      "tokensUsed": 60000,
+      "costUsd": 0.006,
+      "toolCalls": 0,
+      "escalations": 0,
+      "durationMs": 64,
+      "steps": 0,
+      "budgetExhausted": false,
+      "stoppedByBudget": false
+    },
+    {
+      "scenario": "medium-budget",
+      "status": "budget_exhausted",
+      "tokensUsed": 30000,
+      "costUsd": 0.003,
+      "toolCalls": 0,
+      "escalations": 0,
+      "durationMs": 53,
+      "steps": 0,
+      "budgetExhausted": true,
+      "stoppedByBudget": true
+    },
+    {
+      "scenario": "low-budget",
+      "status": "budget_exhausted",
+      "tokensUsed": 30000,
+      "costUsd": 0.003,
+      "toolCalls": 0,
+      "escalations": 0,
+      "durationMs": 46,
+      "steps": 0,
+      "budgetExhausted": true,
+      "stoppedByBudget": true
+    }
+  ],
+  "timestamp": "2026-03-09T22:36:21.199Z"
+}
