@@ -40,7 +40,13 @@ export type TraceEventType =
   | 'unified_plan_failed'
   | 'fast_path'
   | 'direct_answer'
-  | 'pre_screen';
+  | 'pre_screen'
+  | 'dependency_pruning'
+  | 'execution_path_selected'
+  | 'chunked_pipeline'
+  | 'template_executed'
+  | 'cache_hit'
+  | 'path_correction';
 
 export interface TraceEvent {
   id: string;

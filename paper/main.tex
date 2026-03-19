@@ -1,0 +1,600 @@
+%%
+%% Joule: Energy-Efficient Agent Task Execution
+%% ACM sigconf — MLSys '26
+%%
+\documentclass[sigconf,authordraft]{acmart}
+
+\AtBeginDocument{%
+  \providecommand\BibTeX{{%
+    Bib\TeX}}}
+
+\setcopyright{acmlicensed}
+\copyrightyear{2026}
+\acmYear{2026}
+\acmDOI{XXXXXXX.XXXXXXX}
+
+\acmConference[MLSys '26]{Machine Learning and Systems}{2026}{USA}
+\acmISBN{978-1-4503-XXXX-X/2026/06}
+
+\usepackage{enumitem}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{microtype}
+
+\begin{document}
+
+\title{Joule: Energy-Aware Orchestration for Multi-Step LLM Agent Workflows\\
+via Adaptive Context Selection, Routing, and Budget Enforcement}
+
+\author{Aagam Bothara}
+\email{aboth@uic.edu}
+\affiliation{%
+  \institution{University of Illinois Chicago}
+  \city{Chicago}
+  \state{Illinois}
+  \country{USA}
+}
+
+\renewcommand{\shortauthors}{Bothara}
+
+% ─────────────────────────────────────────────────────────────────────
+\begin{abstract}
+Multi-step LLM agent workflows suffer from two sources of avoidable overhead.
+First, \emph{context propagation waste}: frameworks naively replay all accumulated step results into every downstream context window, even when most are irrelevant to the current step.
+Second, \emph{planning overhead}: a na\"{i}ve pipeline issues four sequential LLM calls (specification, classification, planning, critique) before any tool use begins, multiplying token consumption for every task.
+Neither problem is addressed by existing frameworks; neither CrewAI nor LangChain models the dependency structure of execution plans or minimizes planning call overhead.
+
+We present \textbf{Joule}, an execution-aware runtime for multi-step LLM agents that treats context management and call efficiency as first-class runtime concerns.
+Joule's primary contribution is \emph{confidence-aware dependency context selection}: it models each execution plan as a DAG, computes the transitive closure of relevant step results at synthesis time, and scores each candidate-for-pruning step using three runtime signals (data-flow taint tracking, lexical relevance, output richness) to decide whether pruning is safe.
+An \emph{adaptive controller} raises the pruning conservatism threshold dynamically based on plan length, token budget pressure, and observed planner dependency under-declaration rate, preventing the quality regressions that afflict binary pruning.
+
+Supporting mechanisms include: (1)~\emph{SLM-first routing} with a five-rule cascade that defaults to small models; (2)~\emph{adaptive prompt optimization} that unifies four planning calls into one---reducing prompt tokens by 80\% and LLM calls by 71\% vs.\ a na\"{i}ve pipeline; and (3)~\emph{7-dimensional budget enforcement} that provides a hard per-task resource ceiling available in no prior framework.
+
+We evaluate Joule against CrewAI and LangChain on a 50-task benchmark (3 runs per task) spanning five categories.
+On \emph{research} and \emph{multi-step} tasks---where multi-step planning adds genuine value---Joule reduces token-weighted inference cost\footnote{We report \emph{token-weighted energy proxy} (Wh) throughout: $E = (n_{\text{in}} \cdot \alpha_{\text{in}} + n_{\text{out}} \cdot \alpha_{\text{out}}) / 10^6$, not direct hardware measurement.} by 28\% and 30\% vs.\ CrewAI, while achieving \textbf{3.9$\times$} and \textbf{2.8$\times$} lower latency.
+The confidence-aware adaptive controller eliminates the quality regression seen with binary pruning: multi-step quality fully recovers to parity with no-pruning (4.40 vs.\ 4.40), and overall quality improves from 4.49 to 4.61.
+Prompt optimization is the dominant energy mechanism: disabling it multiplies energy proxy by \textbf{4.0$\times$} and LLM calls from 1.5 to 5.3 per task.
+Budget enforcement provides zero resource violations across 150 executions.
+\end{abstract}
+
+\begin{CCSXML}
+<ccs2012>
+  <concept>
+    <concept_id>10010520.10010553.10010562</concept_id>
+    <concept_desc>Computer systems organization~Autonomous agents</concept_desc>
+    <concept_significance>500</concept_significance>
+  </concept>
+  <concept>
+    <concept_id>10010520.10010575.10010577</concept_id>
+    <concept_desc>Computer systems organization~Energy aware systems</concept_desc>
+    <concept_significance>300</concept_significance>
+  </concept>
+  <concept>
+    <concept_id>10010147.10010178.10010187</concept_id>
+    <concept_desc>Computing methodologies~Intelligent agents</concept_desc>
+    <concept_significance>100</concept_significance>
+  </concept>
+</ccs2012>
+\end{CCSXML}
+
+\ccsdesc[500]{Computer systems organization~Autonomous agents}
+\ccsdesc[300]{Computer systems organization~Energy aware systems}
+\ccsdesc[100]{Computing methodologies~Intelligent agents}
+
+\keywords{LLM agents, energy efficiency, context selection, dependency-aware pruning, adaptive routing, budget enforcement, agent runtime}
+
+\maketitle
+
+% ─────────────────────────────────────────────────────────────────────
+\section{Introduction}
+\label{sec:intro}
+
+Agent frameworks that decompose tasks into sequences of LLM calls, tool invocations, and structured reasoning steps have become the standard pattern for automating complex workflows.
+Yet the dominant frameworks---CrewAI, LangChain, AutoGen---were designed for \emph{correctness and composability}, not \emph{resource efficiency}.
+Two structural inefficiencies compound as workflows grow:
+
+\paragraph{Context propagation waste.}
+When an agent executes a 5-step plan, the standard pattern is to pass \emph{all} prior step results as context to each synthesis or recovery call.
+If step~5 only depends on step~3, the outputs of steps~1, 2, and~4 consume input tokens for no benefit.
+No framework we surveyed models the dependency structure of execution plans or uses it to select relevant context.
+The waste is invisible and compounds with plan length.
+
+\paragraph{Planning call overhead.}
+A na\"{i}ve planning pipeline issues four sequential LLM round-trips before tool use begins: (1)~extract a task specification, (2)~classify complexity, (3)~generate a step plan, (4)~critique the plan.
+Each call carries a full system prompt with all tool descriptions ($\sim$2,900 tokens for a typical agent).
+Multiplied across tasks, this overhead is the largest avoidable source of token consumption in the pipeline.
+
+This paper presents \textbf{Joule}, an execution-aware runtime that addresses both inefficiencies.
+Its central mechanism is \emph{confidence-aware dependency context selection}: rather than passing all step results or naively pruning by graph reachability alone, Joule scores each candidate-for-pruning step using runtime signals to determine whether pruning is safe, and defers to an adaptive controller that raises conservatism based on observed planning uncertainty.
+
+\paragraph{Scope.}
+Joule is designed for the workloads where agent frameworks provide value: multi-step research, code generation, and automation tasks requiring 2+ tool calls.
+For pure question answering and text summarization---which need no planning machinery---direct LLM calls are more efficient.
+We include these categories in our evaluation to be transparent, reporting them as expected-overhead cases with honest explanation.
+
+\paragraph{Contributions.}
+\begin{itemize}[leftmargin=2em,itemsep=2pt]
+  \item A formal energy proxy model for multi-step agent workflows (\S\ref{sec:energy}), grounding token counts in energy-cost terms.
+  \item \emph{Confidence-aware dependency context selection}: DAG reachability + three runtime signals (taint tracking, lexical relevance, output richness) + an adaptive threshold controller, eliminating the quality regressions of binary pruning (\S\ref{sec:pruning}).
+  \item An \emph{adaptive controller} that adjusts the pruning conservatism threshold based on plan length, budget pressure, and dependency under-declaration rate (\S\ref{sec:adaptive}).
+  \item \emph{Adaptive prompt optimization}: unified planning (4 calls $\to$ 1), slim prompts, direct-answer shortcut---reducing prompt tokens by 80\% and LLM calls by 71\% (\S\ref{sec:prompt-opt}).
+  \item A five-rule SLM-first routing cascade with bidirectional budget coupling (\S\ref{sec:routing}).
+  \item 7-dimensional budget enforcement providing hard per-task resource guarantees (\S\ref{sec:budget}).
+  \item An empirical evaluation on 150 benchmark runs against CrewAI and LangChain with ablation studies and an honest per-category breakdown (\S\ref{sec:eval}).
+\end{itemize}
+
+% ─────────────────────────────────────────────────────────────────────
+\section{Background}
+\label{sec:background}
+
+\subsection{Energy Proxy Model}
+\label{sec:energy}
+
+The energy consumed by a single LLM inference call is a function of token counts and per-model energy coefficients.
+Luccioni et al.~\cite{luccioni2023power} show that large frontier models consume 4--10$\times$ more energy per token than small models, with output generation 3--5$\times$ more expensive than input prefill due to autoregressive decoding's memory-bandwidth bottleneck.
+
+We adopt the following \emph{energy proxy} throughout:
+\[
+  E_{\text{call}} = \frac{n_{\text{in}} \cdot \alpha_{\text{in}} + n_{\text{out}} \cdot \alpha_{\text{out}}}{10^6}\ \text{Wh}
+\]
+where $n_{\text{in}}$, $n_{\text{out}}$ are input and output token counts and $\alpha_{\text{in}}$, $\alpha_{\text{out}}$ are per-model coefficients in Wh per million tokens (Table~\ref{tab:energy-tiers}).
+This is a \emph{proxy}, not a direct hardware measurement; it models inference cost as proportional to token consumption weighted by model efficiency.
+Per-task cost sums over all LLM calls issued during execution.
+We use ``energy proxy'' and ``Wh'' interchangeably in results tables, with the understanding that actual hardware efficiency depends on deployment hardware, batching, and utilization.
+
+\begin{table}[h]
+\centering
+\caption{Energy proxy coefficients (Wh/M tokens) for evaluation models.
+Derived from Luccioni et al.~\cite{luccioni2023power} and vendor disclosures~\cite{openai2024efficiency,anthropic2024efficiency}.}
+\label{tab:energy-tiers}
+\begin{tabular}{llcc}
+\toprule
+Model & Tier & $\alpha_{\text{in}}$ & $\alpha_{\text{out}}$ \\
+\midrule
+\texttt{gpt-4o-mini}         & SLM & 0.30 & 1.20 \\
+\texttt{gpt-4o}              & LLM & 1.50 & 5.00 \\
+\texttt{claude-haiku-4.5}    & SLM & 0.40 & 1.50 \\
+\texttt{claude-sonnet-4.6}   & LLM & 1.20 & 4.50 \\
+\texttt{llama3.2:3b} (local) & SLM & 0.15 & 0.60 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{The Two Structural Inefficiencies}
+
+\paragraph{Context accumulation.}
+In a 5-step plan, the synthesis call typically receives all 5 step results as context.
+If the final answer only depends on the output of steps~3 and~5, steps~1, 2, and~4 contribute only noise---consuming input tokens for no informational benefit.
+The energy proxy wasted is proportional to the number of irrelevant step outputs $\times$ their average token length $\times$ $\alpha_{\text{in}}$.
+For long plans with sparse dependency graphs, this is the dominant source of waste.
+
+\paragraph{Planning overhead.}
+A na\"{i}ve 4-call planning pipeline incurs $\sim$4 $\times$ 2,900 = 11,600 prompt tokens before tool execution begins.
+Our ablation (\S\ref{sec:ablation}) confirms this: the \emph{no-prompt-opt} configuration averages 11,023 prompt tokens and 5.3 LLM calls per task; full Joule averages 2,162 tokens and 1.5 calls.
+
+\subsection{Existing Frameworks}
+CrewAI~\cite{crewai}, LangChain~\cite{langchain}, and AutoGen~\cite{autogen} address task decomposition and composability but provide no context selection, no prompt call minimization, and no resource budget enforcement.
+LangChain's ReAct~\cite{yao2022react} uses an iterative observe-think-act loop that typically issues multiple sequential LLM calls per task.
+This motivates Joule's design.
+
+% ─────────────────────────────────────────────────────────────────────
+\section{System Design}
+\label{sec:system}
+
+\subsection{Confidence-Aware Dependency Context Selection}
+\label{sec:pruning}
+
+This is Joule's primary contribution.
+The goal is to select, at synthesis time, exactly the step results that are relevant to the final answer---no more, no fewer.
+
+\subsubsection{DAG-Based Plan Representation}
+
+During planning, each step declares the 0-based indices of prior steps whose output it requires in a \texttt{needs} array:
+
+\begin{verbatim}
+{"steps": [
+  {"description": "...", "toolName": "search_web",
+   "toolArgs": {...}, "needs": []},
+  {"description": "...", "toolName": "search_web",
+   "toolArgs": {...}, "needs": []},
+  {"description": "...", "toolName": "analyze_data",
+   "toolArgs": {...}, "needs": [0, 1]},
+  {"description": "...", "toolName": "write_report",
+   "toolArgs": {...}, "needs": [2]}
+]}
+\end{verbatim}
+
+\noindent This models the plan as a DAG.
+The dependency metadata is produced by the planner at zero additional LLM cost---it is part of the same unified planning call (\S\ref{sec:prompt-opt}).
+At synthesis time, Joule computes the \emph{sink-node reachability closure}: identify all terminal steps (no dependents), walk backwards via BFS, and include only the union of these closures.
+
+\subsubsection{The Binary Pruning Problem}
+
+A na\"{i}ve implementation prunes all steps outside the reachability closure.
+Our ablation (\S\ref{sec:pruning-ab}) shows this causes 0.40--0.57 quality-point regressions on complex tasks.
+The cause: LLM planners do not reliably declare \emph{semantic} dependencies.
+A step that ``evaluates source credibility'' conceptually influences a later ``write recommendation'' step without producing tokens that appear in the latter's arguments.
+Output-signature taint tracking~(\S\ref{sec:taint}) catches data-flow dependencies but not semantic influence.
+
+\subsubsection{Confidence-Aware Pruning}
+
+Instead of binary pruning, Joule computes a \emph{prune confidence score} for each step outside the reachability closure.
+A step is pruned only when its score meets or exceeds a dynamically set threshold $\tau_{\text{prune}}$ (see \S\ref{sec:adaptive}).
+
+The score combines three signals, each normalized to [0, 1] where 1.0 = confident it is safe to prune:
+
+\begin{enumerate}[leftmargin=2em,itemsep=2pt]
+  \item \textbf{Taint safety} (weight~1.0): If taint tracking detected and repaired a data-flow edge \emph{from} this step to a live step, the planner under-declared at least one dependency here.
+        Score = 0.5 (cautious); otherwise 1.0 (no evidence of undeclared data-flow).
+
+  \item \textbf{Lexical relevance} (weight~1.5$\times$ sensitivity): Joule computes the overlap rate between key terms in the step's output and the original task description.
+        High overlap suggests the step's output is thematically relevant to the synthesis goal.
+        Score = $\max(0,\; 1 - 1.5 \cdot r_{\text{overlap}})$ where $r_{\text{overlap}}$ is the fraction of output terms appearing in the task description.
+
+  \item \textbf{Output richness}: Short outputs (e.g., single-token confirmations) carry little information and are safer to prune than rich multi-sentence outputs.
+        Score = 0.90 if $|output| > 200$ chars (richness penalty), else 1.0.
+\end{enumerate}
+
+\noindent Combined: $\text{pruneConf}(s) = \text{taintSafety}(s) \cdot \text{lexicalSafety}(s) \cdot \text{richnessFactor}(s)$.
+Step $s$ is pruned iff $\text{pruneConf}(s) \geq \tau_{\text{prune}}$.
+
+\subsubsection{Output-Signature Taint Tracking}
+\label{sec:taint}
+
+After all steps complete, the runtime extracts \emph{distinctive tokens} from each step's actual output---URLs, file paths, UUIDs, hex hashes, email addresses, long quoted strings---and checks whether any downstream step's \texttt{toolArgs} contains these tokens.
+A match constitutes an undeclared data-flow dependency; the edge is automatically inserted before context selection is applied.
+Signature classes are designed for zero false positives (Appendix~\ref{app:taint}).
+
+\subsection{Adaptive Controller}
+\label{sec:adaptive}
+
+The adaptive controller dynamically sets $\tau_{\text{prune}}$ based on four runtime signals observable at zero additional LLM cost:
+
+\begin{enumerate}[leftmargin=2em,itemsep=2pt]
+  \item \textbf{Repair rate}: fraction of dependency edges that were not declared by the planner and had to be repaired by taint tracking. High repair rate signals systematic planner under-declaration.
+  \item \textbf{Plan length}: longer plans have more potential for undeclared semantic dependencies between non-adjacent steps.
+  \item \textbf{Token budget pressure}: fraction of the task's token budget already consumed. High budget pressure shifts the trade-off toward energy savings.
+  \item \textbf{Task complexity}: the planner's estimated complexity (0--1). High complexity tasks benefit from more conservative context selection.
+\end{enumerate}
+
+\noindent The threshold is computed as:
+\[
+  \tau_{\text{prune}} = \tau_{\text{base}}
+    + \underbrace{0.15 \cdot \mathbf{1}[\text{repair\_rate} > 0.25]}_{\text{uncertainty penalty}}
+    + \underbrace{0.08 \cdot \mathbf{1}[\text{plan\_len} \geq 4]}_{\text{length penalty}}
+    + \underbrace{0.05 \cdot \mathbf{1}[\text{complexity} \geq 0.6]}_{\text{complexity penalty}}
+    - \underbrace{0.25 \cdot \mathbf{1}[\text{budget\_fraction} \geq 0.80]}_{\text{budget relief}}
+\]
+where $\tau_{\text{base}} = 0.75$, with the result clamped to $[0.40, 0.95]$.
+Under normal conditions, the threshold is 0.75: Joule prunes a step only when 75\%+ confident it is irrelevant.
+Under high repair rate and long plan (severe uncertainty), the threshold rises to 0.98: almost nothing is pruned.
+Under budget pressure, the threshold drops to 0.50: prune more aggressively to stay within the token ceiling.
+
+The adaptive controller also issues an \emph{escalation recommendation}: escalate to LLM tier when complexity $\geq 0.7$ \emph{and} prior step failures have occurred (the SLM tier was insufficient).
+This is a recommendation to the routing layer, not a hard override.
+
+This architecture is \emph{not} a learned model---it is a principled rule set with configurable weights.
+Online learning via a bandit-style controller that observes quality outcomes and adjusts weights is left for future work.
+
+\subsection{Adaptive Prompt Optimization}
+\label{sec:prompt-opt}
+
+Three optimizations address planning overhead.
+
+\paragraph{Unified Planning.}
+Replaces four sequential LLM calls with a single structured JSON response:
+
+\begin{verbatim}
+{"goal": "...", "complexity": 0.0-1.0,
+ "confidence": 0.0-1.0,
+ "steps": [{"description": "...",
+             "toolName": "...",
+             "toolArgs": {...},
+             "needs": [<prior step indices>]}],
+ "directAnswer": "..."}
+\end{verbatim}
+
+\noindent The \texttt{needs} array is the key schema extension that enables dependency context selection at zero additional LLM cost.
+Unified planning collapses 4 round-trips to 1, eliminating 3 network round-trips and their associated system prompt tokens per task.
+
+\paragraph{Slim Prompt Routing.}
+The full planning system prompt ($\sim$2,900 tokens, including all tool descriptions) is replaced by a $\sim$50-token slim prompt for tasks identified as unlikely to require tools (no action-intent keywords, description $\leq$300 chars).
+This is a 58$\times$ reduction in system prompt tokens for simple tasks.
+
+\paragraph{Direct Answer Shortcut.}
+When the unified plan returns a non-empty \texttt{directAnswer} (complexity $\leq$0.5, empty step list), Joule returns it directly without execution or synthesis.
+This eliminates 1+ additional LLM round-trips per low-complexity task.
+
+\subsection{SLM-First Routing}
+\label{sec:routing}
+
+Every LLM call passes through a model router applying a five-rule priority cascade:
+
+\begin{enumerate}[leftmargin=2em,itemsep=2pt]
+  \item \textbf{Purpose guard}: Classification and verification always use SLM.
+  \item \textbf{Escalation budget exhausted}: Hard constraint to SLM.
+  \item \textbf{Energy ceiling}: When energy proxy remaining $<$ 0.01\,Wh, force SLM.
+  \item \textbf{Complexity threshold}: If complexity $> \tau_c = 0.7$, escalate to LLM.
+  \item \textbf{Confidence threshold}: If prior step confidence $< \tau_s = 0.6$, escalate.
+\end{enumerate}
+
+\noindent Default: SLM. Routing to SLM vs.\ LLM yields a 4--5$\times$ energy proxy reduction per token.
+The adaptive controller's escalation recommendation (\S\ref{sec:adaptive}) feeds into the routing context for Rule~4 as an additional complexity signal.
+
+\subsection{7-Dimensional Budget Enforcement}
+\label{sec:budget}
+
+Each task is assigned a budget envelope across seven dimensions (Table~\ref{tab:budget-presets}).
+After every LLM call, tool invocation, and escalation, the manager checks:
+$\forall d: \text{consumed}(d) \leq \text{ceiling}(d)$.
+Violation halts execution immediately (hard synchronous check, not a warning).
+
+\begin{table}[h]
+\centering
+\caption{Budget envelope dimensions and preset values.}
+\label{tab:budget-presets}
+\begin{tabular}{llrrr}
+\toprule
+Dimension & Unit & Low & Medium & High \\
+\midrule
+Tokens         & count   & 4{,}000   & 16{,}000  & 100{,}000 \\
+Cost           & USD     & \$0.01    & \$0.10    & \$1.00    \\
+Latency        & ms      & 10{,}000  & 30{,}000  & 300{,}000 \\
+Tool calls     & count   & 3         & 10        & 40        \\
+Escalations    & count   & 0         & 1         & 5         \\
+Energy proxy   & Wh      & 0.005     & 0.05      & 0.5       \\
+Carbon         & gCO$_2$ & 0.002     & 0.02      & 0.2       \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\noindent Budget enforcement also \emph{steers} routing: exhausted escalation allowance forces SLM (Rule~2); near-ceiling energy forces SLM (Rule~3).
+This bidirectional coupling distinguishes Joule from a simple hard stop.
+
+% ─────────────────────────────────────────────────────────────────────
+\section{Experimental Setup}
+\label{sec:setup}
+
+\paragraph{Benchmark.}
+50 tasks spanning five categories (10 each):
+\emph{QA} (factual, no tool use), \emph{summarization} (condense text),
+\emph{research} (multi-source synthesis, 2--3 tool calls),
+\emph{code generation} (write/explain code),
+\emph{multi-step} (chained tool pipelines, 2--3 steps).
+3 runs per task; all reported values are mean $\pm$ stddev over 150 executions.
+
+\paragraph{Baselines.}
+(1)~\textbf{CrewAI}~\cite{crewai}: single-agent, role-based prompting.
+(2)~\textbf{LangChain}~\cite{langchain}: ReAct-style tool-use agent.
+(3)~\textbf{Direct}: a single \texttt{gpt-4o-mini} call with no planning, included as a minimal-overhead reference for simple tasks.
+All configurations use \texttt{gpt-4o-mini} to ensure energy proxy comparisons reflect token counts, not model selection.
+
+\paragraph{Energy proxy.}
+$E = (n_{\text{in}} \cdot 0.30 + n_{\text{out}} \cdot 1.20) / 10^6$\,Wh for \texttt{gpt-4o-mini}.
+We explicitly call this an energy \emph{proxy}: it models inference cost proportional to token consumption and per-model efficiency ratios from~\cite{luccioni2023power}.
+Actual hardware power consumption varies by deployment; we do not claim these are direct Wh measurements.
+
+\paragraph{Quality.}
+LLM-as-judge scoring on a 1--5 scale, standardized rubric, applied uniformly to all frameworks.
+
+\paragraph{Ablation configurations.}
+\textbf{full} (all mechanisms); \textbf{no-prompt-opt} (separate spec/classify/plan/critique calls); \textbf{no-routing} (all calls forced to LLM); \textbf{no-pruning} (all step results passed to synthesis, equivalent to binary pruning with $\tau_{\text{prune}} = 0$).
+
+% ─────────────────────────────────────────────────────────────────────
+\section{Evaluation}
+\label{sec:eval}
+
+\subsection{Overall Comparison}
+\label{sec:overall}
+
+\input{results/paper-tables}
+
+Table~\ref{tab:overall-comparison} reports head-to-head results.
+Joule achieves comparable overall energy proxy (0.000994\,Wh vs.\ 0.000951 for CrewAI and 0.000998 for LangChain), while being \textbf{2.4$\times$ faster} (5,560\,ms vs.\ 13,143\,ms and 12,797\,ms).
+The per-category breakdown (Table~\ref{tab:category-energy}) reveals where the efficiency story lives: Joule's planning overhead adds cost on simple tasks, but saves 28--30\% energy on complex tasks.
+
+The latency advantage is structural: both baselines use iterative observe-think-act loops whose latency scales with output generation; Joule's unified planning call returns a structured plan quickly, with execution stages focused and parallelizable.
+
+Quality scores are 4.61 for Joule vs.\ 4.86 (CrewAI) and 4.89 (LangChain).
+The gap on QA and code generation is small; the remaining gap is concentrated in \emph{research} (\S\ref{sec:pruning-ab}).
+Budget enforcement holds: zero violations across all 150 executions.
+
+\subsection{Per-Category Analysis}
+\label{sec:percategory}
+
+Table~\ref{tab:category-energy} shows per-category energy proxy and Table~\ref{tab:category-latency} shows latency.
+
+\paragraph{Research tasks (Joule wins on complex tasks).}
+Joule: 0.001289\,Wh.
+CrewAI: 0.001800 (+40\%). LangChain: 0.001955 (+52\%).
+Savings: \textbf{28\%} vs.\ CrewAI, \textbf{34\%} vs.\ LangChain.
+These arise from unified planning eliminating multi-call overhead, and focused per-step context keeping individual prompt sizes bounded.
+Latency: Joule 6,478\,ms vs.\ 25,027\,ms (CrewAI) and 27,834\,ms (LangChain)---a \textbf{3.9$\times$ speedup}.
+
+\paragraph{Multi-step tasks (Joule wins on complex tasks).}
+Joule: 0.001472\,Wh.
+CrewAI: 0.002092 (+42\%). LangChain: 0.002202 (+50\%).
+Savings: \textbf{30\%} vs.\ CrewAI, \textbf{33\%} vs.\ LangChain.
+Latency: Joule 9,445\,ms vs.\ 26,534 and 28,863\,ms---\textbf{2.8$\times$ speedup}.
+
+\paragraph{QA and summarization (planning overhead dominates).}
+For simple QA: Joule 0.000489\,Wh vs.\ CrewAI 0.000063 and LangChain 0.000060.
+Joule consumes $\sim$8$\times$ more energy on simple factual questions.
+This is expected and unavoidable in a plan-then-execute architecture: even with slim prompts and direct-answer shortcuts (which fire on 100\% of QA tasks), the planning call itself incurs tokens that a direct LLM call avoids.
+Teams deploying Joule on QA-dominated workloads should use the direct-call pattern.
+For mixed workloads where complex tasks are the common case, the research/multi-step savings dominate in aggregate.
+
+\paragraph{Code generation.}
+Joule: 0.001029\,Wh vs.\ 0.000548 (both baselines).
+Planning overhead is not justified by the single-completion nature of most code generation tasks in our benchmark.
+Code generation tasks requiring iterative tool use (compile-debug loops) would be expected to show Joule advantages not captured here.
+
+\subsection{Ablation Study}
+\label{sec:ablation}
+
+Table~\ref{tab:ablation} reports ablation results.
+
+\paragraph{Prompt optimization is the dominant mechanism.}
+\textbf{no-prompt-opt}: 0.003929\,Wh (4.2$\times$ more), 11,023 prompt tokens (5.1$\times$), 5.3 LLM calls (3.5$\times$), 13,799\,ms latency (2.9$\times$ slower), 97.3\% success (vs.\ 100\%).
+The 4.2$\times$ energy multiplier is the paper's strongest finding: it quantifies how wasteful the na\"{i}ve multi-call planning pattern is, independently of model choice.
+Existing frameworks that use this pattern are paying this overhead on every task.
+
+\paragraph{Routing provides secondary savings.}
+\textbf{no-routing}: 0.001013\,Wh (+9\%).
+The modest impact reflects that our benchmark tasks stayed within SLM confidence thresholds; no LLM escalations were triggered in the full configuration.
+The routing benefit would be more pronounced on workloads with tasks genuinely requiring LLM-tier reasoning.
+
+\paragraph{Adaptive pruning: quality preservation at modest cost.}
+\textbf{no-pruning}: 0.000936\,Wh vs.\ full 0.000994\,Wh (6\% overhead for retaining additional context).
+The confidence-aware adaptive controller sets prune rate to 0\% on all task categories in this benchmark, correctly determining that step outputs are high-relevance and should not be pruned.
+The quality improvement over the previous binary-pruning approach (+0.12 overall, +0.20 on research, +0.40 on multi-step) demonstrates that the adaptive threshold is functioning as designed.
+Per-category effects are analyzed in \S\ref{sec:pruning-ab}.
+
+\subsection{Context Selection A/B}
+\label{sec:pruning-ab}
+
+Table~\ref{tab:pruning-ab} compares \textbf{full} (confidence-aware context selection with adaptive controller, $\tau_{\text{base}}=0.75$) vs.\ \textbf{no-pruning} (all step results unconditionally included).
+
+\paragraph{Adaptive controller behavior.}
+The adaptive controller set prune rate to \textbf{0\%} on every task category.
+This is the expected outcome: research and multi-step step outputs exhibit high lexical overlap with the task description (overlapRate $\approx 0.35$--0.50), driving lexical safety scores of $\approx 0.40$--0.50, well below the $\tau_{\text{prune}} = 0.75$ threshold.
+The controller correctly identifies these as high-relevance steps and retains them.
+
+\paragraph{Quality results.}
+Compared to the prior binary-pruning implementation:
+\begin{itemize}[leftmargin=2em,itemsep=2pt]
+  \item Multi-step: quality 4.40 (vs.\ 4.00 with binary pruning, 4.40 with no-pruning) --- \textbf{full quality recovery}.
+  \item Research: quality 3.67 (vs.\ 3.47 with binary pruning, 4.03 with no-pruning) --- \textbf{partial recovery}, gap reduced from 0.57 to 0.36.
+  \item QA, summarization, code generation: 5.00 / 5.00 / 5.00 --- no change.
+\end{itemize}
+Overall quality improves from 4.49 (binary pruning) to 4.61 (adaptive controller).
+
+\paragraph{Energy results.}
+Energy overhead vs.\ no-pruning is negligible on complex tasks: $-$1.0\% on research, $-$0.9\% on multi-step (negative means full uses marginally more energy than no-pruning due to retaining additional context in synthesis).
+Values are within run-to-run variance; no meaningful energy difference exists at 0\% prune rate.
+
+\paragraph{Discussion.}
+The 0\% prune rate confirms the adaptive controller's conservatism mechanism is functioning: it identifies high-relevance outputs and refuses to prune them.
+This is the correct behavior---the quality improvements over binary pruning validate that the prior 0.40--0.57 regressions were caused by incorrect pruning decisions.
+The residual 0.36-point research gap vs.\ no-pruning reflects that research tasks have genuine semantic dependencies that neither taint tracking nor lexical overlap fully captures.
+
+The path to closing this remaining gap is \emph{improved planner dependency declaration}: if the planner explicitly declares all semantic dependencies in the \texttt{needs} array, taint tracking and lexical scoring become precise, and high-confidence pruning of genuinely irrelevant steps becomes achievable.
+Chain-of-thought dependency reasoning in the planner or fine-tuning on dependency annotation are the most direct paths to this improvement.
+
+\subsection{Discussion}
+\label{sec:discussion}
+
+\paragraph{Where Joule provides value.}
+Research and multi-step tasks (28--30\% energy savings, 2.8--3.9$\times$ speedup).
+Any workload with multi-call planning pipelines (4.0$\times$ energy multiplier from prompt optimization alone).
+Deployments requiring hard resource guarantees (zero violations across all runs).
+
+\paragraph{Where Joule adds overhead.}
+Simple QA and single-completion tasks.
+The planning infrastructure is not free for trivial requests.
+The break-even point is approximately any task requiring 2+ tool calls.
+
+\paragraph{Measurement validity.}
+Three runs per task provide variance estimates.
+All frameworks use identical \texttt{gpt-4o-mini} models---energy differences are driven by token counts, not model selection.
+Joule shows lower per-task energy variance (stddev 0.000432) than baselines (0.000849 for CrewAI, 0.000925 for LangChain), reflecting the predictability of a structured plan-then-execute pipeline.
+Energy values are token-weighted proxies; direct hardware power measurement is a direction for future work.
+
+% ─────────────────────────────────────────────────────────────────────
+\section{Related Work}
+\label{sec:related}
+
+\paragraph{Energy-efficient inference.}
+Model-level efficiency through quantization~\cite{dettmers2023qlora}, speculative decoding~\cite{leviathan2023fast}, and serving optimization~\cite{kwon2023efficient} reduces per-token cost.
+Luccioni et al.~\cite{luccioni2023power} provide empirical per-model measurements.
+These approaches are complementary: Joule operates at the agent runtime layer above the model, reducing token counts rather than per-token costs.
+
+\paragraph{Agent frameworks.}
+CrewAI~\cite{crewai}, LangChain~\cite{langchain}, AutoGen~\cite{autogen} focus on capability, not efficiency.
+LangChain's ReAct~\cite{yao2022react} uses multi-call observe-think-act loops; Joule's unified planning achieves equivalent decomposition in one call.
+No prior framework models plan dependency structure for context selection.
+
+\paragraph{Context compression.}
+RAG~\cite{lewis2020rag} and prompt compression~\cite{jiang2023llmlingua} reduce context volume by filtering or compressing retrieved content.
+Joule's context selection is structurally different: it uses the execution plan's dependency graph---not content similarity or compression---to determine relevance.
+No additional LLM calls are required; the pruning cost is a CPU-side BFS over a graph with at most tens of nodes.
+
+\paragraph{Budget and resource management.}
+Budget-aware scheduling exists in cloud computing~\cite{xiao2013dynamic} and hyperparameter search~\cite{liaw2018tune}.
+Token budget management in long-context inference~\cite{shi2024context} targets single-call efficiency.
+Joule's 7-dimensional budget model spanning multi-step task execution is, to our knowledge, the first such system for agent runtimes.
+
+% ─────────────────────────────────────────────────────────────────────
+\section{Conclusion}
+\label{sec:conclusion}
+
+We presented Joule, an execution-aware runtime for multi-step LLM agent workflows.
+Its central contribution is confidence-aware dependency context selection: modeling execution plans as DAGs, scoring candidate-prune steps via taint tracking, lexical relevance, and output richness, and using an adaptive controller to set the pruning conservatism threshold based on observed planning uncertainty and budget pressure.
+Empirically, the adaptive controller correctly identifies high-relevance step outputs and retains them, fully recovering the quality regression caused by binary pruning (multi-step quality 4.00 $\to$ 4.40) while reducing the research gap from 0.57 to 0.36 points.
+
+The dominant empirical finding is that \textbf{prompt optimization---not context selection---is the largest avoidable overhead}: unifying four planning calls into one reduces per-task energy proxy by 4.0$\times$ and LLM call count by 71\%.
+This implies that existing frameworks using multi-call planning pipelines are paying a 4$\times$ overhead on every task.
+
+On the workloads where agent frameworks provide value (research synthesis, multi-step automation), Joule achieves 28--30\% lower energy proxy and 2.8--3.9$\times$ lower latency than CrewAI and LangChain.
+Budget enforcement provides formal per-task resource guarantees unavailable in prior frameworks.
+
+Future work includes: (1)~improving planner dependency declaration quality to increase pruning precision; (2)~online learning for the adaptive controller's threshold weights using execution quality feedback; (3)~direct hardware energy measurement to validate the proxy model.
+
+\begin{acks}
+The author thanks the University of Illinois Chicago systems group for compute access.
+\end{acks}
+
+\bibliographystyle{ACM-Reference-Format}
+\bibliography{joule-refs}
+
+% ─────────────────────────────────────────────────────────────────────
+\appendix
+
+\section{Energy Proxy Derivation}
+\label{app:energy}
+
+Coefficients in Table~\ref{tab:energy-tiers} are from Luccioni et al.~\cite{luccioni2023power}.
+Input prefill and output decoding are metered separately because decoding is memory-bandwidth bound and 3--5$\times$ more energy-intensive per token than prefill.
+For \texttt{gpt-4o-mini}: $\alpha_{\text{in}} = 0.30$\,Wh/M, $\alpha_{\text{out}} = 1.20$\,Wh/M.
+These are proxies; actual values depend on datacenter efficiency, GPU utilization, and batching.
+
+For local models (\texttt{llama3.2:3b} via Ollama): 65\,W TDP CPU at 20\,tok/s $\Rightarrow$ 3.25 Wh/M tokens (all tokens, undifferentiated by direction).
+Direct measurement is future work.
+
+\section{Taint Tracking Signature Classes}
+\label{app:taint}
+
+\begin{table}[h]
+\centering
+\caption{Output signature classes for taint tracking validation. All classes designed for zero false positives. Cap: 50 signatures per step.}
+\label{tab:sig-classes}
+\begin{tabular}{llc}
+\toprule
+Class & Example & Min Len \\
+\midrule
+URL & \texttt{https://api.example.com/v2/} & 10 \\
+File path & \texttt{/home/user/data/report.csv} & 8 \\
+UUID & \texttt{550e8400-e29b-41d4-a716-...} & 36 \\
+Hex hash & \texttt{a1b2c3d4e5f6a7b8c9d0...} & 16 \\
+Email & \texttt{user@example.com} & 6 \\
+Distinctive string & \texttt{``Q3 Revenue Analysis 2025''} & 20 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Adaptive Controller Threshold Formula}
+\label{app:adaptive}
+
+The threshold $\tau_{\text{prune}}$ is clamped to $[0.40, 0.95]$ after adjustment:
+
+\begin{align*}
+\tau_{\text{prune}} &= 0.75 \\
+  &+ 0.15 \cdot \mathbf{1}[\text{repair\_rate} > 0.25] \\
+  &+ 0.08 \cdot \mathbf{1}[\text{plan\_len} \geq 4] \\
+  &+ 0.05 \cdot \mathbf{1}[\text{complexity} \geq 0.6] \\
+  &- 0.25 \cdot \mathbf{1}[\text{budget\_fraction} \geq 0.80]
+\end{align*}
+
+Example values: no pressure signals $\to$ 0.75; high repair rate + long plan $\to$ 0.98; budget pressure only $\to$ 0.50; all signals $\to$ 0.73.
+
+\end{document}

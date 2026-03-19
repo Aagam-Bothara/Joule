@@ -16,3 +16,4 @@ export * from './crew.js';
 export * from './approval.js';
 export * from './skill.js';
 export * from './governance.js';
+export * from './execution-path.js';

@@ -146,6 +146,19 @@ export class Joule {
 
     // Wire up task executor (with constitution for task/output validation)
     const routingConfig = this.config.get('routing');
+    const epCfg = this.config.get('executionPath') as any;
+    const executionPathConfig = epCfg ? {
+      enabled: epCfg.enabled !== false,
+      cache: {
+        enabled: epCfg.classifierOnly ? false : (epCfg.cache?.enabled !== false),
+        similarityThreshold: epCfg.cache?.similarityThreshold ?? 0.92,
+        maxEntries: 10_000,
+        dbPath: '.joule/cache.json',
+      },
+      learner: { enabled: true, updateIntervalTasks: 20, correctionTablePath: '.joule/corrections.json' },
+      // When classifierOnly=true, templates and chunked paths are skipped inside the selector
+      _classifierOnly: epCfg.classifierOnly ?? false,
+    } : undefined;
     this.executor = new TaskExecutor(
       this.budget,
       this.router,
@@ -156,6 +169,7 @@ export class Joule {
       energyConfig,
       routingConfig,
       this.constitution,
+      executionPathConfig,
     );
 
     // Wire up fact extractor for automatic learning

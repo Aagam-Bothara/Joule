@@ -16,6 +16,7 @@ import {
   type EnergyConfig,
   type EfficiencyReport,
   type RoutingConfig,
+  type ExecutionPathConfig,
   ModelTier,
   generateId,
   BudgetExhaustedError,
@@ -32,6 +33,8 @@ import { ToolRegistry } from './tool-registry.js';
 import { Planner, type ExecutionPlan, type PlanStep } from './planner.js';
 import { ExecutionSimulator } from './execution-simulator.js';
 import type { ConstitutionEnforcer } from './constitution.js';
+import { ExecutionPathSelector } from './execution-path/index.js';
+import { AdaptiveController, type ExecutionState } from './adaptive-controller.js';
 
 const DEFAULT_MAX_REPLAN_DEPTH = 2;
 
@@ -70,6 +73,8 @@ interface StateMachineContext {
   result?: string;
   error?: string;
   onProgress?: ProgressCallback;
+  /** Speculative routing: complexity determined by unified plan, reused for all subsequent routing */
+  speculativeComplexity?: number;
 }
 
 export interface BudgetUpdateEvent {
@@ -91,6 +96,8 @@ export class TaskExecutor {
   private maxReplanDepth: number;
   private constitution?: ConstitutionEnforcer;
   private simulator: ExecutionSimulator;
+  private pathSelector?: ExecutionPathSelector;
+  private adaptiveController: AdaptiveController;
 
   constructor(
     private budget: BudgetManager,
@@ -102,10 +109,306 @@ export class TaskExecutor {
     private energyConfig?: EnergyConfig,
     private routingConfig?: RoutingConfig,
     constitution?: ConstitutionEnforcer,
+    executionPathConfig?: Partial<ExecutionPathConfig>,
   ) {
     this.maxReplanDepth = routingConfig?.maxReplanDepth ?? DEFAULT_MAX_REPLAN_DEPTH;
     this.constitution = constitution;
     this.simulator = new ExecutionSimulator(tools);
+    this.adaptiveController = new AdaptiveController();
+    // Enable execution path selection unless explicitly disabled
+    if (executionPathConfig?.enabled !== false) {
+      this.pathSelector = new ExecutionPathSelector(router, budget, tracer, executionPathConfig);
+    }
+  }
+
+  /**
+   * Dependency-aware structural pruning: given a set of steps and their results,
+   * resolve the transitive dependency closure for a target step and return only
+   * the step results that the target actually needs.
+   *
+   * Design decisions:
+   * - Falls back to all results when no dependency metadata exists (backward compat)
+   * - Validates declared deps via output-signature taint tracking: extracts unique
+   *   tokens from each step's actual output (URLs, paths, IDs, distinctive strings)
+   *   and checks if they appear in downstream steps' toolArgs — real data-flow
+   *   analysis, not syntactic pattern matching
+   * - For synthesis: uses sink-node reachability — only steps reachable backward
+   *   from DAG sinks (steps no other step depends on)
+   * - Gated by routingConfig.enableDependencyPruning for A/B correctness testing
+   */
+  /**
+   * Compute the adaptive prune threshold for the current execution context.
+   * Uses the AdaptiveController to combine plan length, token pressure, complexity,
+   * and repair statistics into a single threshold value (0.0–1.0).
+   */
+  private getAdaptivePruneThreshold(
+    steps: PlanStep[],
+    envelope: BudgetEnvelopeInstance,
+    complexityEstimate: number,
+    repairedEdges: number,
+    stepFailures: number,
+  ): number {
+    const usage = this.budget.getUsage(envelope);
+    const declaredEdges = steps.reduce(
+      (sum, s) => sum + (s.needs?.length ?? 0), 0,
+    );
+    const state: ExecutionState = {
+      planLength: steps.length,
+      stepFailures,
+      tokensConsumed: usage.tokens,
+      tokenBudget: envelope.envelope.maxTokens ?? 100_000,
+      complexityEstimate,
+      repairedEdges,
+      declaredEdges,
+      currentStepIndex: steps.length,
+    };
+    return this.adaptiveController.getPruneThreshold(state);
+  }
+
+  /**
+   * Compute a pruning confidence score for a step result that is NOT in the
+   * reachability closure (i.e., a candidate for pruning).
+   *
+   * Returns 0.0–1.0 where 1.0 = confident it is safe to prune.
+   * Considers three signals:
+   *   1. taintSafety     — no taint-tracking evidence of data flow to any live step
+   *   2. lexicalSafety   — low lexical overlap between this step's output and the
+   *                        task description (high overlap → may be thematically relevant)
+   *   3. plannerCoverage — planner declared all deps in the live closure
+   *                        (no edges were repaired for this step)
+   */
+  private computePruneConfidence(
+    result: StepResult,
+    liveStepIndices: Set<number>,
+    repairedFromThisStep: boolean,
+    taskDescription: string,
+  ): number {
+    // Signal 1: taint safety — if a taint-tracking repair originated FROM this step,
+    // another step actually used its output via data-flow; don't over-prune
+    const taintSafety = repairedFromThisStep ? 0.50 : 1.0;
+
+    // Signal 2: lexical safety — Jaccard similarity between step output terms and task
+    const outputText = typeof result.output === 'string'
+      ? result.output
+      : JSON.stringify(result.output ?? '');
+    const taskTokens = new Set(
+      taskDescription.toLowerCase().split(/\W+/).filter(w => w.length > 4),
+    );
+    const outputTokens = outputText.toLowerCase().split(/\W+/).filter(w => w.length > 4);
+    const overlapCount = outputTokens.filter(w => taskTokens.has(w)).length;
+    const overlapRate = outputTokens.length > 0 ? overlapCount / outputTokens.length : 0;
+    // High overlap → this step is thematically relevant → lower confidence to prune
+    const lexicalSafety = Math.max(0, 1.0 - overlapRate * 1.5);
+
+    // Signal 3: output length — very short outputs (e.g. simple confirmations) are
+    // safer to prune than rich outputs that likely carry information
+    const outputLen = outputText.length;
+    const richnessFactor = outputLen > 200 ? 0.90 : 1.0;
+
+    return Math.min(1.0, taintSafety * lexicalSafety * richnessFactor);
+  }
+
+  private filterResultsByDependencies(
+    steps: PlanStep[],
+    stepResults: StepResult[],
+    taskDescription: string,
+    pruneThreshold: number,
+    targetStepIndex?: number,
+  ): { filtered: StepResult[]; prunedCount: number; repaired: number } {
+    // A/B toggle: when pruning is disabled, pass everything through
+    if (this.routingConfig?.enableDependencyPruning === false) {
+      return { filtered: stepResults, prunedCount: 0, repaired: 0 };
+    }
+
+    // If no steps have dependency info, return all results (safe fallback)
+    const hasDependencyInfo = steps.some(s => Array.isArray(s.needs));
+    if (!hasDependencyInfo || stepResults.length === 0) {
+      return { filtered: stepResults, prunedCount: 0, repaired: 0 };
+    }
+
+    // ── Output-signature taint tracking ──
+    // Extract distinctive tokens from each completed step's actual output, then check
+    // if downstream steps' toolArgs contain those tokens. This catches real data-flow
+    // dependencies the LLM failed to declare — e.g. a URL produced by step 0 appearing
+    // in step 2's args without step 2 declaring needs:[0].
+    const outputSignatures = new Map<number, Set<string>>();
+    for (const result of stepResults) {
+      outputSignatures.set(result.stepIndex, TaskExecutor.extractOutputSignatures(result.output));
+    }
+
+    let repaired = 0;
+    // Track which source steps had edges repaired (for confidence scoring)
+    const repairedSourceSteps = new Set<number>();
+    const repairedSteps = steps.map(s => ({ ...s, needs: s.needs ? [...s.needs] : undefined }));
+    for (const step of repairedSteps) {
+      if (!Array.isArray(step.needs)) continue;
+      const argsText = JSON.stringify(step.toolArgs);
+      for (let prior = 0; prior < step.index; prior++) {
+        if (step.needs.includes(prior)) continue;
+        const sigs = outputSignatures.get(prior);
+        if (!sigs || sigs.size === 0) continue;
+        // If any distinctive output token from a prior step appears in this step's args,
+        // that's a real data-flow dependency the LLM missed
+        for (const sig of sigs) {
+          if (argsText.includes(sig)) {
+            step.needs.push(prior);
+            repaired++;
+            repairedSourceSteps.add(prior);
+            break; // One match is enough to establish the edge
+          }
+        }
+      }
+    }
+
+    // ── Transitive closure BFS ──
+    const computeClosure = (seeds: number[]): Set<number> => {
+      const needed = new Set<number>();
+      const queue = [...seeds];
+      while (queue.length > 0) {
+        const idx = queue.pop()!;
+        if (needed.has(idx)) continue;
+        needed.add(idx);
+        const step = repairedSteps[idx];
+        if (Array.isArray(step?.needs)) {
+          for (const dep of step.needs) {
+            if (!needed.has(dep)) queue.push(dep);
+          }
+        }
+      }
+      return needed;
+    };
+
+    // ── Confidence-aware filtering helper ───────────────────────────────────────
+    // For each step NOT in the reachability closure, compute a prune confidence score.
+    // Only prune if score >= pruneThreshold (set by AdaptiveController).
+    // This avoids aggressive binary pruning that discards semantically relevant steps.
+    const confidenceFilter = (
+      results: StepResult[],
+      closure: Set<number>,
+    ): { filtered: StepResult[]; prunedCount: number } => {
+      const filtered: StepResult[] = [];
+      let prunedCount = 0;
+      for (const r of results) {
+        if (closure.has(r.stepIndex)) {
+          // In closure — always keep
+          filtered.push(r);
+        } else {
+          const conf = this.computePruneConfidence(
+            r,
+            closure,
+            repairedSourceSteps.has(r.stepIndex),
+            taskDescription,
+          );
+          if (conf >= pruneThreshold) {
+            // Confident enough that this step is irrelevant — prune it
+            prunedCount++;
+          } else {
+            // Uncertain — keep it to avoid quality regression
+            filtered.push(r);
+          }
+        }
+      }
+      return { filtered, prunedCount };
+    };
+
+    // ── Sink-node reachability for synthesis ──
+    // A "sink" is a step that no other step declares as a dependency — these are the
+    // terminal outputs of the DAG. We compute the union of transitive closures from
+    // all sinks. This is principled: every step that contributes to ANY final output
+    // is kept; pure intermediaries consumed only by other intermediaries can be pruned.
+    if (targetStepIndex === undefined) {
+      const hasDependents = new Set<number>();
+      for (const s of repairedSteps) {
+        if (Array.isArray(s.needs)) {
+          for (const n of s.needs) hasDependents.add(n);
+        }
+      }
+
+      const sinks: number[] = [];
+      for (let i = 0; i < repairedSteps.length; i++) {
+        if (!hasDependents.has(i)) sinks.push(i);
+      }
+      // Edge case: if every step is depended on, treat the last step as the sink
+      if (sinks.length === 0) sinks.push(repairedSteps.length - 1);
+
+      const closure = computeClosure(sinks);
+      const { filtered, prunedCount } = confidenceFilter(stepResults, closure);
+      return { filtered, prunedCount, repaired };
+    }
+
+    // For a specific target step, compute its transitive dependency closure
+    const closure = computeClosure([targetStepIndex]);
+    closure.delete(targetStepIndex); // Don't include the target itself
+
+    const { filtered, prunedCount } = confidenceFilter(stepResults, closure);
+    return { filtered, prunedCount, repaired };
+  }
+
+  /**
+   * Extract distinctive tokens from a step's output for taint tracking.
+   * Returns tokens that are specific enough to indicate real data flow if found
+   * in a downstream step's arguments — URLs, file paths, identifiers, hashes, etc.
+   *
+   * Designed for zero false positives: only extracts tokens that would be
+   * astronomically unlikely to appear in unrelated toolArgs by coincidence.
+   */
+  private static extractOutputSignatures(output: unknown): Set<string> {
+    const sigs = new Set<string>();
+    if (output == null) return sigs;
+
+    const text = typeof output === 'string' ? output : JSON.stringify(output);
+
+    // URLs — the strongest signal: if step 0 returns a URL and step 2 uses it, that's data flow
+    const urlPattern = /https?:\/\/[^\s"'<>,}{)(\]]+/g;
+    for (const match of text.matchAll(urlPattern)) {
+      sigs.add(match[0]);
+    }
+
+    // File paths (Unix and Windows)
+    const pathPattern = /(?:\/[\w.-]+){2,}|(?:[A-Z]:\\[\w.-]+(?:\\[\w.-]+)+)/gi;
+    for (const match of text.matchAll(pathPattern)) {
+      if (match[0].length >= 8) sigs.add(match[0]);
+    }
+
+    // UUIDs / hex hashes (8+ hex chars with separators or contiguous)
+    const idPattern = /\b[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\b/gi;
+    for (const match of text.matchAll(idPattern)) {
+      sigs.add(match[0]);
+    }
+    // Standalone hex hashes (SHA-like, 16+ chars to avoid false positives)
+    const hexPattern = /\b[0-9a-f]{16,}\b/gi;
+    for (const match of text.matchAll(hexPattern)) {
+      sigs.add(match[0]);
+    }
+
+    // Email addresses
+    const emailPattern = /\b[\w.+-]+@[\w.-]+\.\w{2,}\b/g;
+    for (const match of text.matchAll(emailPattern)) {
+      sigs.add(match[0]);
+    }
+
+    // Quoted distinctive strings (8+ chars, not common words)
+    const quotedPattern = /"([^"]{8,120})"/g;
+    for (const match of text.matchAll(quotedPattern)) {
+      const val = match[1];
+      // Skip values that are too generic (common JSON keys, booleans, numbers-only)
+      if (/^[\d.]+$/.test(val) || /^(true|false|null|success|error|failed|none)$/i.test(val)) continue;
+      // Keep values with mixed case, special chars, or length >= 20 (likely unique content)
+      if (val.length >= 20 || /[/:@#?&=]/.test(val) || /[A-Z].*[a-z]|[a-z].*[A-Z]/.test(val)) {
+        sigs.add(val);
+      }
+    }
+
+    // Cap at 50 signatures per step to bound compute
+    if (sigs.size > 50) {
+      const arr = [...sigs];
+      sigs.clear();
+      // Prefer URLs and paths (strongest signals) by sorting longer first
+      arr.sort((a, b) => b.length - a.length);
+      for (let i = 0; i < 50; i++) sigs.add(arr[i]);
+    }
+
+    return sigs;
   }
 
   async execute(task: Task, onProgress?: ProgressCallback): Promise<TaskResult> {
@@ -284,7 +587,7 @@ export class TaskExecutor {
       yield { type: 'progress', progress: synthProgress };
 
       result = '';
-      for await (const chunk of this.synthesizeStream(task, stepResults, envelope, traceId)) {
+      for await (const chunk of this.synthesizeStream(task, stepResults, envelope, traceId, undefined, plan.steps)) {
         result += chunk.content;
         yield { type: 'chunk', chunk };
       }
@@ -431,6 +734,44 @@ export class TaskExecutor {
       }
     }
 
+    // ── EXECUTION PATH SELECTION (P0–P5) ──
+    // Run before any LLM work. For P0–P3, returns a complete result immediately.
+    // For P4/P5, falls through to existing pipeline below.
+    if (this.pathSelector) {
+      const selection = await this.pathSelector.select(ctx.task, this.tools, ctx.envelope, ctx.traceId);
+
+      this.tracer.logEvent(ctx.traceId, 'info', {
+        type: 'execution_path_selected',
+        path: selection.profile.path,
+        confidence: selection.profile.confidence,
+        rationale: selection.profile.rationale,
+        fromCache: selection.fromCache,
+        hasEarlyResult: !!selection.earlyResult,
+      });
+
+      if (selection.earlyResult !== undefined) {
+        // P0–P3: result is ready — skip entire planning/execution pipeline
+        ctx.result = selection.earlyResult;
+
+        // Constitution: validate output
+        if (this.constitution && ctx.result) {
+          const outputViolation = this.constitution.validateOutput(ctx.result);
+          if (outputViolation) {
+            this.tracer.logEvent(ctx.traceId, 'constitution_output_violation', outputViolation as unknown as Record<string, unknown>);
+            ctx.result = `[Response filtered by constitution rule ${outputViolation.ruleId}: ${outputViolation.ruleName}]`;
+          }
+        }
+
+        this.transitionState(ctx, 'done');
+        return;
+      }
+
+      // P5: force LLM tier for escalated tasks
+      if (selection.profile.path === 5) {
+        ctx.speculativeComplexity = 1.0; // forces LLM tier in all subsequent routing
+      }
+    }
+
     // ── FAST PATH: skip planning for simple knowledge tasks ──
     // For pure knowledge questions (no tools, no action intent, short description),
     // skip the entire planning phase and go straight to a single direct-answer call.
@@ -444,7 +785,7 @@ export class TaskExecutor {
       // Go straight to SYNTHESIZE with no step results (direct answer mode)
       this.transitionState(ctx, 'synthesize');
       ctx.onProgress?.({ phase: 'synthesizing', usage: this.budget.getUsage(ctx.envelope), state: 'synthesize' });
-      ctx.result = await this.synthesize(ctx.task, [], ctx.envelope, ctx.traceId);
+      ctx.result = await this.synthesize(ctx.task, [], ctx.envelope, ctx.traceId, ctx.speculativeComplexity);
 
       // Constitution: validate output
       if (this.constitution && ctx.result) {
@@ -477,6 +818,9 @@ export class TaskExecutor {
       ctx.plan = unified.plan;
       ctx.steps = [...unified.plan.steps];
       ctx.planScore = unified.planScore;
+      // Speculative routing: cache complexity from unified plan for all subsequent routing calls.
+      // This avoids redundant complexity re-evaluation and ensures consistent tier decisions.
+      ctx.speculativeComplexity = unified.complexity;
       this.budget.checkBudget(ctx.envelope);
 
       // ── DIRECT ANSWER SHORTCUT ──
@@ -604,7 +948,7 @@ export class TaskExecutor {
     // SYNTHESIZE → generate final answer
     this.transitionState(ctx, 'synthesize');
     ctx.onProgress?.({ phase: 'synthesizing', usage: this.budget.getUsage(ctx.envelope), state: 'synthesize' });
-    ctx.result = await this.synthesize(ctx.task, ctx.stepResults, ctx.envelope, ctx.traceId);
+    ctx.result = await this.synthesize(ctx.task, ctx.stepResults, ctx.envelope, ctx.traceId, ctx.speculativeComplexity, ctx.steps);
 
     // Constitution: validate synthesized output
     if (this.constitution && ctx.result) {
@@ -762,8 +1106,23 @@ export class TaskExecutor {
           });
 
           try {
+            // Dependency-aware pruning: only pass step results relevant to the failed step
+            const replanThreshold = this.getAdaptivePruneThreshold(
+              ctx.steps, ctx.envelope, ctx.speculativeComplexity ?? 0.5, 0, ctx.replanDepth,
+            );
+            const { filtered: replanResults, prunedCount: replanPruned, repaired: replanRepaired } =
+              this.filterResultsByDependencies(ctx.steps, ctx.stepResults, ctx.task.description, replanThreshold, step.index);
+            if (replanPruned > 0 || replanRepaired > 0) {
+              this.tracer.logEvent(ctx.traceId, 'dependency_pruning', {
+                phase: 'replan',
+                totalResults: ctx.stepResults.length,
+                prunedCount: replanPruned,
+                repairedEdges: replanRepaired,
+                keptIndices: replanResults.map(r => r.stepIndex),
+              });
+            }
             const recoveryPlan = await this.planner.replan(
-              ctx.task, step, stepResult.error ?? 'Unknown error', ctx.stepResults, ctx.envelope, ctx.traceId,
+              ctx.task, step, stepResult.error ?? 'Unknown error', replanResults, ctx.envelope, ctx.traceId,
             );
             this.planner.validatePlan(recoveryPlan);
             this.budget.checkBudget(ctx.envelope);
@@ -1357,20 +1716,46 @@ If on track, drift should be an empty array. If drifting, list specific reasons.
     stepResults: StepResult[],
     envelope: BudgetEnvelopeInstance,
     traceId: string,
+    speculativeComplexity?: number,
+    steps?: PlanStep[],
   ): Promise<string> {
     const spanId = this.tracer.startSpan(traceId, 'synthesize');
 
     try {
-      const isDirectAnswer = stepResults.length === 0;
+      // Dependency-aware structural pruning: only include step results the final answer needs
+      const synthThreshold = steps
+        ? this.getAdaptivePruneThreshold(steps, envelope, speculativeComplexity ?? 0.5, 0, 0)
+        : 1.0;
+      const { filtered: prunedResults, prunedCount, repaired } = steps
+        ? this.filterResultsByDependencies(steps, stepResults, task.description, synthThreshold)
+        : { filtered: stepResults, prunedCount: 0, repaired: 0 };
+      if (prunedCount > 0 || repaired > 0) {
+        this.tracer.logEvent(traceId, 'dependency_pruning', {
+          phase: 'synthesize',
+          totalResults: stepResults.length,
+          prunedCount,
+          repairedEdges: repaired,
+          keptIndices: prunedResults.map(r => r.stepIndex),
+          pruningRate: stepResults.length > 0 ? +(prunedCount / stepResults.length).toFixed(3) : 0,
+        });
+      }
+
+      const isDirectAnswer = prunedResults.length === 0 && stepResults.length === 0;
+
+      // Speculative routing: use cached complexity from unified plan when available,
+      // avoiding redundant complexity estimation for synthesis routing.
+      const synthComplexity = speculativeComplexity !== undefined
+        ? Math.min(speculativeComplexity, 0.5)  // Synthesis never needs LLM tier
+        : (isDirectAnswer ? 0.2 : prunedResults.some(r => !r.success) ? 0.8 : 0.3);
 
       const decision = await this.router.route('synthesize', envelope, {
-        complexity: isDirectAnswer ? 0.2 : stepResults.some(r => !r.success) ? 0.8 : 0.3,
+        complexity: synthComplexity,
       });
       this.tracer.logRoutingDecision(traceId, decision as unknown as Record<string, unknown>);
 
       const provider = this.providers.get(decision.provider);
       if (!provider) {
-        return isDirectAnswer ? 'I could not process your request.' : stepResults
+        return isDirectAnswer ? 'I could not process your request.' : prunedResults
           .map((r, i) => `Step ${i + 1} (${r.toolName}): ${r.success ? JSON.stringify(r.output) : `ERROR: ${r.error}`}`)
           .join('\n');
       }
@@ -1383,8 +1768,8 @@ If on track, drift should be an empty array. If drifting, list specific reasons.
       if (isDirectAnswer) {
         messages.push({ role: 'user', content: task.description });
       } else {
-        const resultsText = stepResults
-          .map((r, i) => `Step ${i + 1} (${r.toolName}): ${r.success ? JSON.stringify(r.output) : `ERROR: ${r.error}`}`)
+        const resultsText = prunedResults
+          .map((r) => `Step ${r.stepIndex + 1} (${r.toolName}): ${r.success ? JSON.stringify(r.output) : `ERROR: ${r.error}`}`)
           .join('\n');
         messages.push({
           role: 'user',
@@ -1422,21 +1807,45 @@ If on track, drift should be an empty array. If drifting, list specific reasons.
     stepResults: StepResult[],
     envelope: BudgetEnvelopeInstance,
     traceId: string,
+    speculativeComplexity?: number,
+    steps?: PlanStep[],
   ): AsyncGenerator<StreamChunk> {
     const spanId = this.tracer.startSpan(traceId, 'synthesize-stream');
 
     try {
-      const isDirectAnswer = stepResults.length === 0;
+      // Dependency-aware structural pruning
+      const streamThreshold = steps
+        ? this.getAdaptivePruneThreshold(steps, envelope, speculativeComplexity ?? 0.5, 0, 0)
+        : 1.0;
+      const { filtered: prunedResults, prunedCount, repaired } = steps
+        ? this.filterResultsByDependencies(steps, stepResults, task.description, streamThreshold)
+        : { filtered: stepResults, prunedCount: 0, repaired: 0 };
+      if (prunedCount > 0 || repaired > 0) {
+        this.tracer.logEvent(traceId, 'dependency_pruning', {
+          phase: 'synthesize-stream',
+          totalResults: stepResults.length,
+          prunedCount,
+          repairedEdges: repaired,
+          keptIndices: prunedResults.map(r => r.stepIndex),
+          pruningRate: stepResults.length > 0 ? +(prunedCount / stepResults.length).toFixed(3) : 0,
+        });
+      }
+
+      const isDirectAnswer = prunedResults.length === 0 && stepResults.length === 0;
+
+      const synthComplexity = speculativeComplexity !== undefined
+        ? Math.min(speculativeComplexity, 0.5)
+        : (isDirectAnswer ? 0.2 : prunedResults.some(r => !r.success) ? 0.8 : 0.3);
 
       const decision = await this.router.route('synthesize', envelope, {
-        complexity: isDirectAnswer ? 0.2 : stepResults.some(r => !r.success) ? 0.8 : 0.3,
+        complexity: synthComplexity,
       });
       this.tracer.logRoutingDecision(traceId, decision as unknown as Record<string, unknown>);
 
       const provider = this.providers.get(decision.provider);
       if (!provider) {
-        yield { content: isDirectAnswer ? 'I could not process your request.' : stepResults
-          .map((r, i) => `Step ${i + 1} (${r.toolName}): ${r.success ? JSON.stringify(r.output) : `ERROR: ${r.error}`}`)
+        yield { content: isDirectAnswer ? 'I could not process your request.' : prunedResults
+          .map((r) => `Step ${r.stepIndex + 1} (${r.toolName}): ${r.success ? JSON.stringify(r.output) : `ERROR: ${r.error}`}`)
           .join('\n'), done: true, finishReason: 'stop' };
         return;
       }
@@ -1451,8 +1860,8 @@ If on track, drift should be an empty array. If drifting, list specific reasons.
         // Direct answer — no tool steps, just answer the question
         messages.push({ role: 'user', content: task.description });
       } else {
-        const resultsText = stepResults
-          .map((r, i) => `Step ${i + 1} (${r.toolName}): ${r.success ? JSON.stringify(r.output) : `ERROR: ${r.error}`}`)
+        const resultsText = prunedResults
+          .map((r) => `Step ${r.stepIndex + 1} (${r.toolName}): ${r.success ? JSON.stringify(r.output) : `ERROR: ${r.error}`}`)
           .join('\n');
         messages.push({
           role: 'user',

@@ -291,6 +291,89 @@ function main() {
     console.log('\n  [PENDING] Extended benchmark — run both extended-benchmark.ts and extended-crewai.py first');
   }
 
+  // ── 6. Paper Benchmark (50 tasks, 5 categories, 6 metrics) ─────────────
+
+  const paperJoule = loadJson('paper-joule-results.json');
+  const paperCrewai = loadJson('paper-crewai-results.json');
+
+  if (paperJoule && paperCrewai) {
+    console.log('\n── Table 7: Paper Benchmark — Overall (50 tasks) ──\n');
+
+    const pj = paperJoule.overall;
+    const pc = paperCrewai.overall;
+
+    const headers7 = ['Metric', 'Joule', 'CrewAI', 'Ratio'];
+    const rows7 = [
+      ['Tasks', String(pj.total_tasks), String(pc.total_tasks), '-'],
+      ['Success Rate', `${pj.success_rate.toFixed(1)}%`, `${pc.success_rate.toFixed(1)}%`, '-'],
+      ['Avg Prompt Tokens', pj.avg_prompt_tokens.toFixed(0), pc.avg_prompt_tokens.toFixed(0), `${(pj.avg_prompt_tokens / pc.avg_prompt_tokens).toFixed(1)}x`],
+      ['Avg Completion Tokens', pj.avg_completion_tokens.toFixed(0), pc.avg_completion_tokens.toFixed(0), `${(pj.avg_completion_tokens / pc.avg_completion_tokens).toFixed(1)}x`],
+      ['Avg LLM Calls', pj.avg_num_llm_calls.toFixed(1), pc.avg_num_llm_calls.toFixed(1), `${(pj.avg_num_llm_calls / pc.avg_num_llm_calls).toFixed(1)}x`],
+      ['Total Energy (Wh)', pj.total_energy_wh.toFixed(6), pc.total_energy_wh.toFixed(6), `${(pj.total_energy_wh / pc.total_energy_wh).toFixed(1)}x`],
+      ['Avg Energy/Task (Wh)', pj.avg_energy_wh.toFixed(6), pc.avg_energy_wh.toFixed(6), `${(pj.avg_energy_wh / pc.avg_energy_wh).toFixed(1)}x`],
+      ['Avg Latency', `${pj.avg_latency_ms.toFixed(0)}ms`, `${pc.avg_latency_ms.toFixed(0)}ms`, `${(pc.avg_latency_ms / pj.avg_latency_ms).toFixed(1)}x faster`],
+    ];
+    printTable(headers7, rows7);
+
+    latexTables.push(toLatexTable(
+      'Paper benchmark: Joule vs CrewAI (N=50 tasks, 5 categories) using gpt-4o-mini. Six metrics per task.',
+      'paper-overall',
+      headers7,
+      rows7,
+    ));
+
+    // Per-category comparison
+    console.log('\n── Table 8: Paper Benchmark — Per Category ──\n');
+
+    // Build CrewAI category lookup
+    const crewaiCatLookup: Record<string, { prompt: number[]; completion: number[]; calls: number[]; energy: number[]; latency: number[] }> = {};
+    for (const m of paperCrewai.measurements) {
+      if (m.task_success !== 1) continue;
+      if (!crewaiCatLookup[m.category]) {
+        crewaiCatLookup[m.category] = { prompt: [], completion: [], calls: [], energy: [], latency: [] };
+      }
+      crewaiCatLookup[m.category].prompt.push(m.prompt_tokens);
+      crewaiCatLookup[m.category].completion.push(m.completion_tokens);
+      crewaiCatLookup[m.category].calls.push(m.num_llm_calls);
+      crewaiCatLookup[m.category].energy.push(m.energy_wh);
+      crewaiCatLookup[m.category].latency.push(m.latency_ms);
+    }
+
+    const catHeaders8 = ['Category', 'J-Prompt', 'C-Prompt', 'J-Compl', 'C-Compl', 'J-Calls', 'C-Calls', 'J-Energy', 'C-Energy', 'J-Lat', 'C-Lat'];
+    const catRows8: string[][] = [];
+
+    for (const jCat of paperJoule.category_summaries) {
+      const cat = jCat.category;
+      const cCat = crewaiCatLookup[cat];
+      if (!cCat || cCat.prompt.length === 0) continue;
+
+      const avg = (arr: number[]) => arr.reduce((a: number, b: number) => a + b, 0) / arr.length;
+      catRows8.push([
+        cat,
+        jCat.avg_prompt_tokens.toFixed(0),
+        avg(cCat.prompt).toFixed(0),
+        jCat.avg_completion_tokens.toFixed(0),
+        avg(cCat.completion).toFixed(0),
+        jCat.avg_num_llm_calls.toFixed(1),
+        avg(cCat.calls).toFixed(1),
+        jCat.avg_energy_wh.toFixed(6),
+        avg(cCat.energy).toFixed(6),
+        `${jCat.avg_latency_ms.toFixed(0)}ms`,
+        `${avg(cCat.latency).toFixed(0)}ms`,
+      ]);
+    }
+    printTable(catHeaders8, catRows8);
+
+    latexTables.push(toLatexTable(
+      'Per-category comparison across 6 metrics (50 tasks, gpt-4o-mini).',
+      'paper-category',
+      catHeaders8,
+      catRows8,
+    ));
+  } else {
+    console.log('\n  [PENDING] Paper benchmark — run both paper-benchmark.ts and paper-crewai.py first');
+  }
+
   // ── Save LaTeX tables ───────────────────────────────────────────────────
 
   if (latexTables.length > 0) {

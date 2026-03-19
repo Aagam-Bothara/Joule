@@ -37,6 +37,8 @@ export interface PlanStep {
   description: string;
   toolName: string;
   toolArgs: Record<string, unknown>;
+  /** Indices of prior steps whose output this step depends on (dependency-aware structural pruning). */
+  needs?: number[];
   verify?: StepVerification;
   strategy?: AutomationStrategy;
 }
@@ -59,15 +61,16 @@ Rules:
 - Create steps to recover from or work around the failure
 - Keep recovery plans minimal
 - Use ONLY the tools listed below
+- Each step MUST include a "needs" array listing 0-based indices of prior steps whose output it requires ([] if none)
 - Respond with ONLY a raw JSON object (no markdown, no code fences, no explanation):
-{"steps": [{"description": "<what this step does>", "toolName": "<tool_name>", "toolArgs": {<arguments>}}]}
+{"steps": [{"description": "<what this step does>", "toolName": "<tool_name>", "toolArgs": {<arguments>}, "needs": []}]}
 
 Available tools:
 `;
 
 const PLANNER_SYSTEM_PROMPT_PREFIX = `You are a smart task planner for an autonomous AI agent. Given a task and available tools, create an execution plan.
 Respond with ONLY a raw JSON object (no markdown, no code fences, no explanation):
-{"steps": [{"description": "<what this step does>", "toolName": "<tool_name>", "toolArgs": {<arguments>}}]}
+{"steps": [{"description": "<what this step does>", "toolName": "<tool_name>", "toolArgs": {<arguments>}, "needs": [<indices of prior steps this step depends on>]}]}
 
 Rules:
 - ONLY return {"steps": []} if the task is a pure knowledge question, greeting, or conversation that needs NO real-world action
@@ -260,7 +263,7 @@ Respond with ONLY a raw JSON object (no markdown, no code fences, no explanation
   "goal": "<clear one-sentence goal>",
   "complexity": <number 0.0-1.0>,
   "confidence": <number 0.0-1.0 — how confident you are this plan will succeed>,
-  "steps": [{"description": "<what this step does>", "toolName": "<tool_name>", "toolArgs": {<arguments>}}],
+  "steps": [{"description": "<what this step does>", "toolName": "<tool_name>", "toolArgs": {<arguments>}, "needs": [<indices of prior steps this step depends on, e.g. [0,2]>]}],
   "directAnswer": "<if complexity <= 0.5 and steps is empty, provide the answer here directly>"
 }
 
@@ -278,6 +281,7 @@ Rules:
 - Use ONLY the tools listed below — never invent tools
 - Each step must use exactly one tool
 - Tool arguments must match the tool's expected input exactly
+- Each step MUST include a "needs" array listing the 0-based indices of prior steps whose output it requires. Use [] for the first step or any step that needs no prior output. Example: step 2 that uses outputs from step 0 and step 1 → "needs": [0, 1]
 
 Available tools:
 `;
@@ -493,9 +497,14 @@ export class Planner {
     const spanId = this.tracer.startSpan(traceId, 'unified-plan');
 
     try {
-      const actionFloor = Planner.detectActionIntent(task.description);
+      // Strip memory context injection before analyzing task complexity.
+      // Memory context (appended by enrichTaskWithMemory) can inflate description length
+      // and introduce false-positive action keywords from entity facts.
+      const rawDescription = task.description.split('\n\n[Agent Memory Context]')[0]
+        .split('\n\n[Known Failure Patterns]')[0];
+      const actionFloor = Planner.detectActionIntent(rawDescription);
       const isLikelySimple = actionFloor === 0
-        && task.description.length <= 300
+        && rawDescription.length <= 300
         && (!task.messages || task.messages.length === 0);
 
       let systemPrompt: string;
@@ -504,8 +513,17 @@ export class Planner {
         // Slim prompt: omit tool descriptions for tasks with no action intent.
         // Saves ~2500 tokens of system prompt for simple Q&A even when tools are registered.
         systemPrompt = SLIM_PLAN_SYSTEM_PROMPT;
+        this.tracer.logEvent(traceId, 'info', {
+          type: 'slim_prompt_selected',
+          actionFloor,
+          descLen: task.description.length,
+          promptLen: systemPrompt.length,
+        });
       } else {
-        const toolDescriptions = this.tools.getToolDescriptions()
+        // Dynamic Prompt Compression: only include tool descriptions relevant to this task.
+        // For a task like "search for weather", only browser/search tools are included,
+        // not file, email, OS, canvas tools — saving hundreds of tokens per call.
+        const toolDescriptions = this.tools.getRelevantToolDescriptions(task.description)
           .map(t => `- ${t.name}: ${t.description}`)
           .join('\n');
         systemPrompt = UNIFIED_PLAN_SYSTEM_PROMPT_PREFIX + toolDescriptions;
@@ -518,8 +536,9 @@ export class Planner {
         systemPrompt += this.constitution.buildPromptInjection();
       }
 
-      // Use the action-intent floor for routing tier decision
-      const routingComplexity = Math.max(0.5, actionFloor);
+      // Use the action-intent floor for routing tier decision.
+      // For simple tasks (slim prompt), route with low complexity to stay on SLM.
+      const routingComplexity = isLikelySimple ? 0.2 : Math.max(0.5, actionFloor);
       const decision = await this.router.route('plan', envelope, { complexity: routingComplexity });
       this.tracer.logRoutingDecision(traceId, decision as unknown as Record<string, unknown>);
 
@@ -537,7 +556,7 @@ export class Planner {
         goal?: string;
         complexity?: number;
         confidence?: number;
-        steps?: Array<{ description?: string; toolName?: string; toolArgs?: Record<string, unknown>; verify?: StepVerification }>;
+        steps?: Array<{ description?: string; toolName?: string; toolArgs?: Record<string, unknown>; needs?: number[]; verify?: StepVerification }>;
         directAnswer?: string;
       };
 
@@ -572,6 +591,8 @@ export class Planner {
           description: s.description ?? '',
           toolName: s.toolName ?? '',
           toolArgs: s.toolArgs ?? {},
+          // Dependency-aware structural pruning: validate needs indices are in range
+          ...(Array.isArray(s.needs) ? { needs: s.needs.filter(n => typeof n === 'number' && n >= 0 && n < i) } : {}),
           ...(s.verify ? { verify: s.verify } : {}),
         }),
       );
@@ -798,7 +819,7 @@ Available tools: ${this.tools.listNames().join(', ')}`;
     const spanId = this.tracer.startSpan(traceId, 'generate-plan');
 
     try {
-      const toolDescriptions = this.tools.getToolDescriptions()
+      const toolDescriptions = this.tools.getRelevantToolDescriptions(task.description)
         .map(t => `- ${t.name}: ${t.description}`)
         .join('\n');
 
@@ -985,7 +1006,7 @@ For critical steps, you MAY add a "verify" field: {"type": "output_check"|"dom_c
     const spanId = this.tracer.startSpan(traceId, 'replan');
 
     try {
-      const toolDescriptions = this.tools.getToolDescriptions()
+      const toolDescriptions = this.tools.getRelevantToolDescriptions(task.description)
         .map(t => `- ${t.name}: ${t.description}`)
         .join('\n');
 
@@ -1072,7 +1093,7 @@ Create a recovery plan to complete the original task.`;
     const spanId = this.tracer.startSpan(traceId, 'reactive-plan');
 
     try {
-      const toolDescriptions = this.tools.getToolDescriptions()
+      const toolDescriptions = this.tools.getRelevantToolDescriptions(task.description)
         .map(t => `- ${t.name}: ${t.description}`)
         .join('\n');
 
@@ -1427,13 +1448,14 @@ ${observeContext ? (isSnapshot ? 'Using the indexed elements above, plan the nex
 
   private parsePlan(content: string, taskId: string, complexity: number): ExecutionPlan {
     try {
-      const parsed = Planner.extractJson(content) as { steps?: Array<{ description?: string; toolName?: string; toolArgs?: Record<string, unknown>; verify?: StepVerification }> };
+      const parsed = Planner.extractJson(content) as { steps?: Array<{ description?: string; toolName?: string; toolArgs?: Record<string, unknown>; needs?: number[]; verify?: StepVerification }> };
       const steps: PlanStep[] = (parsed.steps ?? []).map(
-        (s: { description?: string; toolName?: string; toolArgs?: Record<string, unknown>; verify?: StepVerification }, i: number) => ({
+        (s: { description?: string; toolName?: string; toolArgs?: Record<string, unknown>; needs?: number[]; verify?: StepVerification }, i: number) => ({
           index: i,
           description: s.description ?? '',
           toolName: s.toolName ?? '',
           toolArgs: s.toolArgs ?? {},
+          ...(Array.isArray(s.needs) ? { needs: s.needs.filter(n => typeof n === 'number' && n >= 0 && n < i) } : {}),
           ...(s.verify ? { verify: s.verify } : {}),
         }),
       );

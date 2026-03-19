@@ -1,5 +1,5 @@
 % Auto-generated LaTeX tables for Joule paper
-% Generated: 2026-03-10T04:27:57.534Z
+% Generated: 2026-03-10T06:29:47.827Z
 
 \begin{table}[h]
 \centering
@@ -108,6 +108,43 @@ reasoning & 4023 & 872 & 4.6x & 10966ms & 12294ms & 1.1x & 1.0 \\
 tools & 5089 & 3760 & 1.4x & 11259ms & 11963ms & 1.1x & 4.1 \\
 generation & 6959 & 2196 & 3.2x & 16788ms & 31011ms & 1.8x & 4.0 \\
 multi-step & 5470 & 4324 & 1.3x & 10650ms & 20525ms & 1.9x & 4.0 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[h]
+\centering
+\caption{Paper benchmark: Joule vs CrewAI (N=50 tasks, 5 categories) using gpt-4o-mini with optimizations (dynamic prompt compression, speculative task routing, memory-aware complexity detection).}
+\label{tab:paper-overall}
+\begin{tabular}{l l l l}
+\toprule
+Metric & Joule & CrewAI & Ratio \\
+\midrule
+Tasks & 50 & 50 & - \\
+Success Rate & 98.0% & 100.0% & - \\
+Avg Prompt Tokens & 2348 & 3221 & 0.73x \\
+Avg Completion Tokens & 217 & 366 & 0.59x \\
+Avg LLM Calls & 1.53 & 1.0 & 1.53x \\
+Total Energy (Wh) & 0.047920 & 0.070297 & 0.68x \\
+Avg Energy/Task (Wh) & 0.000965 & 0.001406 & 0.69x \\
+Avg Latency & 5827ms & 7047ms & 1.2x faster \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[h]
+\centering
+\caption{Per-category comparison across 6 metrics (50 tasks, gpt-4o-mini, optimized). Joule wins on energy for research (3.2$\times$ less) and multi-step (1.6$\times$ less) tasks.}
+\label{tab:paper-category}
+\begin{tabular}{l l l l l l l l l l l}
+\toprule
+Category & J-Prompt & C-Prompt & J-Compl & C-Compl & J-Calls & C-Calls & J-Energy & C-Energy & J-Lat & C-Lat \\
+\midrule
+qa & 1359 & 87 & 52 & 78 & 1.0 & 1.0 & 0.000470 & 0.000120 & 1658ms & 1650ms \\
+summarization & 1551 & 96 & 173 & 205 & 1.1 & 1.0 & 0.000672 & 0.000275 & 4318ms & 3458ms \\
+research & 3154 & 11622 & 273 & 519 & 2.0 & 1.0 & 0.001274 & 0.004110 & 7243ms & 11195ms \\
+code\_generation & 2281 & 110 & 261 & 221 & 1.5 & 1.0 & 0.000998 & 0.000298 & 7608ms & 3725ms \\
+multi\_step & 3315 & 4188 & 323 & 809 & 2.0 & 1.0 & 0.001382 & 0.002227 & 8157ms & 15206ms \\
 \bottomrule
 \end{tabular}
 \end{table}

@@ -1,0 +1,208 @@
+\section{System Description}
+\label{sec:system}
+
+Joule reduces per-task energy consumption through four co-designed mechanisms: (1)~SLM-first model routing, which selects the smallest capable model by default; (2)~adaptive prompt optimization, which minimizes token consumption for simple tasks; (3)~dependency-aware structural pruning, which eliminates irrelevant step results from downstream context assembly; and (4)~7-dimensional budget enforcement, which provides a hard ceiling against runaway consumption.
+
+These four mechanisms are not independent optimizations---they form a closed feedback loop. Routing determines which model is called, which determines token consumption per call. The planner's dependency metadata enables the executor to prune irrelevant context at zero additional LLM cost. Token consumption is continuously tracked by the budget manager, which in turn constrains future routing decisions as resource budgets deplete. This co-design is the central architectural insight of Joule: energy efficiency emerges from the \emph{interaction} of routing, optimization, pruning, and enforcement, not from any single mechanism in isolation.
+
+% ─────────────────────────────────────────────────────────────────────
+\subsection{SLM-First Routing}
+\label{sec:routing}
+
+Every LLM call in Joule passes through a \emph{model router} that decides which model tier to use: a Small Language Model (SLM) such as \texttt{gpt-4o-mini}, Claude~Haiku, or a local Ollama model, versus a Large Language Model (LLM) such as \texttt{gpt-4o} or Claude~Sonnet. The router applies a five-rule priority cascade:
+
+\begin{enumerate}[leftmargin=2em,itemsep=2pt]
+  \item \textbf{Purpose guard.} Classification and verification calls always use SLM, regardless of task complexity.
+  \item \textbf{Escalation budget check.} If the task's budget envelope has no remaining escalation allowance, the router is constrained to SLM.
+  \item \textbf{Energy ceiling.} When energy-aware routing is enabled and the remaining energy budget falls below 0.01\,Wh, the router selects SLM to avoid exceeding the energy ceiling.
+  \item \textbf{Complexity threshold.} If the task's estimated complexity score exceeds $\tau_c = 0.7$ (on a 0--1 scale), the router escalates to LLM.
+  \item \textbf{Confidence threshold.} If a previous step completed with confidence below $\tau_s = 0.6$, the router escalates to LLM to recover.
+\end{enumerate}
+
+\noindent If none of these conditions trigger, the router \textbf{defaults to SLM}. In practice, this means the vast majority of calls---planning, classification, synthesis, and simple execution---use the cheapest available model. Escalation to LLM is the exception, not the rule.
+
+The energy impact is substantial. Table~\ref{tab:energy-tiers} shows the energy profiles used in our evaluation. An SLM call on \texttt{gpt-4o-mini} consumes 0.3\,Wh per million input tokens and 1.2\,Wh per million output tokens, compared to 1.5\,Wh and 5.0\,Wh respectively for \texttt{gpt-4o}---a 4--5$\times$ reduction per token.
+
+\begin{table}[h]
+\centering
+\caption{Energy consumption per million tokens (Wh) for models used in evaluation.}
+\label{tab:energy-tiers}
+\begin{tabular}{llcc}
+\toprule
+Model & Tier & Input Wh/M & Output Wh/M \\
+\midrule
+\texttt{gpt-4o-mini}  & SLM & 0.3 & 1.2 \\
+\texttt{gpt-4o}       & LLM & 1.5 & 5.0 \\
+\texttt{llama3.2:3b} (local)  & SLM & 0.15 & 0.6 \\
+\texttt{claude-haiku-4.5}     & SLM & 0.4 & 1.5 \\
+\texttt{claude-sonnet-4}      & LLM & 1.2 & 4.5 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+When an escalation occurs, it is recorded as a budget dimension (see Section~\ref{sec:budget}) and deducted from a per-task escalation allowance. Under the \texttt{medium} budget preset, a task is permitted at most 1 escalation; under \texttt{low}, none. This creates a feedback loop: if a task exhausts its escalation budget, all remaining calls are forced to SLM, bounding worst-case energy consumption.
+
+% ─────────────────────────────────────────────────────────────────────
+\subsection{Adaptive Prompt Optimization}
+\label{sec:prompt-opt}
+
+The second mechanism reduces token consumption---and thus energy---by minimizing the number and size of LLM calls per task. Joule applies three optimizations, each targeting a different source of token waste.
+
+\paragraph{Unified Planning.}
+A na\"ive agent pipeline requires four sequential LLM calls to process a task: specification extraction, complexity classification, plan generation, and plan critique. Joule replaces this with a single \emph{unified planning} call that produces all four outputs in one structured JSON response. The unified prompt instructs the model to return:
+
+\begin{verbatim}
+{"goal": "...", "complexity": 0.0-1.0,
+ "confidence": 0.0-1.0,
+ "steps": [{"description": "...",
+             "toolName": "...",
+             "toolArgs": {...},
+             "needs": [<indices of prior steps
+                        this step depends on>]}],
+ "directAnswer": "..."}
+\end{verbatim}
+
+\noindent The \texttt{needs} array is the key schema extension that enables dependency-aware structural pruning (Section~\ref{sec:pruning}). Each step declares the 0-based indices of prior steps whose output it requires, modeling the execution plan as a directed acyclic graph (DAG) rather than a flat sequence. This metadata is produced by the planner at zero additional LLM cost---it is part of the same unified planning call.
+
+This reduces planning from 4 LLM round-trips to 1, yielding a measured 60\% reduction in planning tokens on our benchmark tasks.
+
+\paragraph{Slim Prompt Routing.}
+Even with unified planning, the system prompt is expensive: it includes a planning schema, complexity rubric, tool descriptions, and generation rules. For an agent with three registered tools (\texttt{search\_web}, \texttt{analyze\_data}, \texttt{write\_report}), the unified planning system prompt consumes approximately 2,900 tokens.
+
+For tasks that are unlikely to require tools---identified by the absence of action-intent keywords (e.g., ``create,'' ``delete,'' ``search,'' ``write to file''), short description length ($\leq$300 characters), and no conversation history---Joule substitutes a \emph{slim prompt} of approximately 50 tokens that omits all tool descriptions and planning scaffolding:
+
+\begin{quote}
+\small
+\textit{``You are a helpful AI assistant. The user's request appears to be a simple question or greeting. Respond with ONLY a raw JSON object: \{``goal'': ..., ``complexity'': 0.0--0.5, ``steps'': [], ``directAnswer'': ``...''\}.''}
+\end{quote}
+
+\noindent This reduces the system prompt from ${\sim}2{,}900$ tokens to ${\sim}50$ tokens---a \textbf{58$\times$ reduction}---for simple Q\&A and summarization tasks, while preserving the full planning prompt for tasks that actually need tools.
+
+\paragraph{Direct Answer Shortcut.}
+When the unified plan returns a \texttt{directAnswer} field (indicating complexity $\leq 0.5$ and an empty step list), Joule skips the synthesis LLM call entirely and uses the planner's answer as the final output. Combined with slim prompt routing, this reduces Q\&A tasks from 2 LLM calls to 1---a single SLM call that both plans and answers in one response. In our 50-task benchmark, this shortcut fired for all 10 Q\&A tasks and 9 of 10 summarization tasks.
+
+\paragraph{Combined Effect.}
+Table~\ref{tab:prompt-savings} quantifies the per-category impact measured in our evaluation. Notably, simple Q\&A tasks require only 1 LLM call at 0.000470\,Wh per task---a 2.1$\times$ reduction compared to a na\"ive pipeline.
+
+\begin{table}[h]
+\centering
+\caption{Joule token consumption by category (50-task benchmark, gpt-4o-mini). Prompt tokens include the system prompt; completion tokens are model output.}
+\label{tab:prompt-savings}
+\begin{tabular}{lrrrrr}
+\toprule
+Category & Tasks & Avg Prompt & Avg Compl. & Avg Calls & Avg Energy (Wh) \\
+\midrule
+Simple Q\&A      & 10 & 1{,}359 &  52 & 1.0 & 0.000470 \\
+Summarization    & 10 & 1{,}551 & 173 & 1.1 & 0.000672 \\
+Research         & 10 & 3{,}154 & 273 & 2.0 & 0.001274 \\
+Code Generation  & 10 & 2{,}281 & 261 & 1.5 & 0.000998 \\
+Multi-step       & 10 & 3{,}315 & 323 & 2.0 & 0.001382 \\
+\midrule
+\textbf{Overall} & \textbf{50} & \textbf{2{,}348} & \textbf{217} & \textbf{1.5} & \textbf{0.000965} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+% ─────────────────────────────────────────────────────────────────────
+\subsection{Dependency-Aware Structural Pruning}
+\label{sec:pruning}
+
+The previous optimizations reduce the cost of \emph{planning}. Structural pruning reduces the cost of \emph{context assembly}---the tokens consumed when passing prior step results to the synthesis model, recovery planner, or downstream steps.
+
+\subsubsection{The Problem: Context Accumulation}
+
+In existing agent frameworks, when a multi-step plan completes and the runtime synthesizes a final answer, it concatenates \emph{all} step results into the synthesis prompt:
+
+\begin{quote}
+\small
+\texttt{Step 1 (search\_web): \{...\}} \\
+\texttt{Step 2 (analyze\_data): \{...\}} \\
+\texttt{Step 3 (search\_web): \{...\}} \\
+\texttt{Step 4 (write\_report): \{...\}} \\
+\texttt{Step 5 (search\_web): \{...\}}
+\end{quote}
+
+\noindent If step~5 only depends on the output of step~4, which in turn depends on step~2, then steps~1, 3 are included in the context but never used. For tasks with many steps, this waste is substantial: the irrelevant context consumes input tokens, which directly consume energy.
+
+The same problem recurs in recovery planning: when a step fails and Joule's replanner generates a recovery plan, the context includes all prior completed step results, even those unrelated to the failure.
+
+\subsubsection{DAG-Based Plan Modeling}
+
+Joule addresses this by extending the plan schema with explicit dependency metadata. During unified planning, the LLM is instructed to include a \texttt{needs} array in each step, declaring the 0-based indices of prior steps whose output the step requires:
+
+\begin{quote}
+\small
+\texttt{Step 0 (search\_web): needs: []} \\
+\texttt{Step 1 (search\_web): needs: []} \\
+\texttt{Step 2 (analyze\_data): needs: [0, 1]} \\
+\texttt{Step 3 (write\_report): needs: [2]}
+\end{quote}
+
+\noindent This models the plan as a DAG rather than a flat sequence. The dependency metadata is produced by the planner at zero additional LLM cost---it is part of the same unified planning call that already generates the plan.
+
+\subsubsection{Sink-Node Reachability}
+
+At synthesis time, Joule computes which step results to include via \emph{sink-node reachability}. A sink node is a step that no other step declares as a dependency---these are the terminal outputs of the DAG. The runtime computes the union of transitive closures from all sink nodes via BFS over the dependency graph:
+
+\begin{enumerate}[leftmargin=2em,itemsep=2pt]
+  \item Identify all sink nodes (steps with no dependents).
+  \item For each sink, walk the \texttt{needs} edges backward to collect all transitive dependencies.
+  \item Include only step results in the union of these closures.
+\end{enumerate}
+
+\noindent This is principled: every step that contributes to \emph{any} terminal output is kept; pure intermediaries consumed only by other intermediaries that are themselves pruned are excluded. For recovery planning, the same algorithm computes the transitive closure of the failed step specifically, including only the step results that could be relevant to the failure.
+
+\subsubsection{Output-Signature Taint Tracking}
+
+The planner's dependency declarations are produced by an LLM and may contain errors---a step might use a prior step's output without declaring it in \texttt{needs}. To guard against this, Joule applies \emph{output-signature taint tracking} as a post-execution validation layer.
+
+After all steps complete, the runtime extracts \emph{distinctive tokens} from each step's actual output---URLs, file paths, UUIDs, hex hashes, email addresses, and long quoted strings---and checks whether any downstream step's \texttt{toolArgs} contain these tokens. A match indicates real data flow that the planner failed to declare, and the dependency edge is automatically repaired before pruning is applied.
+
+The signature extraction is designed for zero false positives: only tokens that would be astronomically unlikely to appear in unrelated arguments by coincidence are extracted (e.g., full URLs, UUIDs, paths $\geq$8 characters, quoted strings $\geq$20 characters with special characters). The number of signatures per step is capped at 50 to bound compute.
+
+We acknowledge one limitation: taint tracking detects data-flow dependencies (where output tokens are literally reused in downstream arguments) but not pure semantic dependencies (where a step's outcome influences downstream behavior without token reuse---e.g., a boolean ``user exists'' check followed by ``create user''). For these cases, the planner's declared \texttt{needs} is the only signal. The \texttt{repairedEdges} metric logged by the runtime allows measurement of the repair rate across task categories.
+
+\subsubsection{Energy Impact}
+
+Structural pruning has zero LLM overhead---the dependency metadata comes from the existing planning call, and the BFS computation is a negligible CPU operation over a graph with at most tens of nodes. The energy savings come entirely from reducing the number of input tokens in the synthesis and recovery prompts. These savings scale with task length and DAG sparsity: for short 2-step tasks, pruning saves nothing (both steps are relevant); for research and multi-step tasks with 4--6 steps and sparse dependency graphs, the savings are substantial. We report per-category pruning rates in Section~\ref{sec:eval}.
+
+The pruning mechanism includes an A/B toggle (\texttt{enableDependencyPruning} in the routing configuration) that allows disabling pruning entirely for correctness evaluation---running the same task set with and without pruning to measure whether output quality degrades.
+
+% ─────────────────────────────────────────────────────────────────────
+\subsection{Budget Enforcement}
+\label{sec:budget}
+
+The first three mechanisms reduce energy consumption \emph{on average}. Budget enforcement provides a \emph{worst-case guarantee}: no task can exceed its allocated energy ceiling, regardless of model behavior.
+
+Each task in Joule is assigned a \emph{budget envelope} $B = (b_1, b_2, \ldots, b_7)$ spanning seven dimensions:
+
+\begin{table}[h]
+\centering
+\caption{Budget envelope dimensions and preset values.}
+\label{tab:budget-presets}
+\begin{tabular}{llrrr}
+\toprule
+Dimension & Unit & Low & Medium & High \\
+\midrule
+Tokens         & count  & 4{,}000   & 16{,}000  & 100{,}000 \\
+Cost           & USD    & \$0.01    & \$0.10    & \$1.00    \\
+Latency        & ms     & 10{,}000  & 30{,}000  & 300{,}000 \\
+Tool calls     & count  & 3         & 10        & 40        \\
+Escalations    & count  & 0         & 1         & 5         \\
+Energy         & Wh     & 0.005     & 0.05      & 0.5       \\
+Carbon         & gCO$_2$ & 0.002   & 0.02      & 0.2       \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The \texttt{BudgetManager} tracks real-time consumption across all seven dimensions. After every LLM call, tool invocation, and escalation event, the manager checks:
+%
+\[
+  \forall\, d \in \{1, \ldots, 7\}:\; \text{consumed}(d) \leq \text{ceiling}(d)
+\]
+%
+If any dimension is exceeded, Joule throws a \texttt{BudgetExhaustedError} and halts the task immediately. This is not a soft warning or a best-effort heuristic---it is a hard runtime check that executes synchronously after every resource-consuming operation.
+
+Critically, the budget also \emph{feeds back into routing}. When the escalation dimension is exhausted, the router is constrained to SLM for all remaining calls (Rule~2 in Section~\ref{sec:routing}). When the energy dimension is critically low ($<$0.01\,Wh remaining), the router similarly forces SLM (Rule~3). This means the budget does not merely stop execution when limits are reached---it actively steers the system toward lower-energy model choices as resources deplete.
+
+Frameworks without budget enforcement---including CrewAI, LangChain, and AutoGen---have no mechanism to prevent runaway consumption. A poorly planned task, a model that loops, or an adversarial prompt can consume unbounded tokens, energy, and cost. Joule's budget enforcement provides the missing invariant: \textbf{every task has a finite, user-specified resource ceiling that cannot be exceeded}.

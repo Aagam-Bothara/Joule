@@ -63,6 +63,48 @@ export class ToolRegistry {
     return Array.from(this.tools.keys());
   }
 
+  /**
+   * Dynamic Prompt Compression: return only tool descriptions relevant to the task.
+   * Matches task keywords against tool names and descriptions to filter out irrelevant tools.
+   * Falls back to all tools if no matches found (safety net).
+   */
+  getRelevantToolDescriptions(taskDescription: string): Array<{ name: string; description: string }> {
+    const allTools = this.getToolDescriptions();
+    if (allTools.length <= 3) return allTools; // Not worth filtering for few tools
+
+    const taskLower = taskDescription.toLowerCase();
+    const taskWords = new Set(taskLower.split(/\W+/).filter(w => w.length > 2));
+
+    const scored = allTools.map(tool => {
+      const toolLower = (tool.name + ' ' + tool.description).toLowerCase();
+      let score = 0;
+
+      // Direct name match in task
+      if (taskLower.includes(tool.name.toLowerCase().replace(/_/g, ' ')) ||
+          taskLower.includes(tool.name.toLowerCase())) {
+        score += 10;
+      }
+
+      // Keyword overlap between task words and tool name/description
+      const toolWords = new Set(toolLower.split(/\W+/).filter(w => w.length > 2));
+      for (const tw of toolWords) {
+        if (taskWords.has(tw)) score += 1;
+      }
+
+      // Category prefix match (e.g., "browser_" tools for browser tasks)
+      const prefix = tool.name.split('_')[0];
+      if (taskLower.includes(prefix)) score += 5;
+
+      return { tool, score };
+    });
+
+    const relevant = scored.filter(s => s.score > 0).sort((a, b) => b.score - a.score);
+
+    // Always include at least the top tools; fall back to all if nothing matched
+    if (relevant.length === 0) return allTools;
+    return relevant.map(s => s.tool);
+  }
+
   getToolDescriptions(): Array<{ name: string; description: string }> {
     return this.list().map(t => {
       let desc = t.description;

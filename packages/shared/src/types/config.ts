@@ -158,6 +158,9 @@ export interface RoutingConfig {
   maxReplanDepth?: number;
   /** Use unified planning (spec+classify+plan+critique in 1 LLM call). Default: true */
   unifiedPlanning?: boolean;
+  /** Enable dependency-aware structural pruning to reduce context tokens. Default: true.
+   *  Set to false to disable pruning for A/B correctness evaluation. */
+  enableDependencyPruning?: boolean;
 }
 
 export interface LoggingConfig {
@@ -247,4 +250,11 @@ export interface JouleConfig {
   };
   governance?: GovernanceConfig;
   traceExport?: TraceExportConfig;
+  executionPath?: {
+    /** Master switch for learned execution path selection. Default: true */
+    enabled?: boolean;
+    /** Only run classifier routing — disable P0 cache, P2 templates, P3 chunked. Default: false */
+    classifierOnly?: boolean;
+    cache?: { enabled?: boolean; similarityThreshold?: number };
+  };
 }
