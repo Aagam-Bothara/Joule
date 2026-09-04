@@ -68,7 +68,8 @@ Submit a task for execution. Blocks until the task completes.
   "description": "Summarize the contents of README.md",
   "budget": "medium",
   "context": "optional additional context",
-  "tools": ["file_read"]
+  "tools": ["file_read"],
+  "mode": "adaptive"
 }
 ```
 
@@ -78,6 +79,7 @@ Submit a task for execution. Blocks until the task completes.
 | `budget`      | string   | no       | Budget preset (default: `"medium"`) |
 | `context`     | string   | no       | Additional context for the planner |
 | `tools`       | string[] | no       | Restrict to specific tool names    |
+| `mode`        | string   | no       | Execution mode: `adaptive` (default), `slm-only`, `llm-only`, `static-router` |
 
 **Response:** `201 Created`
 

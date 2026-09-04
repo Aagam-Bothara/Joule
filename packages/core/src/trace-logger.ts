@@ -12,9 +12,36 @@ import {
   type ModelResponse,
   type ToolInvocation,
   type ToolResult,
+  type TierUsage,
 } from '@joule/shared';
 import type { TraceRepository, TraceData, SpanData, EventData } from '@joule/store';
 import type { TraceExporter } from './trace-exporters/exporter.js';
+
+/**
+ * Roll up model_call events by tier. This is what makes "SLM tokens vs LLM
+ * tokens" and "estimated LLM-only cost" answerable from a trace alone.
+ */
+export function computeTierUsage(spans: TraceSpan[]): TierUsage {
+  const usage: TierUsage = { slmTokens: 0, llmTokens: 0, slmCostUsd: 0, llmCostUsd: 0, slmCalls: 0, llmCalls: 0 };
+  const walk = (list: TraceSpan[]): void => {
+    for (const span of list) {
+      for (const event of span.events) {
+        if (event.type !== 'model_call') continue;
+        const tokens = Number(event.data.totalTokens ?? 0) || 0;
+        const cost = Number(event.data.costUsd ?? 0) || 0;
+        if (event.data.tier === 'llm') {
+          usage.llmTokens += tokens; usage.llmCostUsd += cost; usage.llmCalls += 1;
+        } else {
+          usage.slmTokens += tokens; usage.slmCostUsd += cost; usage.slmCalls += 1;
+        }
+      }
+      walk(span.children);
+    }
+  };
+  walk(spans);
+  for (const k of Object.keys(usage) as Array<keyof TierUsage>) usage[k] = Math.round(usage[k] * 1e8) / 1e8;
+  return usage;
+}
 
 export class TraceLogger {
   private traces = new Map<string, TraceState>();
@@ -165,6 +192,7 @@ export class TraceLogger {
         used: budgetUsed,
       },
       spans: state.spans,
+      tierUsage: computeTierUsage(state.spans),
     };
 
     // Persist completed trace to SQLite if repository is available
@@ -261,7 +289,7 @@ export class TraceLogger {
   }
 
   private fromTraceData(data: TraceData): ExecutionTrace {
-    return {
+    const trace: ExecutionTrace = {
       traceId: data.traceId,
       taskId: data.taskId,
       startedAt: data.startedAt,
@@ -273,6 +301,8 @@ export class TraceLogger {
       },
       spans: data.spans.map(s => this.fromSpanData(s)),
     };
+    trace.tierUsage = computeTierUsage(trace.spans);
+    return trace;
   }
 
   private fromSpanData(data: SpanData): TraceSpan {

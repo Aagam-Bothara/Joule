@@ -1,0 +1,51 @@
+% ─────────────────────────────────────────────────────────────────────
+% Trajectory-level escalation: design (input after \S routing) and
+% evaluation (input before \S discussion). Numbers come from
+% benchmarks/reports/harness-live-mbpp-main-*.json (see benchmarks/README.md).
+% ─────────────────────────────────────────────────────────────────────
+
+\subsection{Trajectory-Level Escalation}
+\label{sec:escalation}
+
+The router of \S\ref{sec:routing} decides \emph{before} work starts, from a self-reported complexity estimate.
+Cascades~\cite{chen2023frugalgpt} and learned routers~\cite{ong2024routellm,ding2024hybrid} make the same decision at the granularity of a whole request.
+For multi-step agent tasks this granularity is wrong: a small model can usually execute most of a trajectory and fails on one step, and the cost of a wrong decision is paid over the entire trajectory.
+Joule therefore makes the small model the \emph{executor} and decides after every step whether to keep going, ask for help, or hand over.
+
+\paragraph{Execution state.}
+A run maintains a structured state $S$: the goal, a versioned plan, completed steps with their tool results, observations, failures keyed by a normalized error signature, hypotheses, advice received, and every escalation decision.
+$S$ is the only input to escalation; the large model never restarts from the original prompt.
+
+\paragraph{Step agent.}
+One model-driven loop serves every tier.
+At each turn the current model proposes exactly one structured action---a tool call with an optional verifier, a final answer, a focused question, or a give-up---and the runtime executes it, verifies it, and updates $S$.
+
+\paragraph{Deterministic verification.}
+Wherever possible a step is verified without a model: an output pattern, a DOM predicate, or a command exit code with a parsed pass fraction (``3/5 tests passed'').
+A command that exits non-zero fails verification even when the tool call itself succeeded.
+Model-judged verification is opt-in and always labelled, so results can be reported separately.
+
+\paragraph{Evidence-based confidence.}
+No model self-report enters the confidence used for escalation.
+After each step,
+\begin{equation}
+c = w_t\,\mathrm{tool} + w_v\,\mathrm{verify} + w_p\,\mathrm{progress} + w_b\,\mathrm{budget} + w_c(1-\mathrm{repeat}) - w_r\,\mathrm{repeat} - w_x\,\mathrm{contradiction},
+\end{equation}
+where $\mathrm{tool}$ is the last tool outcome, $\mathrm{verify}$ the last verifier outcome, $\mathrm{progress}$ the verified share of a recent window (an improving pass fraction counts), $\mathrm{repeat}$ the recurrence of a failure signature, and $\mathrm{contradiction}$ indicates a tool success whose verification failed.
+
+\paragraph{Escalation policy.}
+An ordered rule set maps $(S, c)$ to one of four actions:
+\textsc{continue} (same tier keeps working);
+\textsc{consult} (one focused question to the large model, whose answer returns to the small model as advice);
+\textsc{handoff} (the large model continues from a context rendered from $S$: goal, plan, completed work, key observations, failures, advice, and unresolved questions);
+\textsc{abort} (budget, safety, or an impossible tool requirement).
+Hard triggers precede soft thresholds: repeated malformed output, a give-up, or $k$ accumulated failures force a handoff; the same failure signature twice, a stall, or a verification failure that survives a retry without improvement triggers a consult; thresholds on $c$ apply only once two failures have accumulated.
+Every escalation is gated by the budget envelope (\S\ref{sec:budget}): a consult must fit in the remaining cost and tokens, and a handoff also consumes an escalation unit.
+
+\paragraph{Why consult.}
+A handoff bills the remaining trajectory at large-model prices.
+A consult bills one question and one answer, and returns control to the small model.
+When the small model is stuck on a single decision, which is the common case on coding tasks, a consult recovers the trajectory at a fraction of a handoff's cost.
+We measure how often it does.
+
+% ─────────────────────────────────────────────────────────────────────

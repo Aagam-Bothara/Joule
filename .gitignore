@@ -11,3 +11,10 @@ coverage/
 .claude/
 ~/
 *.log
+
+# Benchmark harness output
+benchmarks/reports/*.json
+
+# Benchmark harness sandbox and datasets
+benchmarks/.sandbox/
+benchmarks/data/

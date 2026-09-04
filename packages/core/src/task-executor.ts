@@ -17,6 +17,7 @@ import {
   type EfficiencyReport,
   type RoutingConfig,
   type ExecutionPathConfig,
+  type ExecutionMode,
   ModelTier,
   generateId,
   BudgetExhaustedError,
@@ -35,6 +36,7 @@ import { ExecutionSimulator } from './execution-simulator.js';
 import type { ConstitutionEnforcer } from './constitution.js';
 import { ExecutionPathSelector } from './execution-path/index.js';
 import { AdaptiveController, type ExecutionState } from './adaptive-controller.js';
+import { AdaptiveExecutor, type AdaptiveAttach, type AdaptiveRunResult, buildTrajectoryReport } from './adaptive/index.js';
 
 const DEFAULT_MAX_REPLAN_DEPTH = 2;
 
@@ -75,6 +77,11 @@ interface StateMachineContext {
   onProgress?: ProgressCallback;
   /** Speculative routing: complexity determined by unified plan, reused for all subsequent routing */
   speculativeComplexity?: number;
+  /** Execution mode resolved for this run */
+  mode: ExecutionMode;
+  /** Adaptive execution artifacts (all modes except static-router) */
+  adaptive?: AdaptiveAttach;
+  adaptiveResult?: AdaptiveRunResult;
 }
 
 export interface BudgetUpdateEvent {
@@ -98,6 +105,7 @@ export class TaskExecutor {
   private simulator: ExecutionSimulator;
   private pathSelector?: ExecutionPathSelector;
   private adaptiveController: AdaptiveController;
+  private adaptive: AdaptiveExecutor;
 
   constructor(
     private budget: BudgetManager,
@@ -115,9 +123,13 @@ export class TaskExecutor {
     this.constitution = constitution;
     this.simulator = new ExecutionSimulator(tools);
     this.adaptiveController = new AdaptiveController();
+    this.adaptive = new AdaptiveExecutor({
+      budget, router, tracer, tools, providers, energyConfig, constitution,
+      policy: routingConfig?.escalation,
+    });
     // Enable execution path selection unless explicitly disabled
     if (executionPathConfig?.enabled !== false) {
-      this.pathSelector = new ExecutionPathSelector(router, budget, tracer, executionPathConfig);
+      this.pathSelector = new ExecutionPathSelector(router, budget, tracer, executionPathConfig, providers);
     }
   }
 
@@ -155,7 +167,7 @@ export class TaskExecutor {
     const state: ExecutionState = {
       planLength: steps.length,
       stepFailures,
-      tokensConsumed: usage.tokens,
+      tokensConsumed: usage.tokensUsed,
       tokenBudget: envelope.envelope.maxTokens ?? 100_000,
       complexityEstimate,
       repairedEdges,
@@ -435,13 +447,18 @@ export class TaskExecutor {
       replanDepth: 0,
       retryCount: 0,
       onProgress,
+      mode: this.resolveMode(task),
     };
 
     let status: TaskResult['status'] = 'pending';
     let error: string | undefined;
 
     try {
-      await this.runStateMachine(ctx);
+      if (ctx.mode === 'static-router') {
+        await this.runStateMachine(ctx);
+      } else {
+        await this.runAdaptive(ctx);
+      }
       status = ctx.state === 'done' ? 'completed' : 'failed';
       error = ctx.error;
     } catch (err) {
@@ -506,6 +523,14 @@ export class TaskExecutor {
       criteriaResults = this.evaluateCriteria(ctx.spec, ctx.stepResults, ctx.result);
     }
 
+    const trace = this.tracer.getTrace(traceId, budgetUsed);
+    const trajectory = ctx.adaptive?.state
+      ? buildTrajectoryReport(ctx.adaptive.state, trace, status, {
+          llmPricePerToken: ctx.adaptive.llmPricePerToken,
+          stepDescriptions: ctx.adaptive.turnDescriptions,
+        })
+      : undefined;
+
     return {
       id: resultId,
       taskId: task.id,
@@ -514,17 +539,24 @@ export class TaskExecutor {
       result: ctx.result,
       stepResults: ctx.stepResults,
       budgetUsed,
-      trace: this.tracer.getTrace(traceId, budgetUsed),
+      trace,
       error,
       completedAt: isoNow(),
       efficiencyReport,
       spec: ctx.spec,
       criteriaResults,
       simulationResult: ctx.simulationResult,
+      mode: ctx.mode,
+      trajectory,
+      executionState: ctx.adaptive?.state,
     };
   }
 
   async *executeStream(task: Task, onProgress?: ProgressCallback): AsyncGenerator<StreamEvent> {
+    if (this.resolveMode(task) !== 'static-router') {
+      yield* this.executeAdaptiveStream(task, onProgress);
+      return;
+    }
     const traceId = generateId('trace');
     const resultId = generateId('result');
 
@@ -680,6 +712,51 @@ export class TaskExecutor {
         criteriaResults,
       },
     };
+  }
+
+  // ─── Execution modes ───
+
+  /** Resolve the execution mode: task override → routing.defaultMode → static-router. */
+  resolveMode(task: Task): ExecutionMode {
+    return task.mode ?? this.routingConfig?.defaultMode ?? 'static-router';
+  }
+
+  /**
+   * Adaptive / slm-only / llm-only: run the step agent + escalation policy loop.
+   * Fills the same context the static path uses so budgeting, tracing and
+   * error handling stay shared.
+   */
+  private async runAdaptive(ctx: StateMachineContext): Promise<void> {
+    this.transitionState(ctx, 'act');
+    const attach: AdaptiveAttach = { stepResults: ctx.stepResults, turnDescriptions: {} };
+    ctx.adaptive = attach;
+    const run = await this.adaptive.run(ctx.task, ctx.envelope, ctx.traceId, ctx.mode, attach, ctx.onProgress);
+    ctx.adaptiveResult = run;
+    ctx.result = run.result;
+
+    if (this.constitution && ctx.result) {
+      const outputViolation = this.constitution.validateOutput(ctx.result);
+      if (outputViolation) {
+        this.tracer.logEvent(ctx.traceId, 'constitution_output_violation', outputViolation as unknown as Record<string, unknown>);
+        ctx.result = `[Response filtered by constitution rule ${outputViolation.ruleId}: ${outputViolation.ruleName}]`;
+      }
+    }
+
+    if (run.status === 'completed') {
+      this.transitionState(ctx, 'done');
+    } else {
+      ctx.error = run.error;
+      this.transitionState(ctx, 'failed');
+    }
+  }
+
+  /** Non-static modes stream through the adaptive loop: progress via callback, then the answer as one chunk. */
+  private async *executeAdaptiveStream(task: Task, onProgress?: ProgressCallback): AsyncGenerator<StreamEvent> {
+    const result = await this.execute(task, onProgress);
+    yield { type: 'progress', progress: { phase: 'synthesizing', usage: result.budgetUsed, state: 'synthesize' } };
+    yield { type: 'chunk', chunk: { content: result.result ?? '', done: false } };
+    yield { type: 'chunk', chunk: { content: '', done: true, finishReason: 'stop' } };
+    yield { type: 'result', result };
   }
 
   // ─── State Machine ───
@@ -1536,78 +1613,7 @@ If on track, drift should be an empty array. If drifting, list specific reasons.
     });
   }
 
-  // ─── Legacy step execution (preserved for executeStream compatibility) ───
-
-  private async executeStepsWithReplan(
-    task: Task,
-    plan: ExecutionPlan,
-    envelope: BudgetEnvelopeInstance,
-    traceId: string,
-    stepResults: StepResult[],
-    onProgress?: ProgressCallback,
-    replanDepth = 0,
-  ): Promise<void> {
-    const steps = [...plan.steps]; // Mutable copy — reactive steps may be injected
-
-    for (let i = 0; i < steps.length; i++) {
-      const step = steps[i];
-      this.budget.checkBudget(envelope);
-      onProgress?.({ phase: 'executing', stepIndex: i, totalSteps: steps.length, usage: this.budget.getUsage(envelope) });
-
-      const stepResult = await this.executeStep(step, envelope, traceId);
-      stepResults.push(stepResult);
-
-      if (stepResult.success) {
-        // REACTIVE LOOP: after successful browser steps, check for obstacles
-        try {
-          const remainingSteps = steps.slice(i + 1);
-          const reactiveSteps = await this.planner.planReactiveSteps(
-            task, stepResult, stepResults, remainingSteps, envelope, traceId,
-          );
-          if (reactiveSteps.length > 0) {
-            // Inject reactive steps right after the current step
-            steps.splice(i + 1, 0, ...reactiveSteps);
-          }
-        } catch {
-          // Reactive planning failed — continue with original plan
-        }
-      } else {
-        // Attempt re-planning if budget allows and depth not exceeded
-        if (replanDepth < this.maxReplanDepth && this.budget.canAffordEscalation(envelope)) {
-          this.tracer.logEvent(traceId, 'escalation', {
-            reason: `Step ${step.index} failed: ${stepResult.error}`,
-            step: step.index,
-            replanDepth,
-          });
-
-          try {
-            const recoveryPlan = await this.planner.replan(
-              task, step, stepResult.error ?? 'Unknown error', stepResults, envelope, traceId,
-            );
-            this.planner.validatePlan(recoveryPlan);
-            this.budget.checkBudget(envelope);
-
-            // Execute recovery plan (recursive, depth incremented)
-            await this.executeStepsWithReplan(
-              task, recoveryPlan, envelope, traceId, stepResults, onProgress, replanDepth + 1,
-            );
-            return; // Recovery plan handles remaining work
-          } catch (replanErr) {
-            // Re-planning itself failed — log and continue with remaining steps
-            this.tracer.logEvent(traceId, 'error', {
-              type: 'replan_failed',
-              replanDepth,
-              message: replanErr instanceof Error ? replanErr.message : String(replanErr),
-            });
-          }
-        } else {
-          this.tracer.logEvent(traceId, 'info', {
-            message: `Step ${step.index} failed, no re-plan: ${replanDepth >= this.maxReplanDepth ? 'max depth reached' : 'no escalation budget'}`,
-          });
-        }
-      }
-    }
-  }
+  // ─── Legacy streaming step execution (static-router mode only) ───
 
   private async *executeStepsWithReplanStream(
     task: Task,

@@ -1,4 +1,5 @@
 import type { BudgetUsage, BudgetEnvelope } from './budget.js';
+import type { TierUsage } from './execution.js';
 
 export type TraceEventType =
   | 'model_call'
@@ -46,7 +47,13 @@ export type TraceEventType =
   | 'chunked_pipeline'
   | 'template_executed'
   | 'cache_hit'
-  | 'path_correction';
+  | 'path_correction'
+  // Adaptive execution
+  | 'agent_action'
+  | 'escalation_decision'
+  | 'consultation'
+  | 'handoff'
+  | 'step_verified';
 
 export interface TraceEvent {
   id: string;
@@ -80,4 +87,6 @@ export interface ExecutionTrace {
     used: BudgetUsage;
   };
   spans: TraceSpan[];
+  /** Per-tier token and cost rollup, computed from model_call events */
+  tierUsage?: TierUsage;
 }

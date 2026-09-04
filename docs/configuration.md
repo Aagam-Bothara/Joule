@@ -56,7 +56,7 @@ providers:
   google:
     apiKey: "AIza..."            # or set JOULE_GOOGLE_API_KEY
     models:
-      slm: "gemini-2.0-flash"
+      slm: "gemini-2.5-flash"
       llm: "gemini-2.5-pro"
     enabled: true
 ```
@@ -139,6 +139,17 @@ routing:
   preferEfficientModels: false
   energyWeight: 0.3
   maxReplanDepth: 2
+  # Adaptive execution (SLM-first step agent + escalation policy)
+  defaultMode: adaptive        # adaptive (default) | slm-only | llm-only | static-router
+  escalation:
+    maxSteps: 25
+    consultThreshold: 0.55
+    handoffThreshold: 0.35
+    maxFailuresBeforeHandoff: 3
+    maxConsultations: 3
+    consultMaxTokens: 800
+    stallSteps: 3
+    llmJudge: false
 ```
 
 | Field                     | Type     | Default | Description                                    |
@@ -150,7 +161,17 @@ routing:
 | `providerPriority.llm`    | string[] | --      | Ordered list of providers for LLM tasks        |
 | `preferEfficientModels`   | boolean  | `false` | Factor energy efficiency into routing          |
 | `energyWeight`            | number   | `0.3`   | Weight given to energy cost during routing      |
-| `maxReplanDepth`          | number   | `2`     | Maximum re-planning attempts on failure        |
+| `maxReplanDepth`          | number   | `2`     | Maximum re-planning attempts on failure (static-router) |
+| `defaultMode`             | string   | `adaptive` | Execution mode when a task sets none: `adaptive`, `slm-only`, `llm-only`, `static-router` |
+| `escalation.maxSteps`     | number   | `25`    | Hard cap on agent steps per task (adaptive modes) |
+| `escalation.consultThreshold` | number | `0.55` | Composite confidence below which CONSULT is considered (after 2+ failures) |
+| `escalation.handoffThreshold` | number | `0.35` | Composite confidence below which HANDOFF is considered (after 2+ failures) |
+| `escalation.maxFailuresBeforeHandoff` | number | `3` | Failures that force a HANDOFF regardless of confidence |
+| `escalation.maxConsultations` | number | `3`  | Consultations allowed before the next escalation becomes a HANDOFF |
+| `escalation.consultMaxTokens` | number | `800` | Token cap on a consultation answer |
+| `escalation.stallSteps`   | number   | `3`     | Steps without verified progress before CONSULT |
+| `escalation.llmJudge`     | boolean  | `false` | Allow `llm_judge` step verification (non-deterministic) |
+| `escalation.verifyRetries` | number  | `1`     | Verification failures the agent may retry alone before CONSULT, unless it repeats the identical failure |
 
 ---
 

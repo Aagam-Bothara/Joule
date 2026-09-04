@@ -46,3 +46,7 @@ export type { TraceExporter } from './trace-exporters/exporter.js';
 export { LangfuseExporter, type LangfuseExporterConfig } from './trace-exporters/langfuse-exporter.js';
 export { OtlpExporter, type OtlpExporterConfig } from './trace-exporters/otlp-exporter.js';
 export { replayTask, computeDiff, type ReplayOptions, type ReplayResult, type ReplayDiff } from './replay.js';
+
+// Adaptive execution (SLM-first step agent + escalation policy)
+export * from './adaptive/index.js';
+export { computeTierUsage } from './trace-logger.js';

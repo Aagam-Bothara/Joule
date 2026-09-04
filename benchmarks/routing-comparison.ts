@@ -69,7 +69,7 @@ function simulateStrategy(
   let successCount = 0;
 
   const slmModel = 'llama3.2:3b';
-  const llmModel = 'claude-3-5-sonnet-20241022';
+  const llmModel = 'claude-sonnet-4-20250514';
 
   for (const task of tasks) {
     const tier = routeFn(task);

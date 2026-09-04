@@ -24,6 +24,8 @@ export interface RoutingContext {
   complexity?: number;
   previousConfidence?: number;
   energyBudgetRemaining?: number;
+  /** Adaptive execution: pin the tier regardless of complexity/escalation rules */
+  forceTier?: ModelTier;
 }
 
 interface ProviderCandidate {
@@ -110,9 +112,10 @@ export class ModelRouter {
   ): Promise<RoutingDecision> {
     this.budgetManager.deductEscalation(envelope);
 
-    return this.route('execute', envelope, {
+    const decision = await this.route('execute', envelope, {
       complexity: 1.0, // Force LLM tier
     });
+    return { ...decision, reason: `${decision.reason}, escalation=${reason}` };
   }
 
   /** Report a provider failure for failover tracking */
@@ -227,6 +230,11 @@ export class ModelRouter {
     envelope: BudgetEnvelopeInstance,
     context?: RoutingContext,
   ): ModelTier {
+    // Rule 0: explicit tier pin (adaptive executor drives tier changes itself)
+    if (context?.forceTier) {
+      return context.forceTier;
+    }
+
     // Rule 1: classify and verify always use SLM
     if (purpose === 'classify' || purpose === 'verify') {
       return ModelTier.SLM;

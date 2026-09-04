@@ -97,7 +97,7 @@ function generateConfigYaml(opts: InitOptions): string {
       lines.push('    # apiKey: set via JOULE_GOOGLE_API_KEY env var');
     }
     lines.push('    models:');
-    lines.push('      slm: "gemini-2.0-flash"');
+    lines.push('      slm: "gemini-2.5-flash"');
     lines.push('      llm: "gemini-2.5-pro"');
   }
 

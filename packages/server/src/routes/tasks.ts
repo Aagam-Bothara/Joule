@@ -85,6 +85,7 @@ export function tasksRoutes(joule: Joule, taskRepo?: TaskRepository) {
       budget: parsed.data.budget ?? 'medium',
       context: parsed.data.context,
       tools: parsed.data.tools,
+      mode: parsed.data.mode,
       createdAt: new Date().toISOString(),
     };
 
@@ -116,6 +117,7 @@ export function tasksRoutes(joule: Joule, taskRepo?: TaskRepository) {
         budget: parsed.data.budget ?? 'medium',
         context: parsed.data.context,
         tools: parsed.data.tools,
+      mode: parsed.data.mode,
         createdAt: new Date().toISOString(),
       };
 

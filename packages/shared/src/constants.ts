@@ -49,7 +49,21 @@ export const MODEL_PRICING: Record<string, { inputPerMillion: number; outputPerM
   'gpt-4o': { inputPerMillion: 2.50, outputPerMillion: 10.00 },
   // Google
   'gemini-2.0-flash': { inputPerMillion: 0.10, outputPerMillion: 0.40 },
+  'gemini-2.5-flash': { inputPerMillion: 0.30, outputPerMillion: 2.50 },
   'gemini-2.5-pro': { inputPerMillion: 1.25, outputPerMillion: 5.00 },
+  // OpenRouter ids (USD per million, approximate list prices)
+  'meta-llama/llama-3.1-8b-instruct': { inputPerMillion: 0.02, outputPerMillion: 0.05 },
+  'meta-llama/llama-3.3-70b-instruct': { inputPerMillion: 0.10, outputPerMillion: 0.30 },
+  'openai/gpt-4o-mini': { inputPerMillion: 0.15, outputPerMillion: 0.60 },
+  'openai/gpt-4o': { inputPerMillion: 2.50, outputPerMillion: 10.00 },
+  'anthropic/claude-sonnet-4': { inputPerMillion: 3.00, outputPerMillion: 15.00 },
+  'google/gemini-2.5-flash': { inputPerMillion: 0.30, outputPerMillion: 2.50 },
+  'google/gemini-2.5-flash-lite': { inputPerMillion: 0.10, outputPerMillion: 0.40 },
+  'anthropic/claude-haiku-4.5': { inputPerMillion: 1.00, outputPerMillion: 5.00 },
+  'qwen/qwen-2.5-7b-instruct': { inputPerMillion: 0.04, outputPerMillion: 0.10 },
+  'qwen/qwen3-8b': { inputPerMillion: 0.035, outputPerMillion: 0.14 },
+  'deepseek/deepseek-chat': { inputPerMillion: 0.25, outputPerMillion: 0.85 },
+  'meta-llama/llama-3.2-3b-instruct': { inputPerMillion: 0.015, outputPerMillion: 0.025 },
   // Ollama (local = free)
   'llama3.2:3b': { inputPerMillion: 0, outputPerMillion: 0 },
   'llama3.2:1b': { inputPerMillion: 0, outputPerMillion: 0 },
@@ -68,7 +82,15 @@ export const MODEL_ENERGY: Record<string, ModelEnergyProfile> = {
   'gpt-4o':                   { inputWhPerMillion: 1.5, outputWhPerMillion: 5.0, source: 'estimated' },
   // Google (cloud TPU inference)
   'gemini-2.0-flash':         { inputWhPerMillion: 0.2, outputWhPerMillion: 0.8, source: 'estimated' },
+  'gemini-2.5-flash':         { inputWhPerMillion: 0.25, outputWhPerMillion: 1.0, source: 'estimated' },
   'gemini-2.5-pro':           { inputWhPerMillion: 1.0, outputWhPerMillion: 3.5, source: 'estimated' },
+  // OpenRouter ids (cloud, estimated)
+  'meta-llama/llama-3.1-8b-instruct': { inputWhPerMillion: 0.15, outputWhPerMillion: 0.6, source: 'estimated' },
+  'meta-llama/llama-3.3-70b-instruct': { inputWhPerMillion: 0.8, outputWhPerMillion: 3.0, source: 'estimated' },
+  'openai/gpt-4o-mini': { inputWhPerMillion: 0.3, outputWhPerMillion: 1.2, source: 'estimated' },
+  'openai/gpt-4o': { inputWhPerMillion: 1.5, outputWhPerMillion: 5.0, source: 'estimated' },
+  'anthropic/claude-sonnet-4': { inputWhPerMillion: 1.2, outputWhPerMillion: 4.5, source: 'estimated' },
+  'google/gemini-2.5-flash': { inputWhPerMillion: 0.25, outputWhPerMillion: 1.0, source: 'estimated' },
   // Ollama local (user's hardware — energy tracked but carbon = 0 by default)
   'llama3.2:3b':              { inputWhPerMillion: 0.15, outputWhPerMillion: 0.6, source: 'zero' },
   'llama3.2:1b':              { inputWhPerMillion: 0.08, outputWhPerMillion: 0.3, source: 'zero' },

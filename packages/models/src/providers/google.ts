@@ -26,7 +26,7 @@ export class GoogleProvider extends ModelProvider {
   constructor(config: { apiKey: string; slmModel?: string; llmModel?: string }) {
     super();
     this.client = new GoogleGenerativeAI(config.apiKey);
-    this.slmModel = config.slmModel ?? 'gemini-2.0-flash';
+    this.slmModel = config.slmModel ?? 'gemini-2.5-flash';
     this.llmModel = config.llmModel ?? 'gemini-2.5-pro';
   }
 

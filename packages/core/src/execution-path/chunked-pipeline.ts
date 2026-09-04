@@ -12,6 +12,7 @@ import type { ModelRouter } from '../model-router.js';
 import type { BudgetEnvelopeInstance } from '../budget-manager.js';
 import type { BudgetManager } from '../budget-manager.js';
 import type { TraceLogger } from '../trace-logger.js';
+import type { ModelProviderRegistry } from '@joule/models';
 import type { TaskTemplate } from '@joule/shared';
 import { fillTemplate } from './template-library.js';
 
@@ -31,6 +32,7 @@ export class ChunkedPipeline {
     private readonly router: ModelRouter,
     private readonly budget: BudgetManager,
     private readonly tracer: TraceLogger,
+    private readonly providers?: ModelProviderRegistry,
   ) {}
 
   /**
@@ -71,8 +73,8 @@ export class ChunkedPipeline {
         ? template.chunkPrompt.replace('{chunk}', chunks[i])
         : `Summarize this section concisely:\n\n${chunks[i]}`;
 
-      const { ModelProviderRegistry } = await import('@joule/models');
-      const provider = ModelProviderRegistry.get(decision.provider);
+      const provider = this.providers?.get(decision.provider) as any;
+      if (!provider) throw new Error(`Provider not available: ${decision.provider}`);
 
       const response = await provider.complete({
         model: decision.model,
@@ -101,8 +103,8 @@ export class ChunkedPipeline {
         ? template.combinePrompt.replace('{summaries}', chunkResults.map((r, i) => `[Part ${i + 1}]: ${r}`).join('\n\n'))
         : `Combine these summaries into one coherent response:\n\n${chunkResults.map((r, i) => `[Part ${i + 1}]: ${r}`).join('\n\n')}`;
 
-      const { ModelProviderRegistry } = await import('@joule/models');
-      const provider = ModelProviderRegistry.get(decision.provider);
+      const provider = this.providers?.get(decision.provider) as any;
+      if (!provider) throw new Error(`Provider not available: ${decision.provider}`);
 
       const combineResponse = await provider.complete({
         model: decision.model,
@@ -153,8 +155,8 @@ export class ChunkedPipeline {
     const prompt = fillTemplate(template, description);
     const decision = await this.router.route('execute', envelope, { complexity: 0.2 });
 
-    const { ModelProviderRegistry } = await import('@joule/models');
-    const provider = ModelProviderRegistry.get(decision.provider);
+    const provider = this.providers?.get(decision.provider) as any;
+    if (!provider) throw new Error(`Provider not available: ${decision.provider}`);
 
     const response = await provider.complete({
       model: decision.model,

@@ -196,7 +196,7 @@ export class ConfigManager {
         google: {
           apiKey: process.env.JOULE_GOOGLE_API_KEY,
           enabled: true,
-          models: { slm: 'gemini-2.0-flash', llm: 'gemini-2.5-pro' },
+          models: { slm: 'gemini-2.5-flash', llm: 'gemini-2.5-pro' },
         },
       };
     }

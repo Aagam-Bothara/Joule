@@ -78,7 +78,7 @@ export class SubTaskOrchestrator {
     traceId: string,
   ): Promise<DecompositionPlan> {
     try {
-      const decision = await this.router.route('plan', envelope, 0.85);
+      const decision = await this.router.route('plan', envelope, { complexity: 0.85 });
       const provider = this.providers.get(decision.provider);
       if (!provider) return this.fallbackPlan(task);
 
@@ -180,7 +180,7 @@ export class SubTaskOrchestrator {
       const childTask: Task = {
         id: subTask.id,
         description: enrichedDesc,
-        budget: subTask.budgetShare,
+        budget: subEnvelope.envelope,
         tools: subTask.tools,
         createdAt: isoNow(),
       };

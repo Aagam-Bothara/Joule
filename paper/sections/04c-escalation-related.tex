@@ -1,0 +1,10 @@
+% Related-work paragraph (input in \S related)
+% ─────────────────────────────────────────────────────────────────────
+\paragraph{Cascades and routing.}
+FrugalGPT~\cite{chen2023frugalgpt} cascades whole queries through models of increasing cost with a learned scorer;
+RouteLLM~\cite{ong2024routellm} and Hybrid LLM~\cite{ding2024hybrid} learn a per-query router;
+AutoMix~\cite{madaan2023automix} routes on self-verification;
+EcoAssistant~\cite{zhang2023ecoassistant} escalates an assistant hierarchy on failure.
+All decide at the granularity of a request.
+Belcak et al.~\cite{belcak2025slm} argue that small models should be the default executors of agentic workloads.
+Joule supplies the missing mechanism: decisions inside the trajectory, from execution evidence rather than self-report, with a consult action that is cheaper than a handoff and a budget envelope that gates both.

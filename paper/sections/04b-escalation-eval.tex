@@ -1,0 +1,77 @@
+% ─────────────────────────────────────────────────────────────────────
+% Evaluation subsection (input before \S discussion). Numbers from the
+% 2026-09-04 scaled run; see benchmarks/README.md for the raw tables.
+% ─────────────────────────────────────────────────────────────────────
+\subsection{Escalation Benchmark}
+\label{sec:eval-escalation}
+
+\paragraph{Setup.}
+We compare routing strategies on the same engine, tools, and prompts; only the escalation strategy differs.
+Workloads: sanitized MBPP~\cite{austin2021mbpp}, 200 problems beyond the first 30 used during development, and all 164 HumanEval problems~\cite{chen2021humaneval}.
+Each problem provides a sandbox with its tests; the agent writes a solution file and may run the tests; success is decided by the harness re-running the tests in a fresh process, never by the agent's own claim.
+Small model: Llama~3.1~8B; large model: Gemini~2.5~Flash.
+As robustness checks we repeat the comparison with GPT-4o-mini as the large model and run a 20-problem spot check with GPT-4o.
+The small-model-only counterfactual is run three times per problem to estimate $p_{\text{SLM}}$, the probability that the small model solves the problem unaided; Joule and the FrugalGPT-style cascade are run three times and reported as mean $\pm$ standard deviation.
+
+\paragraph{Baselines.}
+\textbf{SLM-only} and \textbf{LLM-only} bound the space.
+\textbf{Naive cascade} reruns the whole task on the large model when the small-model run does not complete (EcoAssistant-style~\cite{zhang2023ecoassistant}).
+\textbf{FrugalGPT-style cascade}~\cite{chen2023frugalgpt} scores the small-model answer with a cheap scorer and reruns on the large model below a threshold.
+\textbf{AutoMix-style}~\cite{madaan2023automix} has the small model verify its own answer three times and escalates on a majority ``no''.
+\textbf{Pre-router} picks a tier per task with one cheap classification call (RouteLLM-style~\cite{ong2024routellm}).
+\textbf{Static router} is Joule's previous plan-then-execute pipeline (\S\ref{sec:routing}).
+Scorer, verifier, and router calls are charged to the strategy that makes them.
+
+\paragraph{Metrics.}
+Success rate; cost per task relative to LLM-only; and routing quality against the counterfactual labels:
+a task \emph{needs} escalation if $p_{\text{SLM}} < 0.5$ and the large model succeeds (81 of 200 problems);
+a strategy \emph{escalates} on a task if it spends any large-model tokens on it.
+Precision and recall follow; \emph{wasted} counts escalations on tasks with $p_{\text{SLM}} \geq 0.8$.
+For Joule we also report consultation success (consultations after which the small model finished without a handoff) and handoff success.
+
+\paragraph{Results.}
+Table~\ref{tab:escalation-mbpp} reports the main pair.
+The small model alone solves 55\% (mean of three runs); the large model alone 97\%.
+Joule reaches 96\% ($\pm$1.0 over three seeds) at 39\% of large-model cost, matching the best cascade within noise while the cascades spend 53--66\%, with the highest recall of the escalating strategies (85\% $\pm$ 5) at comparable precision (68\% $\pm$ 1.2).
+Of the problems where Joule involved the large model, 89\% of handoffs succeeded and 40\% of consultations let the small model finish without a handoff.
+The previous plan-then-execute pipeline and the RouteLLM-style pre-router both stay near the small model's own success rate: a router that predicts difficulty before seeing any execution evidence adds almost nothing.
+With GPT-4o-mini as the large model (84\% alone on this slice), Joule is the cheapest strategy at 46\% of large-model cost and 83\% success, one point below the large model alone and three below the FrugalGPT-style cascade, which spends 48\% more; the weaker large model lowers handoff success to 36\%, so the quality of the upper rung matters.
+On the 20-problem spot check with GPT-4o, Joule matched its 95\% success at 27\% of its cost.
+
+\begin{table}[t]
+\centering
+\small
+\caption{MBPP, 200 unseen problems, Llama~3.1~8B $\rightarrow$ Gemini~2.5~Flash. Cost is relative to LLM-only. Precision and recall are measured against $p_{\text{SLM}}$ labels from three SLM-only runs per problem; Joule and FrugalGPT-style are means over three seeds.}
+\label{tab:escalation-mbpp}
+\begin{tabular}{lrrrrrr}
+\toprule
+Strategy & Success & Cost/LLM & LLM used & Precision & Recall & Wasted \\
+\midrule
+SLM-only & 55\% & 0.07 & 0\% & -- & -- & -- \\
+LLM-only & 97\% & 1.00 & 100\% & -- & -- & -- \\
+Static router & 57\% & 0.14 & 0\% & -- & 0\% & 0 \\
+Naive cascade & 95\% & 0.53 & 42\% & 76\% & 78\% & 6 \\
+FrugalGPT-style & 96\% & 0.60 & 50\% & 66\% & 81\% & 12 \\
+AutoMix-style & 97\% & 0.66 & 55\% & 65\% & 88\% & 17 \\
+Pre-router & 55\% & 0.07 & 0\% & -- & 0\% & 0 \\
+\textbf{Joule (adaptive)} & \textbf{96\%} & \textbf{0.39} & 51\% & 68\% & 85\% & 14 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{HumanEval.}
+On all 164 HumanEval problems~\cite{chen2021humaneval} with the same pair, the small model alone solves 34\% and the large model 96\%.
+Joule matches the large model at 96\% for 64\% of its cost (recall 84\%, precision 72\%); the FrugalGPT-style cascade reaches 93\% at 72\%.
+With a small model this weak, handoffs carry the result (94\% succeed) and consultations rarely suffice (22\%): consultation pays when the small model is close to a solution, handoff when it is not.
+
+\paragraph{Small-model compatibility.}
+Nine small models from 3B to 70B drove the same step agent on 20 further problems with Gemini~2.5~Flash as the large model.
+All reach 90--100\% success under adaptive escalation; the 7B--8B open models (Qwen~2.5~7B, Llama~3.1~8B) finish 100\% at about \$0.003 per problem, a third of the large model's cost, with essentially no unparseable turns.
+
+\paragraph{Trigger ablation.}
+On a 30-problem development slice, allowing the small model one verification retry before a consult, and treating an improving test pass fraction as progress, reduced cost per task by 35\% at unchanged success and raised precision from 44\% to 75\% against the same labels, at the cost of recall (100\% to 82\%).
+
+\paragraph{Limitations.}
+Two coding workloads, one small model in the main comparison, and rule-based triggers whose thresholds were set by hand.
+Latency is not a win: adaptive runs take 1.7$\times$ longer than the large model alone, because the small model takes more turns and each is slower.
+The counterfactual labels are themselves estimates from three runs of a stochastic model.

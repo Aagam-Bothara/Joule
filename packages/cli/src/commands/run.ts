@@ -4,11 +4,13 @@ import {
   BUDGET_PRESETS,
   type BudgetPresetName,
   type BudgetEnvelope,
+  type ExecutionMode,
+  EXECUTION_MODES,
   formatErrorForCli,
 } from '@joule/shared';
 import { Joule } from '@joule/core';
 import type { ProgressCallback } from '@joule/core';
-import { formatResult, formatTrace, formatEfficiencyReport, formatProgressLine, formatBudgetSummary } from '../output/formatter.js';
+import { formatResult, formatTrace, formatTrajectory, formatEfficiencyReport, formatProgressLine, formatBudgetSummary } from '../output/formatter.js';
 import { setupJoule } from '../setup.js';
 
 export const runCommand = new Command('run')
@@ -18,6 +20,8 @@ export const runCommand = new Command('run')
   .option('--max-tokens <n>', 'Override max tokens', parseInt)
   .option('--max-tool-calls <n>', 'Override max tool calls', parseInt)
   .option('--no-escalate', 'Disable LLM escalation (SLM only)')
+  .option('-m, --mode <mode>', 'Execution mode: adaptive | slm-only | llm-only | static-router (default: routing.defaultMode)')
+  .option('--trajectory', 'Print the escalation trajectory (adaptive modes)')
   .option('--trace', 'Print full execution trace')
   .option('--json', 'Output as JSON')
   .option('--stream', 'Stream synthesis output in real-time')
@@ -42,15 +46,20 @@ export const runCommand = new Command('run')
       };
     }
 
+    if (options.mode && !EXECUTION_MODES.includes(options.mode)) {
+      throw new Error(`Unknown mode "${options.mode}". Expected one of: ${EXECUTION_MODES.join(', ')}`);
+    }
+
     const task = {
       id: generateId('task'),
       description,
       budget,
+      mode: options.mode as ExecutionMode | undefined,
       createdAt: new Date().toISOString(),
     };
 
     console.log(`Executing task: "${description}"`);
-    console.log(`Budget: ${typeof budget === 'string' ? budget : 'custom'}`);
+    console.log(`Budget: ${typeof budget === 'string' ? budget : 'custom'}${options.mode ? `  Mode: ${options.mode}` : ''}`);
     console.log('');
 
     if (options.stream) {
@@ -78,6 +87,10 @@ export const runCommand = new Command('run')
       if (finalResult) {
         console.log('');
         console.log(formatBudgetSummary(finalResult.budgetUsed));
+        if (finalResult.trajectory && (options.trajectory || options.trace)) {
+          console.log('');
+          console.log(formatTrajectory(finalResult.trajectory));
+        }
         if (finalResult.efficiencyReport && options.energy !== false) {
           console.log(formatEfficiencyReport(finalResult.efficiencyReport));
         }
@@ -100,6 +113,11 @@ export const runCommand = new Command('run')
         console.log(JSON.stringify(result, null, 2));
       } else {
         console.log(formatResult(result));
+
+        if (result.trajectory && (options.trajectory || options.trace)) {
+          console.log('');
+          console.log(formatTrajectory(result.trajectory));
+        }
 
         if (result.efficiencyReport && options.energy !== false) {
           console.log(formatEfficiencyReport(result.efficiencyReport));

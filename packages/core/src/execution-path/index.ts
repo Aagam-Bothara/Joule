@@ -40,6 +40,7 @@ import type { ModelRouter } from '../model-router.js';
 import type { BudgetEnvelopeInstance } from '../budget-manager.js';
 import type { BudgetManager } from '../budget-manager.js';
 import type { TraceLogger } from '../trace-logger.js';
+import type { ModelProviderRegistry } from '@joule/models';
 import type { ToolRegistry } from '../tool-registry.js';
 import { ExecutionPathClassifier } from './classifier.js';
 import { SemanticCache } from './semantic-cache.js';
@@ -74,6 +75,7 @@ export class ExecutionPathSelector {
     budget: BudgetManager,
     tracer: TraceLogger,
     config?: Partial<ExecutionPathConfig> & { _classifierOnly?: boolean },
+    providers?: ModelProviderRegistry,
   ) {
     this.classifierOnly = (config as any)?._classifierOnly ?? false;
     this.config = {
@@ -91,9 +93,9 @@ export class ExecutionPathSelector {
       },
     };
 
-    this.classifier = new ExecutionPathClassifier(router, budget, tracer);
+    this.classifier = new ExecutionPathClassifier(router, budget, tracer, providers);
     this.cache = new SemanticCache(this.config.cache);
-    this.pipeline = new ChunkedPipeline(router, budget, tracer);
+    this.pipeline = new ChunkedPipeline(router, budget, tracer, providers);
     this.learner = new AdaptiveLearner(this.config.learner);
   }
 

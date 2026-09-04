@@ -320,6 +320,7 @@ Every LLM call passes through a model router applying a five-rule priority casca
 
 \noindent Default: SLM. Routing to SLM vs.\ LLM yields a 4--5$\times$ energy proxy reduction per token.
 The adaptive controller's escalation recommendation (\S\ref{sec:adaptive}) feeds into the routing context for Rule~4 as an additional complexity signal.
+\input{sections/04a-escalation-design}
 
 \subsection{7-Dimensional Budget Enforcement}
 \label{sec:budget}
@@ -481,6 +482,8 @@ The residual 0.36-point research gap vs.\ no-pruning reflects that research task
 The path to closing this remaining gap is \emph{improved planner dependency declaration}: if the planner explicitly declares all semantic dependencies in the \texttt{needs} array, taint tracking and lexical scoring become precise, and high-confidence pruning of genuinely irrelevant steps becomes achievable.
 Chain-of-thought dependency reasoning in the planner or fine-tuning on dependency annotation are the most direct paths to this improvement.
 
+\input{sections/04b-escalation-eval}
+
 \subsection{Discussion}
 \label{sec:discussion}
 
@@ -523,6 +526,8 @@ No additional LLM calls are required; the pruning cost is a CPU-side BFS over a 
 Budget-aware scheduling exists in cloud computing~\cite{xiao2013dynamic} and hyperparameter search~\cite{liaw2018tune}.
 Token budget management in long-context inference~\cite{shi2024context} targets single-call efficiency.
 Joule's 7-dimensional budget model spanning multi-step task execution is, to our knowledge, the first such system for agent runtimes.
+
+\input{sections/04c-escalation-related}
 
 % ─────────────────────────────────────────────────────────────────────
 \section{Conclusion}

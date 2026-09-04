@@ -2,16 +2,18 @@
 
 # Joule
 
-### AI agents with a budget, a constitution, and an off switch.
+### Run your agent on a small model. Escalate only the step that needs a big one.
 
-Production-grade agent runtime with built-in budget enforcement,
-governance policies, and safety guardrails.
+Joule is an agent runtime that makes a small language model the executor, verifies every step
+deterministically, and asks a large model for help only when the evidence says the small model
+is stuck: one focused question first, a full handoff only if that fails. Every escalation is
+gated by a hard budget.
 
-[Quickstart](#quickstart) · [Why Joule](#why-joule) · [Performance](#performance) · [Examples](#examples) · [Docs](#documentation)
+[Quickstart](#quickstart) · [How it works](#how-it-works) · [Results](#results) · [Examples](#examples) · [Docs](#documentation)
 
 ![CI](https://github.com/Aagam-Bothara/Joule/actions/workflows/test.yml/badge.svg)
 ![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)
-![Tests](https://img.shields.io/badge/tests-1140%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-1180%20passing-brightgreen)
 ![TypeScript](https://img.shields.io/badge/TypeScript-100%25-blue)
 ![Node.js](https://img.shields.io/badge/node-%3E%3D22-brightgreen)
 
@@ -22,86 +24,134 @@ governance policies, and safety guardrails.
 ```typescript
 import { Joule } from '@joule/core';
 
-// One line. Auto-detects your API keys. Returns a string.
-const answer = await Joule.simple("Summarize the top 3 HN stories today");
-```
-
-```typescript
-// Production mode: budget cap, governance, full observability.
-const joule = new Joule({
-  providers: { anthropic: { enabled: true } },
-  budget: { maxTokens: 50_000, maxCostUsd: 0.50 },
-  governance: { constitution: 'default', requireApproval: ['shell_exec'] },
-});
-
+// Small model does the work; a large model is consulted only when needed.
+const joule = new Joule({ providers: { google: { enabled: true }, anthropic: { enabled: true } } });
 const result = await joule.execute({
-  description: "Analyze our Q4 metrics and draft a summary",
-  budget: 'medium',
+  description: "Find the failing test in this repo and fix it",
+  budget: 'medium',        // hard caps on tokens, cost, tool calls, time, escalations
 });
 
 console.log(result.result);
-console.log(`Cost: $${result.budgetUsed.costUsd} | Tokens: ${result.budgetUsed.tokensUsed}`);
+console.log(result.trajectory);   // every step, every escalation decision, SLM vs LLM tokens
 ```
 
-> **Other frameworks let you build agents. Joule lets you ship them.**
+```
+$ joule run "Write comb_sort and make the tests pass" --trajectory
+
+SLM start
+│
+├─ 1 Create a basic comb_sort function       CONTINUE  conf 0.90 verify=pass
+├─ 2 Implement comb_sort with gap shrink     CONTINUE  conf 0.42 verify=fail
+├─ 3 Try to debug comb_sort                  CONSULT   conf 0.39 verify=fail
+│     → CONSULT gemini-2.5-flash  2,405 tok  $0.0011
+│       q: While working on "Write a Python function named `comb_sort`…
+├─ 4 Implement comb_sort with the advice     CONTINUE  conf 0.85 verify=pass
+├─ 5 Run the tests                           CONTINUE  conf 0.87 verify=pass
+└─ Complete
+
+SLM tokens:          32,900      (Llama 3.1 8B)
+LLM tokens:           2,405      (Gemini 2.5 Flash, one consultation)
+Total cost:          $0.0018
+Estimated LLM-only:  $0.0163
+```
+
+That trajectory is a real run from the benchmark below: the 8B model wrote the function, the
+tests failed twice, one question to the large model unblocked it, and the small model finished.
 
 ---
 
-## Why Joule?
+## How it works
 
-| Problem | How Joule solves it |
-|---------|-------------------|
-| Agents burn through tokens with no limit | **7-dimensional budget enforcement** — token, cost, time, tool-call, energy, carbon, and depth caps per task |
-| No guardrails on what agents can do | **Constitutional AI + governance** — tiered safety rules that block or flag dangerous actions before execution |
-| Can't see what happened after the fact | **Built-in tracing** — Gantt-chart timeline, per-step token/cost breakdown, exportable to Langfuse/OTLP |
-| Vendor lock-in to one model provider | **Automatic routing** — local (Ollama) ↔ cloud (Anthropic/OpenAI/Google) with circuit breaker failover |
-| Multi-agent coordination is fragile | **Crew orchestration** — sequential, parallel, hierarchical, and debate strategies with structured output validation |
-| Agents run unsupervised with no accountability | **Trust scoring** — agents earn autonomy through clean behavior; violations restrict access automatically |
+```
+Task
+ ↓
+Step agent on the small model  →  execute tool  →  observe  →  verify (tests, exit codes, patterns)
+ ↓
+Confidence from evidence only (tool result, verifier, progress, repeated failures, budget)
+ ↓
+Escalation policy
+ ├── CONTINUE → the small model keeps working
+ ├── CONSULT  → one focused question to the large model; the answer comes back to the small model
+ ├── HANDOFF  → the large model takes over from the current state (never restarts the task)
+ └── ABORT    → budget exhausted, safety rule, or impossible tool requirement
+```
 
-### How Joule compares
-
-|                        | Joule | LangChain | CrewAI | AutoGen |
-|------------------------|:-----:|:---------:|:------:|:-------:|
-| Budget enforcement     |  ✅   |    ❌     |   ❌   |   ❌    |
-| Constitutional safety  |  ✅   |    ❌     |   ❌   |   ❌    |
-| Trust scoring / governance |  ✅   |    ❌     |   ❌   |   ❌    |
-| Local-first model routing |  ✅   |    🔶     |   ❌   |   ❌    |
-| Built-in dashboard     |  ✅   |    ❌     |   ❌   |   ❌    |
-| Trace export (OTLP/Langfuse) |  ✅   |    🔶     |   ❌   |   ❌    |
-| Multi-agent crews      |  ✅   |    ✅     |   ✅   |   ✅    |
-| Structured outputs     |  ✅   |    ✅     |   ✅   |   ✅    |
-| Execution replay + diff |  ✅   |    ❌     |   ❌   |   ❌    |
-| Energy/carbon tracking |  ✅   |    ❌     |   ❌   |   ❌    |
-| Zero-config quickstart |  ✅   |    ❌     |   🔶   |   ❌    |
-| Desktop/Office automation |  ✅   |    ❌     |   ❌   |   ❌    |
-| 11 messaging channels  |  ✅   |    ❌     |   ❌   |   ❌    |
-
-### Performance
-
-Joule uses **adaptive prompt optimization** to minimize cost without sacrificing capability:
-
-| Optimization | What it does | Savings |
-|-------------|-------------|---------|
-| **Unified planning** | Merges spec + classify + plan + critique into 1 LLM call | ~60% fewer tokens vs 4-call pipeline |
-| **Slim prompt routing** | Detects simple tasks (no action intent, short description) and strips tool descriptions from the planning prompt | ~15x fewer prompt tokens for Q&A tasks |
-| **Direct answer shortcut** | When the planner returns a `directAnswer` for low-complexity tasks, skips the synthesis call entirely | Eliminates 1 LLM round-trip |
-| **SLM-first routing** | Defaults to small models (gpt-4o-mini, Haiku, Gemini Flash) and only escalates to large models when complexity warrants it | 10-50x cheaper per call |
-
-**Benchmark results** (30 tasks, 5 categories, gpt-4o-mini):
-
-| Metric | Joule | CrewAI |
-|--------|-------|--------|
-| Success rate | 100% | 100% |
-| Avg latency | 10,853ms | 15,762ms |
-| Budget enforcement | Yes (7D) | No |
-| Runtime governance | Yes | No |
-| Tool execution | Yes (86 calls) | No |
-| Escalation support | Yes (7 events) | No |
-
-Joule is **1.5x faster** on average across all categories, with the largest speedup on generation tasks (1.8x). The latency advantage comes from adaptive routing — simple tasks hit SLM immediately instead of waiting for a large model.
+- **Trajectory-level, not task-level.** Cascades and routers (FrugalGPT, RouteLLM, AutoMix) decide once per request. Joule decides after every step, from what actually happened.
+- **No self-reported confidence.** The policy never asks the model how sure it is. It reads tool results, deterministic verification, repeated failure signatures, and budget headroom.
+- **Consult before handoff.** Most small-model failures are one wrong decision. A consultation costs one question; a handoff bills the rest of the task at large-model prices.
+- **Budget is part of the decision.** Seven-dimensional envelopes (tokens, cost, time, tool calls, escalations, energy, carbon) gate every escalation and stop every run.
+- **Four modes, one engine.** `adaptive` (default), `slm-only`, `llm-only`, and `static-router` share the same tools and prompts, so comparisons are fair.
 
 ---
 
+## Results
+
+**MBPP, 200 unseen problems, Llama 3.1 8B as the small model, Gemini 2.5 Flash as the large one.**
+The small-model-only baseline ran three times per problem to label which problems actually need
+escalation; Joule and the FrugalGPT-style cascade ran three independent times. Every strategy
+uses the same engine, tools and prompts.
+
+| strategy | success | cost vs LLM-only | LLM used on | precision | recall |
+|---|---:|---:|---:|---:|---:|
+| small model only (Llama 8B) | 55% | 0.07 | 0% | | |
+| large model only (Flash) | 97% | 1.00 | 100% | | |
+| static router (old Joule pipeline) | 57% | 0.14 | 0% | | 0% |
+| naive cascade (EcoAssistant-style) | 95% | 0.53 | 42% | 76% | 78% |
+| FrugalGPT-style cascade | 96% ± 0.5 | 0.60 | 50% | 66% | 81% |
+| AutoMix-style self-verification | 97% | 0.66 | 55% | 65% | 88% |
+| pre-router (RouteLLM-style) | 55% | 0.07 | 0% | | 0% |
+| **Joule adaptive** | **96% ± 1.0** | **0.39** | 51% | 68% | 85% |
+
+Joule matches the best success rate within noise at 0.39 of large-model cost, against 0.53 to
+0.66 for the cascades. Of the problems where Joule involved the large model, 89% of handoffs
+succeeded and 40% of consultations let the small model finish on its own. With GPT-4o as the
+large model on a 20-problem spot check, Joule matched its 95% at 27% of its cost. Precision and recall are
+measured against counterfactual labels, so "precision 68%" means roughly one escalation in three
+went to a problem the small model would probably have solved anyway.
+
+With a weaker large model (GPT-4o-mini, 84% alone), Joule is the cheapest strategy at 46% of
+LLM-only cost and 83% success, one point below LLM-only and three below the FrugalGPT-style
+cascade, which spends 48% more. Nine small models from 3B to 70B all reach 90 to 100% under
+adaptive escalation; the 7B to 8B open models finish 100% of a 20-problem slice at about
+$0.003 per problem.
+
+
+**HumanEval, all 164 problems, same pair.** A harder workload for an 8B model: alone it solves
+34%, the large model 96%.
+
+| strategy | success | cost vs LLM-only | LLM used on | precision | recall |
+|---|---:|---:|---:|---:|---:|
+| small model only | 34% | 0.06 | 0% | | |
+| large model only | 96% | 1.00 | 100% | | |
+| FrugalGPT-style cascade | 93% | 0.72 | 63% | 79% | 74% |
+| **Joule adaptive** | **96%** | **0.64** | 79% | 72% | 84% |
+
+Joule matches the large model exactly at 64% of its cost; the cascade gives up three points to
+save less. When the small model is this weak, handoffs carry the result (94% of them succeed)
+and consultations rarely suffice (22%), which is the expected shape: consult pays off when the
+small model is close, handoff when it is not.
+
+Reproduce with `benchmarks/harness` (see [benchmarks/README.md](benchmarks/README.md)): same
+engine, same tools, same prompts; only the routing strategy changes. Success on coding tasks is
+decided by re-running the tests, never by the agent's own claim.
+
+---
+
+## Everything else Joule ships
+
+Joule started as a governed runtime and keeps those pieces. They are documented in [docs/](docs/)
+and stay out of the way unless you enable them.
+
+| Capability | What it gives you |
+|---|---|
+| **Budget envelopes** | Hard caps on tokens, cost, time, tool calls, escalations, energy and carbon per task; `BudgetExhaustedError` instead of a surprise bill |
+| **Constitution and governance** | Runtime rules that block tool calls before they run; trust tiers, approvals, an audit chain |
+| **Tracing** | Per-step traces with model, tier, cost and escalation decisions; Gantt dashboard; Langfuse and OTLP export; `joule trace <id>` |
+| **Crews** | Sequential, parallel, hierarchical and debate orchestration with per-agent budgets |
+| **Providers** | Ollama, Anthropic, OpenAI, Google, and any OpenAI-compatible endpoint (OpenRouter, vLLM) |
+| **Integrations** | Slack, Discord, Telegram, WhatsApp, Signal, Teams, email, Matrix, IRC, SMS, webhooks; voice; desktop automation; MCP tools |
+
+---
 ## Quickstart
 
 ### Option 1: Zero-config (programmatic)
@@ -319,14 +369,14 @@ See [`examples/`](examples/) for more runnable scripts.
 | Command | Description |
 |---------|-------------|
 | `joule init` | Interactive setup — generates `joule.config.yaml` |
-| `joule run <task>` | One-shot task with budget |
+| `joule run <task>` | One-shot task with budget; `--mode adaptive --trajectory` shows the escalation tree |
 | `joule chat` | Interactive chat with session history |
 | `joule do <task>` | Computer agent — controls your desktop |
 | `joule crew run <name> <task>` | Multi-agent orchestration |
 | `joule serve` | HTTP API server with SSE streaming |
 | `joule replay <task-id>` | Re-run a task with different params, diff the output |
 | `joule doctor` | System diagnostics and health check |
-| `joule trace <id>` | Inspect execution trace |
+| `joule trace <id>` | Inspect a persisted trace as an escalation trajectory (or `--format json`) |
 | `joule voice` | Voice mode (wake word + STT/TTS) |
 | `joule schedule add/list` | Cron scheduling |
 | `joule channels status` | Messaging channel status |

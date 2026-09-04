@@ -84,7 +84,7 @@ async function detectProviders(): Promise<DetectedProvider[]> {
     name: 'google',
     tier: 'cloud',
     available: !!googleKey,
-    models: { slm: 'gemini-2.0-flash', llm: 'gemini-2.5-pro' },
+    models: { slm: 'gemini-2.5-flash', llm: 'gemini-2.5-pro' },
   });
 
   return providers;

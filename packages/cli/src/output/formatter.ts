@@ -1,5 +1,5 @@
-import type { TaskResult, BudgetUsage, ExecutionTrace, EfficiencyReport } from '@joule/shared';
-import type { ProgressEvent } from '@joule/core';
+import type { TaskResult, BudgetUsage, ExecutionTrace, EfficiencyReport, TrajectoryReport } from '@joule/shared';
+import { renderTrajectory, type ProgressEvent } from '@joule/core';
 
 export function formatResult(result: TaskResult): string {
   const lines: string[] = [];
@@ -47,6 +47,11 @@ export function formatBudgetSummary(usage: BudgetUsage): string {
   }
 
   return lines.join('\n');
+}
+
+/** Escalation trajectory tree for adaptive modes. */
+export function formatTrajectory(report: TrajectoryReport): string {
+  return ['--- Escalation Trajectory ---', renderTrajectory(report)].join('\n');
 }
 
 export function formatTrace(trace: ExecutionTrace): string {

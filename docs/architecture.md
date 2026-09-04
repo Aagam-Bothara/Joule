@@ -325,3 +325,52 @@ Joule's architecture prioritizes cost efficiency (SLM-first routing), resilience
 and extensibility (channel adapters and tool plugins). Each package has a clear
 responsibility boundary, and dependencies flow in a single direction from leaf
 packages (`shared`) up to the entry point (`cli`).
+
+---
+
+## Adaptive Execution (SLM-first step agent + escalation policy)
+
+`routing.defaultMode` (default `adaptive`) or `task.mode` selects the execution model. Adaptive replaces the plan-then-execute
+pipeline above with a stepwise loop. The small model is the default executor;
+a large model is brought in only for the part of the task that needs it.
+
+```
+Task
+ ↓
+StepAgent at the current tier (SLM by default)
+ ↓
+Execute tool → Observe → Verify (deterministic) → update ExecutionState
+ ↓
+ConfidenceEngine (evidence only, no self-report)
+ ↓
+EscalationPolicy
+ ├── CONTINUE → same tier keeps working
+ ├── CONSULT  → one focused question to the LLM → advice returns to the SLM
+ ├── HANDOFF  → LLM takes over from the current state (no restart)
+ └── ABORT    → budget / safety / impossible tool requirement
+```
+
+### Components (`packages/core/src/adaptive/`)
+
+| Component | Role |
+| --- | --- |
+| `ExecutionState` (`@joule/shared`) | Single source of truth for a run: goal, versioned plans, completed steps, observations, failures, hypotheses, advice, decisions, budget. Consultations and handoffs are derived from it. |
+| `StepAgent` | One model-driven loop, tier as a parameter. Emits exactly one structured action per turn: `tool_call`, `final_answer`, `ask_consult`, or `give_up`. |
+| `StepVerifier` | Deterministic checks: `output_check`, `dom_check`, `command_exit`, `test_result`. Command outputs with a non-zero exit code fail verification even when the tool call succeeded. `llm_judge` is opt-in and always labelled. |
+| `ConfidenceEngine` | `composite = w·toolSuccess + w·verification + w·progress + w·budgetHeadroom + w·(1−repeatedFailure) − w·repeatedFailure − w·contradiction`. No model self-report enters it. |
+| `RuleBasedEscalationPolicy` | Ordered rules: abort hard stops → handoff hard triggers (3 failures, give-up, repeated malformed output, consults exhausted) → consult triggers (same failure twice, verification contradiction, stall, agent asked) → soft thresholds. Every escalation is gated by `BudgetManager.canAfford`; a handoff also consumes an escalation unit. |
+| `Consultant` | Builds a `ConsultationRequest` (goal, question, evidence, hypotheses, attempts, constraints, token cap) and asks the LLM once. The answer is injected into the SLM's next turn and the following steps carry the `consultId`. |
+| Handoff | `HandoffContext` is rendered from the state and becomes the LLM's only prompt; the same `StepAgent` continues at the LLM tier. |
+| Trajectory | Every step logs an `escalation_decision` event; the trace carries a per-tier token/cost rollup (`tierUsage`), and `TaskResult.trajectory` is the per-task report used by the benchmarks. |
+
+### Execution modes
+
+| Mode | Behaviour |
+| --- | --- |
+| `adaptive` | SLM-first with the full policy. Joule's core. |
+| `slm-only` | Step agent pinned to the SLM. Never consults or hands off. |
+| `llm-only` | Step agent pinned to the LLM. Quality and cost ceiling. |
+| `static-router` | The legacy pipeline documented above. Available for comparison; no longer the default. |
+
+Same engine, same tools, same prompts; only the routing strategy changes, which
+is what makes `benchmarks/harness` a fair experiment.

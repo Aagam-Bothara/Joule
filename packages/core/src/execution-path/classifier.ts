@@ -21,6 +21,7 @@ import type { ModelRouter } from '../model-router.js';
 import type { BudgetEnvelopeInstance } from '../budget-manager.js';
 import type { BudgetManager } from '../budget-manager.js';
 import type { TraceLogger } from '../trace-logger.js';
+import type { ModelProviderRegistry } from '@joule/models';
 import { TEMPLATE_KEYS } from './template-library.js';
 
 // Keywords that strongly indicate tool-using tasks (P4+)
@@ -67,6 +68,7 @@ export class ExecutionPathClassifier {
     private readonly router: ModelRouter,
     private readonly budget: BudgetManager,
     private readonly tracer: TraceLogger,
+    private readonly providers?: ModelProviderRegistry,
   ) {}
 
   /**
@@ -102,9 +104,8 @@ export class ExecutionPathClassifier {
       const userMessage = `Task: "${description}"
 Available tools: ${toolNames.join(', ')}`;
 
-      // Import ModelProviderRegistry inline to avoid circular deps
-      const { ModelProviderRegistry } = await import('@joule/models');
-      const provider = ModelProviderRegistry.get(decision.provider);
+      const provider = this.providers?.get(decision.provider) as any;
+      if (!provider) throw new Error(`Provider not available: ${decision.provider}`);
 
       const response = await provider.complete({
         model: decision.model,

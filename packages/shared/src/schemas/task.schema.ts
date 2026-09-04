@@ -6,6 +6,7 @@ export const taskSubmissionSchema = z.object({
   budget: z.union([budgetPresetNameSchema, budgetEnvelopeSchema.partial()]).optional(),
   context: z.record(z.unknown()).optional(),
   tools: z.array(z.string()).optional(),
+  mode: z.enum(['adaptive', 'slm-only', 'llm-only', 'static-router']).optional(),
 });
 
 export const taskStatusSchema = z.enum([

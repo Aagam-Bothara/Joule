@@ -5,6 +5,7 @@ import {
   type BudgetCheckpoint,
   type TokenUsage,
   type EnergyConfig,
+  type ModelResponse,
   BudgetExhaustedError,
   monotonicNow,
   calculateEnergy,
@@ -147,6 +148,51 @@ export class BudgetManager {
 
   canAffordToolCall(instance: BudgetEnvelopeInstance): boolean {
     return instance.state.toolCallsUsed < instance.envelope.maxToolCalls;
+  }
+
+  /**
+   * Continuous affordability check used by the escalation policy:
+   * "would spending this much more still fit inside the envelope?"
+   */
+  canAfford(instance: BudgetEnvelopeInstance, need: { costUsd?: number; tokens?: number }): boolean {
+    const usage = this.getUsage(instance);
+    if (usage.latencyRemaining <= 0) return false;
+    if (need.costUsd !== undefined && usage.costRemaining < need.costUsd) return false;
+    if (need.tokens !== undefined && usage.tokensRemaining < need.tokens) return false;
+    return true;
+  }
+
+  /**
+   * Record a completed model call in one place: tokens, cost, and energy.
+   * Uses the provider-reported cost when present, otherwise the pricing-table
+   * approximation — never both, so cost is not double-counted.
+   * Returns the cost actually charged so callers can log it.
+   */
+  recordModelResponse(
+    instance: BudgetEnvelopeInstance,
+    response: ModelResponse,
+    energyConfig?: EnergyConfig,
+  ): { tokens: number; costUsd: number } {
+    const tokens = response.tokenUsage.totalTokens;
+    const costUsd = response.costUsd > 0
+      ? response.costUsd
+      : this.approximateCost(tokens, response.model);
+    this.addUsage(instance, tokens, costUsd);
+    this.deductEnergy(instance, response.model, response.tokenUsage, energyConfig);
+    return { tokens, costUsd };
+  }
+
+  private addUsage(instance: BudgetEnvelopeInstance, tokens: number, costUsd: number): void {
+    instance.state.tokensUsed += tokens;
+    instance.state.costUsd += costUsd;
+    const parent = this.parentMap.get(instance.id);
+    if (parent) this.addUsage(parent, tokens, costUsd);
+  }
+
+  private approximateCost(tokens: number, model: string): number {
+    const pricing = MODEL_PRICING[model];
+    if (!pricing) return 0;
+    return (tokens * (pricing.inputPerMillion + pricing.outputPerMillion) / 2) / 1_000_000;
   }
 
   getUsage(instance: BudgetEnvelopeInstance): BudgetUsage {

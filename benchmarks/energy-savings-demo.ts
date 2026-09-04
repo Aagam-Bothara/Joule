@@ -37,7 +37,7 @@ const WORKLOADS: SimulatedWorkload[] = [
 ];
 
 const SLM_MODEL = 'llama3.2:3b';
-const LLM_MODEL = 'claude-3-5-sonnet-20241022';
+const LLM_MODEL = 'claude-sonnet-4-20250514';
 
 function simulateWorkload(workload: SimulatedWorkload) {
   let totalEnergyWh = 0;

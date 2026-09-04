@@ -10,7 +10,7 @@
  *   Falls back to Ollama at localhost:11434 if no API keys found.
  */
 
-import { generateId, type Task, type JouleConfig, type BudgetPresetName, BUDGET_PRESETS } from '@joule/shared';
+import { generateId, type Task, type JouleConfig, type BudgetPresetName, type ExecutionMode, BUDGET_PRESETS } from '@joule/shared';
 import type { StreamEvent } from './task-executor.js';
 import { Joule } from './engine.js';
 import {
@@ -34,6 +34,8 @@ export interface SimpleOptions {
   provider?: 'anthropic' | 'openai' | 'google' | 'ollama';
   /** Enable governance (default: false) */
   governance?: boolean;
+  /** Execution mode: adaptive (SLM-first + escalation), slm-only, llm-only, static-router (default) */
+  mode?: ExecutionMode;
   /** Additional config overrides merged on top of simple defaults */
   configOverrides?: Partial<JouleConfig>;
 }
@@ -98,7 +100,7 @@ function autoSetup(joule: Joule, options?: SimpleOptions): void {
     if (googleKey) {
       joule.providers.register(new GoogleProvider({
         apiKey: googleKey,
-        slmModel: 'gemini-2.0-flash',
+        slmModel: 'gemini-2.5-flash',
         llmModel: 'gemini-2.5-pro',
       }));
     }

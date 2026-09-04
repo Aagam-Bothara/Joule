@@ -51,6 +51,20 @@ export const routingConfigSchema = z.object({
   preferEfficientModels: z.boolean().default(false).optional(),
   energyWeight: z.number().min(0).max(1).default(0).optional(),
   maxReplanDepth: z.number().int().min(0).max(10).default(2).optional(),
+  unifiedPlanning: z.boolean().optional(),
+  enableDependencyPruning: z.boolean().optional(),
+  defaultMode: z.enum(['adaptive', 'slm-only', 'llm-only', 'static-router']).default('adaptive').optional(),
+  escalation: z.object({
+    maxSteps: z.number().int().min(1).max(200).optional(),
+    consultThreshold: z.number().min(0).max(1).optional(),
+    handoffThreshold: z.number().min(0).max(1).optional(),
+    maxFailuresBeforeHandoff: z.number().int().min(1).optional(),
+    maxConsultations: z.number().int().min(0).optional(),
+    consultMaxTokens: z.number().int().min(50).optional(),
+    llmJudge: z.boolean().optional(),
+    stallSteps: z.number().int().min(1).optional(),
+    verifyRetries: z.number().int().min(0).optional(),
+  }).optional(),
 });
 
 export const loggingConfigSchema = z.object({

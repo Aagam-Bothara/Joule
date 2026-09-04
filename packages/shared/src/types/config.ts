@@ -8,6 +8,7 @@ import type { VoiceConfig } from './voice.js';
 import type { Constitution } from './constitution.js';
 import type { ApprovalPolicy } from './approval.js';
 import type { GovernanceConfig } from './governance.js';
+import type { ExecutionMode, EscalationPolicyConfig } from './execution.js';
 
 export interface ChannelsConfig {
   slack?: {
@@ -161,6 +162,10 @@ export interface RoutingConfig {
   /** Enable dependency-aware structural pruning to reduce context tokens. Default: true.
    *  Set to false to disable pruning for A/B correctness evaluation. */
   enableDependencyPruning?: boolean;
+  /** Default execution mode when a task does not set one. Default: 'static-router' */
+  defaultMode?: ExecutionMode;
+  /** Rule-based escalation policy tuning for adaptive execution */
+  escalation?: EscalationPolicyConfig;
 }
 
 export interface LoggingConfig {

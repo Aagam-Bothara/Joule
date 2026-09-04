@@ -2,6 +2,8 @@ import type { BudgetPresetName, BudgetEnvelope, BudgetUsage } from './budget.js'
 import type { ExecutionTrace } from './trace.js';
 import type { EfficiencyReport } from './energy.js';
 import type { SessionMessage } from './session.js';
+import type { ModelTier } from './model.js';
+import type { ExecutionMode, ExecutionState, TrajectoryReport } from './execution.js';
 
 export interface Task {
   id: string;
@@ -11,6 +13,8 @@ export interface Task {
   tools?: string[];
   messages?: SessionMessage[];
   sessionId?: string;
+  /** Execution strategy. Defaults to routing.defaultMode (static-router). */
+  mode?: ExecutionMode;
   createdAt: string;
 }
 
@@ -35,6 +39,18 @@ export interface StepResult {
   durationMs: number;
   error?: string;
   confidence?: number;
+  /** Adaptive execution: what the step did (agent description) */
+  description?: string;
+  /** Adaptive execution: model and tier that proposed this step */
+  model?: string;
+  tier?: ModelTier;
+  /** Set when the step ran under advice from a consultation */
+  consultId?: string;
+  /** Deterministic verification result, when a verifier ran */
+  verified?: boolean;
+  verifierKind?: string;
+  /** Fraction of checks that passed (0..1), when the verifier could count them */
+  verifyScore?: number;
 }
 
 export interface TaskResult {
@@ -53,6 +69,12 @@ export interface TaskResult {
   criteriaResults?: CriterionResult[];
   simulationResult?: SimulationResult;
   decisionGraph?: DecisionGraph;
+  /** Execution mode that produced this result */
+  mode?: ExecutionMode;
+  /** Adaptive execution: per-task trajectory report (escalation decisions, tier usage) */
+  trajectory?: TrajectoryReport;
+  /** Adaptive execution: final structured state */
+  executionState?: ExecutionState;
 }
 
 // --- Task Specification (structured goal + success criteria) ---
@@ -78,8 +100,20 @@ export interface CriterionResult {
 // --- Step Verification (per-step assertion after execution) ---
 
 export interface StepVerification {
-  type: 'output_check' | 'dom_check' | 'none';
+  /**
+   * - output_check  regex / substring over the tool output (deterministic)
+   * - dom_check     browser_evaluate script must be truthy (deterministic)
+   * - command_exit  run `command` via shell_exec; pass iff exit code matches (deterministic)
+   * - test_result   like command_exit, and the output must also match `assertion` if set
+   * - llm_judge     small-model judgement (non-deterministic; opt-in)
+   */
+  type: 'output_check' | 'dom_check' | 'command_exit' | 'test_result' | 'llm_judge' | 'none';
   assertion: string;
+  /** command_exit / test_result: shell command to run */
+  command?: string;
+  cwd?: string;
+  /** command_exit / test_result: expected exit code. Default: 0 */
+  expectedExitCode?: number;
   retryOnFail?: boolean;
   maxRetries?: number;
 }

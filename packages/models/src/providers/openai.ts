@@ -20,9 +20,17 @@ export class OpenAIProvider extends ModelProvider {
   private slmModel: string;
   private llmModel: string;
 
-  constructor(config: { apiKey: string; slmModel?: string; llmModel?: string }) {
+  private jsonMode: boolean;
+
+  /**
+   * `baseUrl` points the client at any OpenAI-compatible endpoint (OpenRouter,
+   * vLLM, LM Studio). `jsonMode: false` skips `response_format` for endpoints
+   * or models that reject it; prompts still ask for JSON.
+   */
+  constructor(config: { apiKey: string; slmModel?: string; llmModel?: string; baseUrl?: string; jsonMode?: boolean; defaultHeaders?: Record<string, string> }) {
     super();
-    this.client = new OpenAI({ apiKey: config.apiKey });
+    this.client = new OpenAI({ apiKey: config.apiKey, ...(config.baseUrl ? { baseURL: config.baseUrl } : {}), ...(config.defaultHeaders ? { defaultHeaders: config.defaultHeaders } : {}) });
+    this.jsonMode = config.jsonMode ?? true;
     this.slmModel = config.slmModel ?? 'gpt-4o-mini';
     this.llmModel = config.llmModel ?? 'gpt-4o';
   }
@@ -61,7 +69,7 @@ export class OpenAIProvider extends ModelProvider {
       messages,
       max_tokens: request.maxTokens ?? (hasImages ? 4096 : 1024),
       temperature: request.temperature ?? 0.1,
-      ...(request.responseFormat === 'json' ? { response_format: { type: 'json_object' } } : {}),
+      ...(request.responseFormat === 'json' && this.jsonMode ? { response_format: { type: 'json_object' } } : {}),
     });
 
     const latencyMs = monotonicNow() - startTime;

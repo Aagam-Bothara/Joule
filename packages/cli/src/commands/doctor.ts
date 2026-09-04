@@ -50,6 +50,30 @@ async function checkProviders(joule: Joule): Promise<CheckResult[]> {
           status: 'pass',
           detail: `Available (${provider.supportedTiers.join(', ')})`,
         });
+        // Configured model ids get retired without warning (gemini-2.0-flash did in 2026).
+        // A tiny real call per model is the only check that catches it.
+        for (const model of await provider.listModels()) {
+          const started = Date.now();
+          try {
+            await provider.chat({
+              model: model.id,
+              provider: provider.name,
+              tier: model.tier,
+              system: 'Reply with the single word OK.',
+              messages: [{ role: 'user', content: 'OK?' }],
+              maxTokens: 8,
+              temperature: 0,
+            });
+            results.push({ name: `${provider.name} ${model.tier} model`, status: 'pass', detail: `${model.id} responds (${Date.now() - started}ms)` });
+          } catch (err) {
+            const message = err instanceof Error ? err.message : String(err);
+            results.push({
+              name: `${provider.name} ${model.tier} model`,
+              status: 'fail',
+              detail: `${model.id}: ${message.slice(0, 140)} — check the model id in joule.config.yaml (models get retired)`,
+            });
+          }
+        }
       } else {
         results.push({
           name: `${provider.name} provider`,
