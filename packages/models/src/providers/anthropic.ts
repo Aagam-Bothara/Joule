@@ -14,17 +14,21 @@ import { ModelProvider, type StreamChunk } from '../provider.js';
 
 export class AnthropicProvider extends ModelProvider {
   readonly name: ModelProviderName = 'anthropic';
-  readonly supportedTiers = [ModelTier.SLM, ModelTier.LLM];
+  readonly supportedTiers: ModelTier[] = [ModelTier.SLM, ModelTier.LLM];
 
   private client: Anthropic;
   private slmModel: string;
   private llmModel: string;
+  /** Optional middle rung (efficient large model) for the escalation ladder */
+  private midModel?: string;
 
-  constructor(config: { apiKey: string; slmModel?: string; llmModel?: string }) {
+  constructor(config: { apiKey: string; slmModel?: string; midModel?: string; llmModel?: string }) {
     super();
     this.client = new Anthropic({ apiKey: config.apiKey });
     this.slmModel = config.slmModel ?? 'claude-haiku-4-5-20251001';
     this.llmModel = config.llmModel ?? 'claude-sonnet-4-20250514';
+    this.midModel = config.midModel;
+    if (this.midModel) this.supportedTiers = [ModelTier.SLM, ModelTier.MID, ModelTier.LLM];
   }
 
   async isAvailable(): Promise<boolean> {
@@ -140,6 +144,16 @@ export class AnthropicProvider extends ModelProvider {
         energyPerInputToken: (MODEL_ENERGY[this.slmModel]?.inputWhPerMillion ?? 0) / 1_000_000,
         energyPerOutputToken: (MODEL_ENERGY[this.slmModel]?.outputWhPerMillion ?? 0) / 1_000_000,
       },
+      ...(this.midModel ? [{
+        id: this.midModel,
+        name: this.midModel,
+        tier: ModelTier.MID,
+        contextWindow: 200_000,
+        costPerInputToken: (MODEL_PRICING[this.midModel]?.inputPerMillion ?? 1.0) / 1_000_000,
+        costPerOutputToken: (MODEL_PRICING[this.midModel]?.outputPerMillion ?? 4.0) / 1_000_000,
+        energyPerInputToken: (MODEL_ENERGY[this.midModel]?.inputWhPerMillion ?? 0) / 1_000_000,
+        energyPerOutputToken: (MODEL_ENERGY[this.midModel]?.outputWhPerMillion ?? 0) / 1_000_000,
+      }] : []),
       {
         id: this.llmModel,
         name: 'Claude Sonnet 4',

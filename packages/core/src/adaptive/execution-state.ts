@@ -161,20 +161,34 @@ export function recordDecision(state: ExecutionState, decision: EscalationDecisi
 
 // ── Queries ──────────────────────────────────────────────────────────
 
-/** Highest repeat count of any single failure signature. */
-export function maxRepeatedFailure(state: ExecutionState): number {
-  return state.failures.reduce((m, f) => Math.max(m, f.count), 0);
+/**
+ * Highest repeat count of any single failure signature. With `sinceStep`, only
+ * failures after that step are counted (rung-local after a handoff).
+ */
+export function maxRepeatedFailure(state: ExecutionState, sinceStep = -1): number {
+  if (sinceStep < 0) return state.failures.reduce((m, f) => Math.max(m, f.count), 0);
+  const counts = new Map<string, number>();
+  for (const f of state.failures) {
+    if (f.step <= sinceStep) continue;
+    counts.set(f.signature, (counts.get(f.signature) ?? 0) + 1);
+  }
+  return Math.max(0, ...counts.values());
 }
 
 export function lastFailure(state: ExecutionState): Failure | undefined {
   return state.failures[state.failures.length - 1];
 }
 
-/** Has a consultation already happened since this failure signature first appeared? */
+/**
+ * Has a consultation already happened since this failure signature first
+ * appeared at the current rung? Rung-local: advice the previous model received
+ * does not count for the model that took over.
+ */
 export function consultedAbout(state: ExecutionState, signature: string): boolean {
-  const first = state.failures.find(f => f.signature === signature);
+  const since = state.handoffAtStep ?? -1;
+  const first = state.failures.find(f => f.signature === signature && f.step > since);
   if (!first) return false;
-  return state.advice.some(a => a.step >= first.step);
+  return state.advice.some(a => a.step >= first.step && a.step > since);
 }
 
 /** Most recent observations, failures and verifier results first. */

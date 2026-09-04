@@ -18,6 +18,7 @@
 
 import {
   ModelTier,
+  TIER_ORDER,
   ConstitutionViolationError,
   BudgetExhaustedError,
   MODEL_PRICING,
@@ -45,6 +46,7 @@ import {
   adviceBlock,
   createExecutionState,
   currentPlan,
+  lastFailure,
   pushPlan,
   recordDecision,
   recordFailure,
@@ -132,18 +134,17 @@ export class AdaptiveExecutor {
       }
     }
 
-    // ── Tier availability ───────────────────────────────────────────
-    const llm = await this.probe(ModelTier.LLM, envelope);
-    const slm = await this.probe(ModelTier.SLM, envelope);
-    let startTier = mode === 'llm-only' ? ModelTier.LLM : ModelTier.SLM;
-    if (startTier === ModelTier.LLM && !llm.available) {
-      throw new Error('llm-only mode requires an LLM-tier provider');
-    }
-    if (startTier === ModelTier.SLM && !slm.available) {
-      if (!llm.available || mode === 'slm-only') throw new Error('No SLM-tier provider available');
-      startTier = ModelTier.LLM;
-    }
-    attach.llmPricePerToken = llm.pricePerToken;
+    // ── Ladder ──────────────────────────────────────────────────────
+    // Rungs no provider serves are dropped, so a two-model setup is [slm, llm].
+    const probes = new Map<ModelTier, TierProbe>();
+    for (const t of TIER_ORDER) probes.set(t, await this.probe(t, envelope));
+    const ladder = this.resolveLadder(mode, probes);
+    let rung = 0;
+    const startTier = ladder[0];
+    const topTier = ladder[ladder.length - 1];
+    const nextTier = (): ModelTier | undefined => ladder[rung + 1];
+    const priceOf = (t: ModelTier | undefined): number => (t ? probes.get(t)?.pricePerToken ?? 0 : 0);
+    attach.llmPricePerToken = probes.get(topTier)?.pricePerToken;
 
     const state = createExecutionState({
       taskId: task.id,
@@ -158,8 +159,9 @@ export class AdaptiveExecutor {
       type: 'adaptive_start',
       mode,
       tier: startTier,
-      llmAvailable: llm.available,
-      llmPricePerToken: llm.pricePerToken,
+      ladder,
+      llmAvailable: ladder.length > 1,
+      llmPricePerToken: attach.llmPricePerToken,
     });
 
     let messages: ChatMessage[] = [{ role: 'user', content: this.initialMessage(task, envelope) }];
@@ -169,8 +171,9 @@ export class AdaptiveExecutor {
     let consecutiveModelErrors = 0;
 
     const usage = (): BudgetUsage => budget.getUsage(envelope);
-    const consultCost = (llm.pricePerToken ?? 0) * (cfg.consultMaxTokens + 1500);
-    const handoffCost = (llm.pricePerToken ?? 0) * 3 * 2500;
+    // Escalation cost estimates are priced at the next rung, not the top.
+    const consultCost = (): number => priceOf(nextTier()) * (cfg.consultMaxTokens + 1500);
+    const handoffCost = (): number => priceOf(nextTier()) * 3 * 2500;
 
     // ── Main loop ───────────────────────────────────────────────────
     while (state.status === 'running') {
@@ -178,7 +181,7 @@ export class AdaptiveExecutor {
       budget.checkBudget(envelope);
       if (state.step >= cfg.maxSteps) {
         const decision = this.policy.evaluate({
-          state, confidence: this.engine.compute(state, state.budget), llmAvailable: llm.available,
+          state, confidence: this.engine.compute(state, state.budget), llmAvailable: nextTier() !== undefined, atTopRung: nextTier() === undefined,
           canEscalate: false, canAfford: () => true, estimatedConsultCostUsd: 0, estimatedHandoffCostUsd: 0, minTurnTokens: 0,
         });
         decision.action = 'abort';
@@ -278,11 +281,12 @@ export class AdaptiveExecutor {
         state,
         confidence,
         agentRequest,
-        llmAvailable: llm.available,
+        llmAvailable: nextTier() !== undefined,
+        atTopRung: nextTier() === undefined,
         canEscalate: budget.canAffordEscalation(envelope),
         canAfford: need => budget.canAfford(envelope, need),
-        estimatedConsultCostUsd: consultCost,
-        estimatedHandoffCostUsd: handoffCost,
+        estimatedConsultCostUsd: consultCost(),
+        estimatedHandoffCostUsd: handoffCost(),
         minTurnTokens: MIN_TURN_TOKENS,
       });
       if (state.status === 'completed') {
@@ -294,8 +298,10 @@ export class AdaptiveExecutor {
       // Act on the decision.
       switch (decision.action) {
         case 'consult': {
-          const advice = await this.doConsult(state, envelope, traceId, pendingQuestion, onProgress);
+          const advisor = nextTier() ?? topTier;
+          const advice = await this.doConsult(state, envelope, traceId, pendingQuestion, advisor, onProgress);
           decision.consultId = advice.consultId;
+          decision.reason = `${decision.reason} → consult ${advisor}`;
           activeConsultId = advice.consultId;
           pendingQuestion = undefined;
           pendingUser.push(adviceBlock(advice), 'Apply the advice and continue. Respond with the next action as JSON.');
@@ -304,7 +310,16 @@ export class AdaptiveExecutor {
         case 'handoff': {
           budget.deductEscalation(envelope);
           const fromTier = state.tier;
-          state.tier = ModelTier.LLM;
+          // Climb one rung on evidence. A reasoning breakdown (repeated malformed
+          // output, or giving up before any step succeeded) skips to the top rung:
+          // the middle rung would only burn a hop.
+          const lf = lastFailure(state);
+          const breakdown = (lf?.kind === 'malformed_action' && lf.count >= 2)
+            || (agentRequest === 'give_up' && !state.completedSteps.some(s => s.success));
+          const target = breakdown ? topTier : (nextTier() ?? topTier);
+          rung = ladder.indexOf(target);
+          state.tier = target;
+          decision.reason = `${decision.reason} → handoff ${target}${breakdown && target !== nextTier() ? ' (skipped rung)' : ''}`;
           state.handoffs++;
           state.handoffAtStep = state.step;
           activeConsultId = undefined;
@@ -317,7 +332,7 @@ export class AdaptiveExecutor {
           tracer.logEvent(traceId, 'handoff', {
             step: state.step,
             fromTier,
-            toTier: ModelTier.LLM,
+            toTier: target,
             reason: decision.reason,
             completedSteps: handoff.completedWork.length,
             failures: handoff.failures.length,
@@ -356,7 +371,8 @@ export class AdaptiveExecutor {
       steps: state.step,
       consultations: state.consultations,
       handoffs: state.handoffs,
-      llmPricePerToken: llm.pricePerToken,
+      ladder,
+      llmPricePerToken: attach.llmPricePerToken,
     });
     onProgress?.({ phase: 'synthesizing', stepIndex: state.step, totalSteps: state.step, usage: state.budget, state: 'synthesize' });
 
@@ -365,8 +381,30 @@ export class AdaptiveExecutor {
       result: state.result ?? this.partialResult(state),
       error: state.status === 'completed' ? undefined : state.error,
       state,
-      llmPricePerToken: llm.pricePerToken,
+      llmPricePerToken: attach.llmPricePerToken,
     };
+  }
+
+  /**
+   * The rungs this run may use, lowest first. Pinned modes get a single rung;
+   * adaptive uses the configured ladder minus rungs no provider serves.
+   */
+  private resolveLadder(mode: ExecutionMode, probes: Map<ModelTier, TierProbe>): ModelTier[] {
+    const available = (t: ModelTier): boolean => probes.get(t)?.available === true;
+    const pinned: Partial<Record<ExecutionMode, ModelTier>> = {
+      'slm-only': ModelTier.SLM,
+      'mid-only': ModelTier.MID,
+      'llm-only': ModelTier.LLM,
+    };
+    const single = pinned[mode];
+    if (single) {
+      if (!available(single)) throw new Error(`${mode} mode requires a ${single}-tier provider`);
+      return [single];
+    }
+    const configured = this.policy.config.ladder.length > 0 ? this.policy.config.ladder : [...TIER_ORDER];
+    const ladder = configured.filter(available);
+    if (ladder.length === 0) throw new Error('No model provider is available for any tier in the ladder');
+    return ladder;
   }
 
   // ── Tool execution and verification ─────────────────────────────
@@ -451,13 +489,14 @@ export class AdaptiveExecutor {
     envelope: BudgetEnvelopeInstance,
     traceId: string,
     question: string | undefined,
+    advisor: ModelTier,
     onProgress?: ProgressCallback,
   ): Promise<Advice> {
     const consultId = `c${state.consultations + 1}`;
     const q = question ?? this.autoQuestion(state);
     const req = toConsultationRequest(state, q, consultId, this.policy.config.consultMaxTokens);
     onProgress?.({ phase: 'recovering', stepIndex: state.step, totalSteps: this.policy.config.maxSteps, usage: state.budget, state: 'recover' });
-    const advice = await this.consultant.consult(req, envelope, traceId);
+    const advice = await this.consultant.consult(req, envelope, traceId, advisor);
     advice.step = state.step;
     state.advice.push(advice);
     state.consultations++;

@@ -22,7 +22,7 @@ import type { TraceExporter } from './trace-exporters/exporter.js';
  * tokens" and "estimated LLM-only cost" answerable from a trace alone.
  */
 export function computeTierUsage(spans: TraceSpan[]): TierUsage {
-  const usage: TierUsage = { slmTokens: 0, llmTokens: 0, slmCostUsd: 0, llmCostUsd: 0, slmCalls: 0, llmCalls: 0 };
+  const usage: TierUsage = { slmTokens: 0, midTokens: 0, llmTokens: 0, slmCostUsd: 0, midCostUsd: 0, llmCostUsd: 0, slmCalls: 0, midCalls: 0, llmCalls: 0 };
   const walk = (list: TraceSpan[]): void => {
     for (const span of list) {
       for (const event of span.events) {
@@ -31,6 +31,8 @@ export function computeTierUsage(spans: TraceSpan[]): TierUsage {
         const cost = Number(event.data.costUsd ?? 0) || 0;
         if (event.data.tier === 'llm') {
           usage.llmTokens += tokens; usage.llmCostUsd += cost; usage.llmCalls += 1;
+        } else if (event.data.tier === 'mid') {
+          usage.midTokens += tokens; usage.midCostUsd += cost; usage.midCalls += 1;
         } else {
           usage.slmTokens += tokens; usage.slmCostUsd += cost; usage.slmCalls += 1;
         }

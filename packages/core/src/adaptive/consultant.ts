@@ -32,10 +32,15 @@ export class Consultant {
     private energyConfig?: EnergyConfig,
   ) {}
 
-  async consult(req: ConsultationRequest, envelope: BudgetEnvelopeInstance, traceId: string): Promise<Advice> {
-    const spanId = this.tracer.startSpan(traceId, `consult-${req.consultId}`, { question: req.question });
+  async consult(
+    req: ConsultationRequest,
+    envelope: BudgetEnvelopeInstance,
+    traceId: string,
+    tier: ModelTier = ModelTier.LLM,
+  ): Promise<Advice> {
+    const spanId = this.tracer.startSpan(traceId, `consult-${req.consultId}`, { question: req.question, tier });
     try {
-      const decision = await this.router.route('execute', envelope, { forceTier: ModelTier.LLM });
+      const decision = await this.router.route('execute', envelope, { forceTier: tier });
       this.tracer.logRoutingDecision(traceId, { ...decision, purpose: 'consult', consultId: req.consultId } as unknown as Record<string, unknown>);
       const provider = this.providers.get(decision.provider);
       if (!provider) throw new Error(`Provider not available: ${decision.provider}`);

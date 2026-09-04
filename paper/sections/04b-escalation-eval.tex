@@ -64,12 +64,32 @@ On all 164 HumanEval problems~\cite{chen2021humaneval} with the same pair, the s
 Joule matches the large model at 96\% for 64\% of its cost (recall 84\%, precision 72\%); the FrugalGPT-style cascade reaches 93\% at 72\%.
 With a small model this weak, handoffs carry the result (94\% succeed) and consultations rarely suffice (22\%): consultation pays when the small model is close to a solution, handoff when it is not.
 
+\paragraph{Long-horizon tasks.}
+To test the claim that trajectory-level escalation separates from request-level cascades as tasks lengthen, we bundle four MBPP problems into one task: implement four functions in one module, all tests must pass.
+Trajectories run 8--15 steps on average (up to 40) instead of 3--6.
+On 30 such tasks with the main pair, Joule reaches 67\% at 47\% of the large model's cost; the FrugalGPT-style cascade reaches 57\% at 76\%, and the large model alone 53\%.
+The small model's incremental work is what makes the difference: a handoff carries a partly built module with passing tests, so the large model finishes rather than restarts, whereas a cascade reruns the whole task.
+Consultations rarely unblock the small model on these tasks (2 of 24) and handoffs do (12 of 22).
+Three policy rules that short tasks never exercise were needed: a rising test pass fraction counts as progress; a test run that repeats a verified result is not a second failure; and failures are counted within a window of recent steps rather than over the whole run.
+
+\paragraph{Three rungs.}
+On 50 further MBPP problems with Gemini~2.5~Flash as a middle rung and GPT-4o as the top, the ladder policy reaches 94\% at 15\% of GPT-4o's cost, against 86\% at 39\% for the two-tier policy that hands the small model straight to GPT-4o, and 90\% for GPT-4o alone.
+The ladder used the middle rung on 18 problems and the top rung on 6; 80\% of its handoffs succeeded, against 46\% for direct handoffs to the frontier model.
+Flash alone solves 96\% of this slice for 13\% of GPT-4o's cost, so the cheapest correct choice here is the middle model by itself; the ladder's contribution is reaching that outcome without knowing in advance which rung suffices.
+
 \paragraph{Small-model compatibility.}
 Nine small models from 3B to 70B drove the same step agent on 20 further problems with Gemini~2.5~Flash as the large model.
 All reach 90--100\% success under adaptive escalation; the 7B--8B open models (Qwen~2.5~7B, Llama~3.1~8B) finish 100\% at about \$0.003 per problem, a third of the large model's cost, with essentially no unparseable turns.
 
 \paragraph{Trigger ablation.}
 On a 30-problem development slice, allowing the small model one verification retry before a consult, and treating an improving test pass fraction as progress, reduced cost per task by 35\% at unchanged success and raised precision from 44\% to 75\% against the same labels, at the cost of recall (100\% to 82\%).
+
+\paragraph{Can the trigger be learned?}
+We trained a logistic model over the confidence signals (plus step index, failure count, and verification-failure streak) on every small-model-only trajectory from the runs above, 1{,}092 trajectories over 364 tasks, using the run outcome as the label for each decision point and holding out 30\% of tasks.
+The signals are informative: held-out AUC for predicting eventual small-model success is 0.89 per decision point.
+They are not informative early: AUC is 0.51 at the first decision and 0.89 at the second, so essentially all of the information arrives with the first tool result and verifier outcome, which is exactly what the rules act on.
+Replayed as a trigger (escalate when predicted success falls below $\theta$) on the held-out trajectories, the learned model reproduces the rule-based policy at its best threshold (precision 68\% and recall 91\% versus 69\% and 90\%) rather than improving on it.
+We read this as evidence that the rule set is already close to what the current signals support; better triggers need richer evidence at the step, such as the content of failing tests, not a better classifier over the same signals.
 
 \paragraph{Limitations.}
 Two coding workloads, one small model in the main comparison, and rule-based triggers whose thresholds were set by hand.

@@ -115,22 +115,22 @@ export interface EmbeddingsConfig {
 export interface ProvidersConfig {
   ollama?: {
     baseUrl: string;
-    models: { slm: string; llm?: string };
+    models: { slm: string; mid?: string; llm?: string };
     enabled: boolean;
   };
   anthropic?: {
     apiKey: string;
-    models: { slm: string; llm: string };
+    models: { slm: string; mid?: string; llm: string };
     enabled: boolean;
   };
   openai?: {
     apiKey: string;
-    models: { slm: string; llm: string };
+    models: { slm: string; mid?: string; llm: string };
     enabled: boolean;
   };
   google?: {
     apiKey: string;
-    models: { slm: string; llm: string };
+    models: { slm: string; mid?: string; llm: string };
     enabled: boolean;
   };
 }
@@ -152,6 +152,8 @@ export interface RoutingConfig {
   complexityThreshold: number;
   providerPriority: {
     slm: ModelProviderName[];
+    /** Providers for the optional middle rung. Default: same as llm */
+    mid?: ModelProviderName[];
     llm: ModelProviderName[];
   };
   preferEfficientModels?: boolean;

@@ -131,6 +131,36 @@ save less. When the small model is this weak, handoffs carry the result (94% of 
 and consultations rarely suffice (22%), which is the expected shape: consult pays off when the
 small model is close, handoff when it is not.
 
+**The longer the task, the bigger the gap.** Thirty tasks of four functions each, built
+incrementally in one module with all tests required to pass (8 to 15 steps per task, up to 40):
+
+| strategy | success | cost per task | cost vs Flash alone |
+|---|---:|---:|---:|
+| small model alone | 20% | $0.0023 | 0.08 |
+| Flash alone | 53% | $0.0286 | 1.00 |
+| FrugalGPT-style cascade | 57% | $0.0217 | 0.76 |
+| **Joule adaptive** | **67%** | **$0.0136** | **0.47** |
+
+On long trajectories Joule is the best strategy on both axes. The small model's partial work is
+kept: it hands over a half-built module with passing tests, and the large model finishes rather
+than restarts. This is where request-level cascades lose most, because they rerun the whole task.
+
+**Three rungs beat two.** With an efficient model as a middle rung (Llama 8B → Gemini Flash →
+GPT-4o, 50 further problems), escalation climbs one rung at a time and only reaches the frontier
+model when the middle one fails too.
+
+| strategy | success | cost per task | cost vs GPT-4o alone |
+|---|---:|---:|---:|
+| small model alone | 62% | $0.0004 | 0.01 |
+| Flash alone | 96% | $0.0061 | 0.13 |
+| GPT-4o alone | 90% | $0.0482 | 1.00 |
+| Joule, two tiers (small → GPT-4o) | 86% | $0.0190 | 0.39 |
+| **Joule, ladder (small → Flash → GPT-4o)** | **94%** | **$0.0070** | **0.15** |
+
+The ladder touched the frontier model on 6 of 50 problems. 80% of its handoffs succeeded,
+against 46% when the small model handed straight to GPT-4o: the middle rung is both cheaper
+and a better first responder.
+
 Reproduce with `benchmarks/harness` (see [benchmarks/README.md](benchmarks/README.md)): same
 engine, same tools, same prompts; only the routing strategy changes. Success on coding tasks is
 decided by re-running the tests, never by the agent's own claim.

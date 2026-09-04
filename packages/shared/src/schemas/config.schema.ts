@@ -8,6 +8,7 @@ const ollamaConfigSchema = z.object({
   baseUrl: z.string().url().default('http://localhost:11434'),
   models: z.object({
     slm: z.string().default('llama3.2:3b'),
+    mid: z.string().optional(),
     llm: z.string().optional(),
   }),
   enabled: z.boolean().default(true),
@@ -17,6 +18,7 @@ const cloudProviderConfigSchema = z.object({
   apiKey: z.string().min(1).optional(),
   models: z.object({
     slm: z.string(),
+    mid: z.string().optional(),
     llm: z.string(),
   }),
   enabled: z.boolean().default(true),
@@ -46,6 +48,7 @@ export const routingConfigSchema = z.object({
   complexityThreshold: z.number().min(0).max(1).default(0.7),
   providerPriority: z.object({
     slm: z.array(modelProviderNameSchema).default(['ollama', 'google', 'openai', 'anthropic']),
+    mid: z.array(modelProviderNameSchema).optional(),
     llm: z.array(modelProviderNameSchema).default(['anthropic', 'openai', 'google']),
   }).default({}),
   preferEfficientModels: z.boolean().default(false).optional(),
@@ -53,7 +56,7 @@ export const routingConfigSchema = z.object({
   maxReplanDepth: z.number().int().min(0).max(10).default(2).optional(),
   unifiedPlanning: z.boolean().optional(),
   enableDependencyPruning: z.boolean().optional(),
-  defaultMode: z.enum(['adaptive', 'slm-only', 'llm-only', 'static-router']).default('adaptive').optional(),
+  defaultMode: z.enum(['adaptive', 'slm-only', 'mid-only', 'llm-only', 'static-router']).default('adaptive').optional(),
   escalation: z.object({
     maxSteps: z.number().int().min(1).max(200).optional(),
     consultThreshold: z.number().min(0).max(1).optional(),
@@ -64,6 +67,8 @@ export const routingConfigSchema = z.object({
     llmJudge: z.boolean().optional(),
     stallSteps: z.number().int().min(1).optional(),
     verifyRetries: z.number().int().min(0).optional(),
+    ladder: z.array(z.enum(['slm', 'mid', 'llm'])).min(1).optional(),
+    failureWindow: z.number().int().min(1).optional(),
   }).optional(),
 });
 

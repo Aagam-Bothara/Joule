@@ -13,36 +13,39 @@ import type { Task, RoutingConfig, ChatMessage, ModelRequest, ExecutionMode, Bud
 
 // ── Scripted two-tier provider ──────────────────────────────────────
 
-interface Scripts { slm?: string[]; llm?: string[] }
+interface Scripts { slm?: string[]; mid?: string[]; llm?: string[] }
 
 function scriptedProvider(scripts: Scripts, opts: { llmTier?: boolean } = {}) {
-  const idx = { slm: 0, llm: 0 };
-  const calls: Array<{ tier: 'slm' | 'llm'; system: string; messages: ChatMessage[]; maxTokens?: number }> = [];
+  const idx = { slm: 0, mid: 0, llm: 0 };
+  const calls: Array<{ tier: 'slm' | 'mid' | 'llm'; system: string; messages: ChatMessage[]; maxTokens?: number }> = [];
   const hasLlm = opts.llmTier !== false;
+  const hasMid = scripts.mid !== undefined;
+  const cost = { slm: 0.0005, mid: 0.003, llm: 0.01 };
   const provider = {
     name: 'ollama' as const,
-    supportedTiers: hasLlm ? [ModelTier.SLM, ModelTier.LLM] : [ModelTier.SLM],
+    supportedTiers: [ModelTier.SLM, ...(hasMid ? [ModelTier.MID] : []), ...(hasLlm ? [ModelTier.LLM] : [])],
     isAvailable: async () => true,
     listModels: async () => [
       { id: 'test-slm', name: 'SLM', tier: ModelTier.SLM, contextWindow: 8000, costPerInputToken: 0, costPerOutputToken: 0 },
+      ...(hasMid ? [{ id: 'test-mid', name: 'MID', tier: ModelTier.MID, contextWindow: 8000, costPerInputToken: 0, costPerOutputToken: 0 }] : []),
       ...(hasLlm ? [{ id: 'test-llm', name: 'LLM', tier: ModelTier.LLM, contextWindow: 8000, costPerInputToken: 0, costPerOutputToken: 0 }] : []),
     ],
-    estimateCost: (_n: number, model: string) => (model === 'test-llm' ? 0.01 : 0.0005),
+    estimateCost: (_n: number, model: string) => (model === 'test-llm' ? 0.01 : model === 'test-mid' ? 0.003 : 0.0005),
     chat: async (req: ModelRequest) => {
-      const tier = req.tier === ModelTier.LLM ? 'llm' : 'slm';
+      const tier = req.tier === ModelTier.LLM ? 'llm' : req.tier === ModelTier.MID ? 'mid' : 'slm';
       // Copy: the executor mutates its message array after the call.
       calls.push({ tier, system: req.system ?? '', messages: req.messages.map(m => ({ ...m })), maxTokens: req.maxTokens });
       const list = scripts[tier] ?? [];
       const content = list[Math.min(idx[tier], list.length - 1)] ?? '{}';
       idx[tier]++;
       return {
-        model: tier === 'llm' ? 'test-llm' : 'test-slm',
+        model: `test-${tier}`,
         provider: 'ollama' as const,
         tier: req.tier,
         content,
         tokenUsage: { promptTokens: 100, completionTokens: 50, totalTokens: 150 },
         latencyMs: 5,
-        costUsd: tier === 'llm' ? 0.01 : 0.0005,
+        costUsd: cost[tier],
         finishReason: 'stop' as const,
       };
     },
@@ -269,8 +272,8 @@ describe('AdaptiveExecutor — modes and escalation', () => {
     expect(result.trajectory?.handoffs).toBe(0);
   });
 
-  it('adaptive without an LLM provider: cannot escalate, aborts at the step limit', async () => {
-    const { executor } = build(
+  it('adaptive without an LLM provider: the SLM is the top rung, so a failure wave aborts instead of escalating', async () => {
+    const { executor, calls } = build(
       { slm: [toolCall('always_fails', {})] },
       tools,
       { escalation: { maxSteps: 5 } },
@@ -280,10 +283,12 @@ describe('AdaptiveExecutor — modes and escalation', () => {
     const result = await executor.execute(task('adaptive'));
 
     expect(result.status).toBe('failed');
-    expect(result.error).toContain('step limit');
+    expect(result.error).toContain('already at top tier');
     expect(result.trajectory?.handoffs).toBe(0);
     expect(result.trajectory?.consultations).toBe(0);
-    expect(result.trajectory?.steps.some(s => s.reason.includes('no LLM provider available'))).toBe(true);
+    expect(calls.every(c => c.tier === 'slm')).toBe(true);
+    // Three failures, then abort — it does not burn the remaining step budget.
+    expect(result.trajectory?.steps.map(s => s.action)).toEqual(['continue', 'continue', 'abort']);
   });
 
   it('adaptive: two malformed SLM responses hand off to the LLM', async () => {
@@ -404,6 +409,77 @@ describe('AdaptiveExecutor — modes and escalation', () => {
     }
     expect(events).toEqual(['progress', 'chunk', 'chunk', 'result']);
     expect(text).toBe('streamed answer');
+  });
+
+  it('ladder: climbs one rung at a time — SLM hands off to MID, MID hands off to LLM', async () => {
+    const { executor, calls } = build({
+      slm: [toolCall('always_fails', {}), toolCall('always_fails', {}), toolCall('always_fails', {})],
+      mid: ['advice from mid', toolCall('always_fails', {}), toolCall('always_fails', {}), toolCall('always_fails', {})],
+      llm: [toolCall('echo_tool', { input: 'from-llm' }), finalAnswer('llm finished it')],
+    }, tools);
+
+    const result = await executor.execute(task('adaptive'));
+
+    expect(result.status).toBe('completed');
+    const t = result.trajectory!;
+    expect(t.handoffs).toBe(2);
+    // One consult per rung: the SLM asks the middle rung, the middle rung asks the top.
+    expect(t.consultations).toBe(2);
+    expect(t.consults[0].model).toBe('test-mid');
+    expect(t.consults[1].model).toBe('test-llm');
+    const tiers = t.steps.map(s => s.tier);
+    expect(tiers.slice(0, 3)).toEqual([ModelTier.SLM, ModelTier.SLM, ModelTier.SLM]);
+    expect(tiers).toContain(ModelTier.MID);
+    expect(tiers[tiers.length - 1]).toBe(ModelTier.LLM);
+    expect(result.executionState?.tier).toBe(ModelTier.LLM);
+    expect(result.budgetUsed.escalationsUsed).toBe(2);
+    expect(result.trace.tierUsage?.midCalls).toBeGreaterThan(0);
+    expect(t.midTokens).toBeGreaterThan(0);
+    expect(calls.map(c => c.tier).filter((x, i, a) => a.indexOf(x) === i)).toEqual(['slm', 'mid', 'llm']);
+    expect(renderTrajectory(t)).toContain('HANDOFF to MID');
+  });
+
+  it('ladder: a reasoning breakdown skips the middle rung', async () => {
+    const { executor, calls } = build({
+      slm: ['not an action', 'still prose'],
+      mid: [finalAnswer('mid should not be used')],
+      llm: [finalAnswer('answer from llm')],
+    }, tools);
+
+    const result = await executor.execute(task('adaptive'));
+
+    expect(result.status).toBe('completed');
+    expect(result.result).toBe('answer from llm');
+    expect(calls.some(c => c.tier === 'mid')).toBe(false);
+    expect(result.trajectory?.steps.find(s => s.action === 'handoff')?.reason).toContain('skipped rung');
+  });
+
+  it('mid-only pins the middle rung', async () => {
+    const { executor, calls } = build({
+      slm: ['never'],
+      mid: [toolCall('echo_tool', { input: 'm' }), finalAnswer('mid done')],
+      llm: ['never'],
+    }, tools);
+
+    const result = await executor.execute(task('mid-only'));
+
+    expect(result.status).toBe('completed');
+    expect(calls.every(c => c.tier === 'mid')).toBe(true);
+    expect(result.stepResults[0].tier).toBe(ModelTier.MID);
+  });
+
+  it('ladder can be restricted by config (two-tier despite a mid model being available)', async () => {
+    const { executor, calls } = build({
+      slm: [toolCall('always_fails', {}), toolCall('always_fails', {}), toolCall('always_fails', {})],
+      mid: ['never'],
+      llm: ['advice', finalAnswer('llm done')],
+    }, tools, { escalation: { ladder: [ModelTier.SLM, ModelTier.LLM] } });
+
+    const result = await executor.execute(task('adaptive'));
+
+    expect(result.status).toBe('completed');
+    expect(calls.some(c => c.tier === 'mid')).toBe(false);
+    expect(result.trajectory?.consults[0].model).toBe('test-llm');
   });
 
   it('trajectory can be rebuilt from the trace alone and rendered', async () => {

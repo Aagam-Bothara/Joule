@@ -23,14 +23,16 @@ import type { StepResult } from './task.js';
 /**
  * - `adaptive`      SLM-first step agent with the escalation policy (Joule's core)
  * - `slm-only`      step agent pinned to the SLM tier; never consults or hands off
+ * - `mid-only`      step agent pinned to the MID tier (efficient large model)
  * - `llm-only`      step agent pinned to the LLM tier
  * - `static-router` legacy plan-then-execute pipeline with per-call routing
  */
-export type ExecutionMode = 'adaptive' | 'slm-only' | 'llm-only' | 'static-router';
+export type ExecutionMode = 'adaptive' | 'slm-only' | 'mid-only' | 'llm-only' | 'static-router';
 
 export const EXECUTION_MODES: readonly ExecutionMode[] = [
   'adaptive',
   'slm-only',
+  'mid-only',
   'llm-only',
   'static-router',
 ];
@@ -211,16 +213,32 @@ export interface EscalationPolicyConfig {
    * considered, as long as it is not repeating the identical failure. Default: 1
    */
   verifyRetries?: number;
+  /**
+   * Escalation ladder, lowest rung first. Default: ['slm', 'mid', 'llm'] with
+   * rungs no provider serves dropped, so a two-model setup is ['slm', 'llm'].
+   * CONSULT asks the next rung; HANDOFF moves to the next rung; reasoning
+   * breakdowns (repeated malformed output, give-up with no progress) skip to the top.
+   */
+  ladder?: ModelTier[];
+  /**
+   * Failures are counted within the last N steps of the current rung. "Stuck"
+   * means failures concentrated recently, not a total accumulated over a long
+   * task that is otherwise progressing. Default: 6
+   */
+  failureWindow?: number;
 }
 
 // ── Reporting ────────────────────────────────────────────────────────
 
 export interface TierUsage {
   slmTokens: number;
+  midTokens: number;
   llmTokens: number;
   slmCostUsd: number;
+  midCostUsd: number;
   llmCostUsd: number;
   slmCalls: number;
+  midCalls: number;
   llmCalls: number;
 }
 
@@ -259,6 +277,8 @@ export interface TrajectoryReport {
   estimatedLlmOnlyCostUsd?: number;
   latencyMs: number;
   slmTokens: number;
+  /** Tokens spent at the optional middle rung */
+  midTokens?: number;
   llmTokens: number;
   consultations: number;
   handoffs: number;

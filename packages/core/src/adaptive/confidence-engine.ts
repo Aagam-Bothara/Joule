@@ -54,7 +54,10 @@ export class ConfidenceEngine {
   }
 
   compute(state: ExecutionState, budget: BudgetUsage): Confidence {
-    const steps = state.completedSteps;
+    // Rung-local: after a handoff the new model is judged on its own steps and
+    // failures, not on the record of the model it replaced.
+    const since = state.handoffAtStep ?? -1;
+    const steps = state.completedSteps.filter(s => s.stepIndex > since);
     const last = steps[steps.length - 1];
 
     // Tool success: outcome of the most recent action.
@@ -77,8 +80,8 @@ export class ConfidenceEngine {
     }).length;
     const progress = (good + 0.5 * (PROGRESS_WINDOW - window.length)) / PROGRESS_WINDOW;
 
-    // Repeated failure: same signature seen more than once.
-    const repeats = maxRepeatedFailure(state);
+    // Repeated failure: same signature seen more than once at this rung.
+    const repeats = maxRepeatedFailure(state, since);
     const repeatedFailure = repeats <= 1 ? 0 : repeats === 2 ? 0.5 : 1;
 
     // Contradiction: the tool said success but verification disagreed.

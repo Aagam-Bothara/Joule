@@ -69,6 +69,7 @@ export function buildTrajectoryReport(
     estimatedLlmOnlyCostUsd: estimateLlmOnly(tier, opts.llmPricePerToken),
     latencyMs: Math.round(trace.totalDurationMs ?? 0),
     slmTokens: tier.slmTokens,
+    midTokens: tier.midTokens,
     llmTokens: tier.llmTokens,
     consultations: state.consultations,
     handoffs: state.handoffs,
@@ -144,6 +145,7 @@ export function buildTrajectoryFromTrace(trace: ExecutionTrace): TrajectoryRepor
     estimatedLlmOnlyCostUsd: estimateLlmOnly(tier, end?.data.llmPricePerToken as number | undefined),
     latencyMs: Math.round(trace.totalDurationMs ?? 0),
     slmTokens: tier.slmTokens,
+    midTokens: tier.midTokens,
     llmTokens: tier.llmTokens,
     consultations: consults.length,
     handoffs: handoffs.length,
@@ -161,7 +163,7 @@ export function buildTrajectoryFromTrace(trace: ExecutionTrace): TrajectoryRepor
 export function renderTrajectory(report: TrajectoryReport): string {
   const lines: string[] = [];
   lines.push(`Task ${report.taskId}  mode=${report.mode}  status=${report.status}`);
-  lines.push(`${report.steps[0]?.tier === ModelTier.LLM ? 'LLM' : 'SLM'} start`);
+  lines.push(`${(report.steps[0]?.tier ?? ModelTier.SLM).toUpperCase()} start`);
   lines.push('│');
   const consultsByStep = new Map(report.consults.map(c => [c.step, c]));
   report.steps.forEach((s, i) => {
@@ -175,7 +177,8 @@ export function renderTrajectory(report: TrajectoryReport): string {
       lines.push(`│     → CONSULT ${c ? `${c.model}  ${c.tokens.toLocaleString()} tok  $${c.costUsd.toFixed(4)}` : ''}`);
       if (c?.question) lines.push(`│       q: ${truncate(c.question, 70)}`);
     } else if (s.action === 'handoff') {
-      lines.push(`│     → HANDOFF to LLM  (${truncate(s.reason, 60)})`);
+      const next = report.steps[i + 1];
+      lines.push(`│     → HANDOFF to ${(next?.tier ?? ModelTier.LLM).toUpperCase()}  (${truncate(s.reason, 60)})`);
     } else if (s.action === 'abort') {
       lines.push(`│     → ABORT  (${truncate(s.reason, 60)})`);
     }
@@ -183,6 +186,7 @@ export function renderTrajectory(report: TrajectoryReport): string {
   if (report.status === 'completed') lines.push('└─ Complete');
   lines.push('');
   lines.push(`SLM tokens:          ${report.slmTokens.toLocaleString()}`);
+  if (report.midTokens) lines.push(`MID tokens:          ${report.midTokens.toLocaleString()}`);
   lines.push(`LLM tokens:          ${report.llmTokens.toLocaleString()}`);
   lines.push(`Total cost:          $${report.costUsd.toFixed(4)}`);
   if (report.estimatedLlmOnlyCostUsd !== undefined) {
@@ -194,12 +198,12 @@ export function renderTrajectory(report: TrajectoryReport): string {
 }
 
 function estimateLlmOnly(
-  tier: { slmTokens: number; llmTokens: number; llmCostUsd: number },
+  tier: { slmTokens: number; midTokens?: number; llmTokens: number; llmCostUsd: number },
   fallbackPricePerToken?: number,
 ): number | undefined {
   const perToken = tier.llmTokens > 0 ? tier.llmCostUsd / tier.llmTokens : fallbackPricePerToken;
   if (perToken === undefined || !Number.isFinite(perToken)) return undefined;
-  return round(tier.llmCostUsd + tier.slmTokens * perToken, 6);
+  return round(tier.llmCostUsd + (tier.slmTokens + (tier.midTokens ?? 0)) * perToken, 6);
 }
 
 function describeDecision(d: EscalationDecision): string {

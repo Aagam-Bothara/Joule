@@ -75,8 +75,9 @@ export function renderReport(report: HarnessReport): string {
 async function main(): Promise<void> {
   const live = process.argv.includes('--live');
   const json = process.argv.includes('--json');
-  const workload = (arg('--workload') as 'live' | 'mbpp' | 'humaneval' | undefined) ?? (live ? 'live' : 'mock');
+  const workload = (arg('--workload') as 'live' | 'mbpp' | 'humaneval' | 'mbpp-bundle' | undefined) ?? (live ? 'live' : 'mock');
   const n = arg('--n') ? Number(arg('--n')) : undefined;
+  const bundle = arg('--bundle') ? Number(arg('--bundle')) : undefined;
   const offset = arg('--offset') ? Number(arg('--offset')) : undefined;
   const repeats = arg('--repeats') ? Number(arg('--repeats')) : undefined;
   const resumeFile = arg('--resume');
@@ -96,7 +97,7 @@ async function main(): Promise<void> {
   let models: HarnessReport['models'];
   if (live) {
     const r = await runLiveBenchmarks(strategies, tasks, {
-      workload: workload === 'mbpp' ? 'mbpp' : workload === 'humaneval' ? 'humaneval' : 'live', n, offset, repeats, resume,
+      workload: workload === 'mbpp' ? 'mbpp' : workload === 'humaneval' ? 'humaneval' : workload === 'mbpp-bundle' ? 'mbpp-bundle' : 'live', n, offset, repeats, resume, bundle,
       onCheckpoint: rs => writeFileSync(checkpointFile, JSON.stringify({ partial: true, workload, label, tasks: rs }, null, 2)),
     });
     reports = r.reports;

@@ -57,7 +57,9 @@ export class ModelRouter {
     const tier = this.decideTier(purpose, envelope, context);
     const providerPriority = tier === ModelTier.SLM
       ? this.config.providerPriority.slm
-      : this.config.providerPriority.llm;
+      : tier === ModelTier.MID
+        ? (this.config.providerPriority.mid ?? this.config.providerPriority.llm)
+        : this.config.providerPriority.llm;
 
     // Collect all available candidates
     const candidates: ProviderCandidate[] = [];

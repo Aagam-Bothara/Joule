@@ -5,9 +5,10 @@ import { ModelTier, MODEL_PRICING, type ExecutionMode, type ModelProviderName } 
 import { LIVE_WORKLOADS } from '../workloads/live.js';
 import { loadMbpp } from '../workloads/mbpp.js';
 import { loadHumanEval } from '../workloads/humaneval.js';
+import { loadMbppBundles } from '../workloads/mbpp-bundle.js';
 import { STRATEGIES } from '../strategies/index.js';
 import { runStrategy } from './run-strategy.js';
-import type { GateContext, StrategyName, TaskReport, Workload } from '../types.js';
+import type { GateContext, Strategy, StrategyName, TaskReport, Workload } from '../types.js';
 
 /**
  * Model pair selection: `JOULE_BENCH_SLM` / `JOULE_BENCH_LLM` as `<provider>:<model>`.
@@ -28,9 +29,11 @@ function parseRef(value: string | undefined, fallback: ModelRef): ModelRef {
 const registryName = (p: ModelRef['provider']): ModelProviderName => (p === 'openrouter' ? 'openai' : p);
 
 export interface LiveRunOptions {
-  workload: 'live' | 'mbpp' | 'humaneval';
+  workload: 'live' | 'mbpp' | 'humaneval' | 'mbpp-bundle';
   n?: number;
   offset?: number;
+  /** Problems per task for the long-horizon bundle workload. Default 4 */
+  bundle?: number;
   /** Run slm-only this many times per task to estimate P(SLM solves task). Default 1 */
   repeats?: number;
   /** Task reports from an earlier (partial) run; matching (task, strategy, repeat) runs are skipped */
@@ -42,14 +45,17 @@ export interface LiveRunOptions {
 export async function runLiveBenchmarks(strategyNames: StrategyName[], taskIds?: string[], options: LiveRunOptions = { workload: 'live' }): Promise<{ reports: TaskReport[]; models: { slm: string; llm: string } }> {
   const slm = parseRef(process.env.JOULE_BENCH_SLM, { provider: 'google', model: 'gemini-2.5-flash' });
   const llm = parseRef(process.env.JOULE_BENCH_LLM, { provider: 'google', model: 'gemini-2.5-pro' });
-  const providers = buildProviders(slm, llm);
-  process.stderr.write(`Models: SLM=${slm.provider}:${slm.model}  LLM=${llm.provider}:${llm.model}\n`);
+  const mid = process.env.JOULE_BENCH_MID ? parseRef(process.env.JOULE_BENCH_MID, llm) : undefined;
+  const providers = buildProviders(slm, llm, mid);
+  process.stderr.write(`Models: SLM=${slm.provider}:${slm.model}${mid ? `  MID=${mid.provider}:${mid.model}` : ''}  LLM=${llm.provider}:${llm.model}\n`);
 
   let workloads: Workload[] = options.workload === 'mbpp'
     ? loadMbpp(options.n ?? 30, options.offset ?? 0)
     : options.workload === 'humaneval'
       ? loadHumanEval(options.n ?? 164, options.offset ?? 0)
-      : LIVE_WORKLOADS;
+      : options.workload === 'mbpp-bundle'
+        ? loadMbppBundles(options.n ?? 30, options.bundle ?? 4, options.offset ?? 0)
+        : LIVE_WORKLOADS;
   if (taskIds) workloads = workloads.filter(w => taskIds.includes(w.id));
 
   const registry = new ModelProviderRegistry();
@@ -77,19 +83,25 @@ export async function runLiveBenchmarks(strategyNames: StrategyName[], taskIds?:
     },
   };
 
-  const createJoule = async (_workload: Workload, _mode: ExecutionMode): Promise<Joule> => {
+  const createJoule = async (workload: Workload, _mode: ExecutionMode, strategy: Strategy): Promise<Joule> => {
+    const escalation = { ...(workload.policy ?? {}), ...(strategy.ladder ? { ladder: strategy.ladder } : {}) };
     const joule = new Joule({
       routing: {
         preferLocal: false,
         preferEfficientModels: false,
         slmConfidenceThreshold: 0.6,
         complexityThreshold: 0.7,
-        providerPriority: { slm: [registryName(slm.provider)], llm: [registryName(llm.provider)] },
+        providerPriority: {
+          slm: [registryName(slm.provider)],
+          ...(mid ? { mid: [registryName(mid.provider)] } : {}),
+          llm: [registryName(llm.provider)],
+        },
+        ...(Object.keys(escalation).length > 0 ? { escalation: escalation as any } : {}),
       },
       logging: { level: 'error', traceOutput: 'memory' },
     });
     await joule.initialize();
-    for (const p of buildProviders(slm, llm).values()) joule.providers.register(p);
+    for (const p of buildProviders(slm, llm, mid).values()) joule.providers.register(p);
     joule.registerTool(fileReadTool);
     joule.registerTool(fileWriteTool);
     joule.registerTool(shellExecTool);
@@ -129,19 +141,20 @@ export async function runLiveBenchmarks(strategyNames: StrategyName[], taskIds?:
     }
     options.onCheckpoint?.(reports);
   }
-  return { reports, models: { slm: `${slm.provider}:${slm.model}`, llm: `${llm.provider}:${llm.model}` } };
+  return { reports, models: { slm: `${slm.provider}:${slm.model}`, llm: `${llm.provider}:${llm.model}`, ...(mid ? { mid: `${mid.provider}:${mid.model}` } : {}) } };
 }
 
 /** One provider instance per registry name, carrying whichever tier models it serves. */
-function buildProviders(slm: ModelRef, llm: ModelRef): Map<ModelProviderName, ModelProvider> {
+function buildProviders(slm: ModelRef, llm: ModelRef, mid?: ModelRef): Map<ModelProviderName, ModelProvider> {
   const out = new Map<ModelProviderName, ModelProvider>();
   const key = (env: string) => process.env[`JOULE_${env}`] ?? process.env[env];
   const refsFor = (name: ModelProviderName) => ({
     slmModel: registryName(slm.provider) === name ? slm.model : undefined,
+    midModel: mid && registryName(mid.provider) === name ? mid.model : undefined,
     llmModel: registryName(llm.provider) === name ? llm.model : undefined,
   });
 
-  for (const ref of [slm, llm]) {
+  for (const ref of mid ? [slm, mid, llm] : [slm, llm]) {
     const name = registryName(ref.provider);
     if (out.has(name)) continue;
     const models = refsFor(name);

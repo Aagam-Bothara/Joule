@@ -67,6 +67,7 @@ providers:
 | `apiKey`   | string  | API key for the provider                     |
 | `models.slm` | string | Model used for low-complexity tasks         |
 | `models.llm` | string | Model used for high-complexity tasks        |
+| `models.mid` | string | Optional middle rung of the escalation ladder (an efficient large model) |
 | `enabled`  | boolean | Whether this provider is active              |
 
 ---
@@ -140,7 +141,7 @@ routing:
   energyWeight: 0.3
   maxReplanDepth: 2
   # Adaptive execution (SLM-first step agent + escalation policy)
-  defaultMode: adaptive        # adaptive (default) | slm-only | llm-only | static-router
+  defaultMode: adaptive        # adaptive (default) | slm-only | mid-only | llm-only | static-router
   escalation:
     maxSteps: 25
     consultThreshold: 0.55
@@ -159,6 +160,7 @@ routing:
 | `complexityThreshold`     | number   | `0.7`   | Score above which LLM is used                  |
 | `providerPriority.slm`    | string[] | --      | Ordered list of providers for SLM tasks        |
 | `providerPriority.llm`    | string[] | --      | Ordered list of providers for LLM tasks        |
+| `providerPriority.mid`    | string[] | same as llm | Ordered list of providers for the middle rung |
 | `preferEfficientModels`   | boolean  | `false` | Factor energy efficiency into routing          |
 | `energyWeight`            | number   | `0.3`   | Weight given to energy cost during routing      |
 | `maxReplanDepth`          | number   | `2`     | Maximum re-planning attempts on failure (static-router) |
@@ -172,6 +174,8 @@ routing:
 | `escalation.stallSteps`   | number   | `3`     | Steps without verified progress before CONSULT |
 | `escalation.llmJudge`     | boolean  | `false` | Allow `llm_judge` step verification (non-deterministic) |
 | `escalation.verifyRetries` | number  | `1`     | Verification failures the agent may retry alone before CONSULT, unless it repeats the identical failure |
+| `escalation.ladder`       | string[] | all available of `slm, mid, llm` | Rungs adaptive execution may use, lowest first; consult and handoff climb one rung, reasoning breakdowns skip to the top |
+| `escalation.failureWindow` | number | `6`    | Failures count only within the last N steps of the current rung, so a long task that keeps progressing is not treated as stuck |
 
 ---
 

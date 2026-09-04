@@ -165,6 +165,58 @@ describe('RuleBasedEscalationPolicy', () => {
     expect(policy.evaluate(input(s)).action).toBe('abort');
   });
 
+  it('after a handoff to a middle rung, the inherited failures do not trigger the next handoff', () => {
+    const s = state('adaptive', ModelTier.MID);
+    for (let i = 0; i < 3; i++) recordFailure(s, { toolName: 'tool', message: `slm failure ${i}`, kind: 'tool_error', step: i });
+    s.handoffs = 1;
+    s.handoffAtStep = 2;
+    s.step = 3;
+    // The middle rung's first step succeeds: it must be allowed to keep working.
+    recordStep(s, step({ stepIndex: 3, success: true, verified: true }));
+    const d = policy.evaluate(input(s, { atTopRung: false }));
+    expect(d.action).toBe('continue');
+    // Its own failure wave, however, still escalates.
+    for (let i = 0; i < 3; i++) recordFailure(s, { toolName: 'tool', message: `mid failure ${i}`, kind: 'tool_error', step: 4 + i });
+    s.step = 7;
+    expect(policy.evaluate(input(s, { atTopRung: false })).action).toBe('handoff');
+  });
+
+  it('a test run that repeats the previous verified result is not a second failure', () => {
+    const s = state();
+    // write (verified 3/12) then run tests (3/12 again), three times over with rising scores.
+    const scores = [0.25, 0.5, 0.75];
+    let idx = 0;
+    for (const score of scores) {
+      recordStep(s, step({ stepIndex: idx, toolName: 'file_write', success: true, verified: false, verifyScore: score }));
+      recordFailure(s, { toolName: 'file_write', message: `verification: ${score * 12}/12 tests passed`, kind: 'verification_failed', step: idx });
+      idx++;
+      recordStep(s, step({ stepIndex: idx, toolName: 'shell_exec', success: true, verified: false, verifyScore: score }));
+      recordFailure(s, { toolName: 'shell_exec', message: `verification: ${score * 12}/12 tests passed`, kind: 'verification_failed', step: idx });
+      idx++;
+      s.step = idx;
+      expect(policy.evaluate(input(s)).action).toBe('continue');
+    }
+  });
+
+  it('failures spread over a long, progressing run do not add up to a handoff', () => {
+    const s = state();
+    // 20 steps: a failure every 5 steps, successes between — four failures in total, never three within the window.
+    for (let i = 0; i < 20; i++) {
+      const fail = i % 5 === 4;
+      recordStep(s, step({ stepIndex: i, success: !fail, verified: fail ? undefined : true }));
+      if (fail) recordFailure(s, { toolName: 'tool', message: `error ${i}`, kind: 'tool_error', step: i });
+      s.step = i + 1;
+      expect(policy.evaluate(input(s)).action).toBe('continue');
+    }
+    // Three failures in the last four steps: stuck.
+    for (let i = 20; i < 23; i++) {
+      recordStep(s, step({ stepIndex: i, success: false }));
+      recordFailure(s, { toolName: 'tool', message: `error ${i}`, kind: 'tool_error', step: i });
+      s.step = i + 1;
+    }
+    expect(policy.evaluate(input(s)).action).toBe('handoff');
+  });
+
   it('aborts on impossible tool requirements and when tokens for another turn are gone', () => {
     const s = state();
     recordFailure(s, { toolName: 'nope', message: 'Tool not found: nope', kind: 'missing_tool' });
@@ -190,6 +242,25 @@ describe('RuleBasedEscalationPolicy', () => {
     recordFailure(s, { toolName: 'shell_exec', message: 'verification: 3/5 tests passed', kind: 'verification_failed' });
     const d = policy.evaluate(input(s));
     expect(['consult', 'handoff']).toContain(d.action);
+  });
+
+  it('incremental progress (rising pass fraction across test runs) does not count toward the failure limit', () => {
+    const s = state();
+    // write, test 3/12, write, test 6/12, write, test 9/12: three "failed" verifications, all progress.
+    const scores = [0.25, 0.5, 0.75];
+    for (let i = 0; i < 3; i++) {
+      recordStep(s, step({ stepIndex: 2 * i, toolName: 'file_write' }));
+      recordStep(s, step({ stepIndex: 2 * i + 1, toolName: 'shell_exec', success: true, verified: false, verifyScore: scores[i] }));
+      recordFailure(s, { toolName: 'shell_exec', message: `verification: ${scores[i] * 12}/12 tests passed`, kind: 'verification_failed', step: 2 * i + 1 });
+      s.step = 2 * i + 2;
+      expect(policy.evaluate(input(s)).action).toBe('continue');
+    }
+    // Another attempt (a write, then tests) that stays at 9/12 is no longer progress.
+    recordStep(s, step({ stepIndex: 6, toolName: 'file_write' }));
+    recordStep(s, step({ stepIndex: 7, toolName: 'shell_exec', success: true, verified: false, verifyScore: 0.75 }));
+    recordFailure(s, { toolName: 'shell_exec', message: 'verification: 9/12 tests passed', kind: 'verification_failed', step: 7 });
+    s.step = 8;
+    expect(['consult', 'handoff']).toContain(policy.evaluate(input(s)).action);
   });
 
   it('parses pass fractions from test output', async () => {
@@ -304,6 +375,6 @@ describe('Budget and trace additions', () => {
       id: 's', traceId: 't', name: 'root', startTime: 0, events: [ev('slm', 100, 0.001), ev('llm', 50, 0.01)],
       children: [{ id: 'c', traceId: 't', name: 'child', startTime: 0, events: [ev('slm', 20, 0.0002)], children: [] }],
     }]);
-    expect(usage).toEqual({ slmTokens: 120, llmTokens: 50, slmCostUsd: 0.0012, llmCostUsd: 0.01, slmCalls: 2, llmCalls: 1 });
+    expect(usage).toEqual({ slmTokens: 120, midTokens: 0, llmTokens: 50, slmCostUsd: 0.0012, midCostUsd: 0, llmCostUsd: 0.01, slmCalls: 2, midCalls: 0, llmCalls: 1 });
   });
 });

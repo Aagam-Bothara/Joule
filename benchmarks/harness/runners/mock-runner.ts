@@ -3,7 +3,7 @@ import type { ExecutionMode } from '@joule/shared';
 import { MOCK_WORKLOADS, scriptedProvider } from '../workloads/mock.js';
 import { STRATEGIES, MOCK_STRATEGIES } from '../strategies/index.js';
 import { runStrategy } from './run-strategy.js';
-import type { StrategyName, TaskReport, Workload } from '../types.js';
+import type { Strategy, StrategyName, TaskReport, Workload } from '../types.js';
 
 /**
  * Mock runner: the real Joule engine, tools and prompts; only the model is
@@ -16,7 +16,7 @@ export async function runMockBenchmarks(strategyNames: StrategyName[], taskIds?:
   const workloads = taskIds ? MOCK_WORKLOADS.filter(w => taskIds.includes(w.id)) : MOCK_WORKLOADS;
   const reports: TaskReport[] = [];
 
-  const createJoule = async (workload: Workload, _mode: ExecutionMode): Promise<Joule> => {
+  const createJoule = async (workload: Workload, _mode: ExecutionMode, _strategy: Strategy): Promise<Joule> => {
     const joule = new Joule({
       providers: { ollama: { enabled: false, baseUrl: 'http://localhost:11434', models: { slm: 'bench-slm' } } } as any,
       routing: {

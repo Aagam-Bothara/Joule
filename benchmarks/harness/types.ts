@@ -26,17 +26,23 @@ export interface Workload {
   verify?: (result: TaskResult) => boolean;
   /** What a judge / self-verifier should look at (defaults to the result text) */
   answerForJudge?: (result: TaskResult) => string;
+  /** Escalation policy overrides for this workload (e.g. a higher step cap for long-horizon tasks) */
+  policy?: { maxSteps?: number; maxConsultations?: number; maxFailuresBeforeHandoff?: number; failureWindow?: number };
+  /** Budget envelope for this workload (default: the 'high' preset) */
+  budget?: import('@joule/shared').Task['budget'];
 }
 
 export type StrategyName =
   | 'slm-only'
+  | 'mid-only'
   | 'llm-only'
   | 'static-router'
   | 'naive-cascade'
   | 'frugal-cascade'
   | 'automix'
   | 'pre-router'
-  | 'joule-adaptive';
+  | 'joule-adaptive'
+  | 'joule-ladder';
 
 /**
  * How a multi-stage strategy decides to move to the next mode:
@@ -54,6 +60,8 @@ export interface Strategy {
   escalateOn?: EscalationTrigger;
   /** One cheap classification call decides the mode before running (RouteLLM-style) */
   preRoute?: boolean;
+  /** Escalation ladder for adaptive runs; omitted = engine default (all available rungs) */
+  ladder?: Array<'slm' | 'mid' | 'llm'>;
   description: string;
 }
 
@@ -80,8 +88,10 @@ export interface TaskReport {
   estimatedLlmOnlyCost?: number;
   latencyMs: number;
   slmTokens: number;
+  /** Tokens at the optional middle rung */
+  midTokens?: number;
   llmTokens: number;
-  /** Did this strategy spend any LLM-tier tokens on the task? */
+  /** Did this strategy use any rung above the small model (middle or top)? */
   llmUsed: boolean;
   consultations: number;
   handoffs: number;
@@ -144,7 +154,7 @@ export interface HarnessReport {
   timestamp: string;
   runner: 'mock' | 'live';
   workload: string;
-  models?: { slm: string; llm: string };
+  models?: { slm: string; mid?: string; llm: string };
   strategies: StrategySummary[];
   escalation: EscalationMetrics[];
   baselines: { slmOnlySuccess: number | null; llmOnlySuccess: number | null; slmOnlyRepeats: number };

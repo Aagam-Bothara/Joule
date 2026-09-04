@@ -14,11 +14,13 @@ import { ModelProvider, type StreamChunk } from '../provider.js';
 
 export class OpenAIProvider extends ModelProvider {
   readonly name: ModelProviderName = 'openai';
-  readonly supportedTiers = [ModelTier.SLM, ModelTier.LLM];
+  readonly supportedTiers: ModelTier[] = [ModelTier.SLM, ModelTier.LLM];
 
   private client: OpenAI;
   private slmModel: string;
   private llmModel: string;
+  /** Optional middle rung (efficient large model) for the escalation ladder */
+  private midModel?: string;
 
   private jsonMode: boolean;
 
@@ -27,12 +29,14 @@ export class OpenAIProvider extends ModelProvider {
    * vLLM, LM Studio). `jsonMode: false` skips `response_format` for endpoints
    * or models that reject it; prompts still ask for JSON.
    */
-  constructor(config: { apiKey: string; slmModel?: string; llmModel?: string; baseUrl?: string; jsonMode?: boolean; defaultHeaders?: Record<string, string> }) {
+  constructor(config: { apiKey: string; slmModel?: string; midModel?: string; llmModel?: string; baseUrl?: string; jsonMode?: boolean; defaultHeaders?: Record<string, string> }) {
     super();
     this.client = new OpenAI({ apiKey: config.apiKey, ...(config.baseUrl ? { baseURL: config.baseUrl } : {}), ...(config.defaultHeaders ? { defaultHeaders: config.defaultHeaders } : {}) });
     this.jsonMode = config.jsonMode ?? true;
     this.slmModel = config.slmModel ?? 'gpt-4o-mini';
     this.llmModel = config.llmModel ?? 'gpt-4o';
+    this.midModel = config.midModel;
+    if (this.midModel) this.supportedTiers = [ModelTier.SLM, ModelTier.MID, ModelTier.LLM];
   }
 
   async isAvailable(): Promise<boolean> {
@@ -168,6 +172,16 @@ export class OpenAIProvider extends ModelProvider {
         energyPerInputToken: (MODEL_ENERGY[this.slmModel]?.inputWhPerMillion ?? 0) / 1_000_000,
         energyPerOutputToken: (MODEL_ENERGY[this.slmModel]?.outputWhPerMillion ?? 0) / 1_000_000,
       },
+      ...(this.midModel ? [{
+        id: this.midModel,
+        name: this.midModel,
+        tier: ModelTier.MID,
+        contextWindow: 200_000,
+        costPerInputToken: (MODEL_PRICING[this.midModel]?.inputPerMillion ?? 1.0) / 1_000_000,
+        costPerOutputToken: (MODEL_PRICING[this.midModel]?.outputPerMillion ?? 4.0) / 1_000_000,
+        energyPerInputToken: (MODEL_ENERGY[this.midModel]?.inputWhPerMillion ?? 0) / 1_000_000,
+        energyPerOutputToken: (MODEL_ENERGY[this.midModel]?.outputWhPerMillion ?? 0) / 1_000_000,
+      }] : []),
       {
         id: this.llmModel,
         name: 'GPT-4o',

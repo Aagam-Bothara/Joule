@@ -374,3 +374,40 @@ EscalationPolicy
 
 Same engine, same tools, same prompts; only the routing strategy changes, which
 is what makes `benchmarks/harness` a fair experiment.
+
+### The escalation ladder
+
+Tiers form a ladder: `slm` (default executor), an optional `mid` rung (an efficient large model
+such as Gemini Flash or GPT-4o-mini), and `llm` (frontier). Configure the middle rung per
+provider with `models.mid`, and its provider order with `routing.providerPriority.mid`.
+
+- CONSULT asks the next rung up; HANDOFF moves execution to the next rung up.
+- A reasoning breakdown (repeated unparseable output, or giving up before any step succeeded)
+  skips straight to the top rung, since the middle rung would only burn a hop.
+- Rungs no provider serves are dropped, so a two-model setup behaves exactly as before.
+- `routing.escalation.ladder` restricts the rungs (for example `['slm', 'llm']` to compare
+  two-tier and three-tier on the same models). `mid-only` pins execution to the middle rung.
+- Each handoff consumes one escalation unit from the budget envelope; the `medium` preset
+  allows one, `high` allows five.
+
+Why: on the benchmarks, the middle rung resolved almost everything the small model could not,
+and the frontier model was rarely needed. Escalating to the frontier directly costs four to
+eight times more per rescued task than escalating to the efficient model first.
+
+### What counts as a failure
+
+Long, incremental tasks exposed three ways a naive failure count misreads progress, so the
+policy now applies these rules before any threshold:
+
+- **Progress is not failure.** A verification that fails but passes more checks than the
+  previous verified attempt ("3/12", then "6/12") is progress and does not count toward the
+  failure limit. The confidence engine's progress signal and the stall rule use the same view.
+- **A re-observation is not a second failure.** A test run right after a verified write that
+  reports the same pass fraction is the same result seen twice; it is collapsed into one attempt
+  for the retry budget and the failure count.
+- **Recent, not cumulative.** Failures count within a window of the last `failureWindow` steps
+  (default 6) of the current rung. Four failures spread over twenty otherwise-progressing steps
+  are not "stuck"; three in the last four are.
+- **Rung-local after a handoff.** The model that takes over is judged on its own steps,
+  failures and consultations; the record of the model it replaced does not trigger its next
+  handoff, which would otherwise happen on its first turn.

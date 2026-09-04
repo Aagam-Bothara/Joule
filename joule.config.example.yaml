@@ -44,6 +44,7 @@ routing:
   # Execution mode when a task does not set one:
   #   adaptive      SLM-first step agent + escalation policy (continue / consult / handoff / abort) — default
   #   slm-only      step agent pinned to the small model
+  #   mid-only      step agent pinned to the middle rung (models.mid)
   #   llm-only      step agent pinned to the large model
   #   static-router legacy plan-then-execute pipeline
   defaultMode: adaptive
@@ -57,6 +58,7 @@ routing:
     consultMaxTokens: 800
     stallSteps: 3
     verifyRetries: 1
+    # ladder: [slm, mid, llm]   # rungs to use; a provider's models.mid enables the middle rung
 
 # Energy tracking configuration
 energy:

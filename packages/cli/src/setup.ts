@@ -85,6 +85,7 @@ export async function setupJoule(joule: Joule): Promise<void> {
     joule.providers.register(new AnthropicProvider({
       apiKey: config.providers.anthropic.apiKey,
       slmModel: config.providers.anthropic.models.slm,
+      midModel: config.providers.anthropic.models.mid,
       llmModel: config.providers.anthropic.models.llm,
     }));
   }
@@ -93,6 +94,7 @@ export async function setupJoule(joule: Joule): Promise<void> {
     joule.providers.register(new OpenAIProvider({
       apiKey: config.providers.openai.apiKey,
       slmModel: config.providers.openai.models.slm,
+      midModel: config.providers.openai.models.mid,
       llmModel: config.providers.openai.models.llm,
     }));
   }
@@ -101,6 +103,7 @@ export async function setupJoule(joule: Joule): Promise<void> {
     joule.providers.register(new GoogleProvider({
       apiKey: config.providers.google.apiKey,
       slmModel: config.providers.google.models.slm,
+      midModel: config.providers.google.models.mid,
       llmModel: config.providers.google.models.llm,
     }));
   }

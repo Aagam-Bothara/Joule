@@ -1,7 +1,16 @@
+/**
+ * Model tiers form a ladder. SLM is the default executor; MID is an optional
+ * efficient large model; LLM is the frontier tier. Adaptive execution climbs
+ * one rung at a time on evidence.
+ */
 export enum ModelTier {
   SLM = 'slm',
+  MID = 'mid',
   LLM = 'llm',
 }
+
+/** Rungs in ascending order of capability and cost. */
+export const TIER_ORDER: readonly ModelTier[] = [ModelTier.SLM, ModelTier.MID, ModelTier.LLM];
 
 export type ModelProviderName = 'ollama' | 'anthropic' | 'openai' | 'google';
 

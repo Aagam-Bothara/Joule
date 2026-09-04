@@ -6,6 +6,8 @@ import { frugalCascade } from './frugal-cascade.js';
 import { automix } from './automix.js';
 import { preRouter } from './pre-router.js';
 import { jouleAdaptive } from './joule-adaptive.js';
+import { jouleLadder } from './joule-ladder.js';
+import { midOnly } from './mid-only.js';
 import type { Strategy, StrategyName } from '../types.js';
 
 export const STRATEGIES: Record<StrategyName, Strategy> = {
@@ -17,6 +19,8 @@ export const STRATEGIES: Record<StrategyName, Strategy> = {
   'automix': automix,
   'pre-router': preRouter,
   'joule-adaptive': jouleAdaptive,
+  'joule-ladder': jouleLadder,
+  'mid-only': midOnly,
 };
 
 export const DEFAULT_STRATEGY_ORDER: StrategyName[] = [

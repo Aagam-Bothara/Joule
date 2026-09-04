@@ -431,3 +431,90 @@ spend: $2.63
 ```
 
 Joule matches the large model (96%) at 64% of its cost with 84% recall; the FrugalGPT-style cascade reaches 93% at 72%. With a small model this weak (34% alone), handoffs do the work (94% succeed) and consultations rarely suffice (22%).
+
+### Long-horizon bundles and the learned trigger
+
+```bash
+# 30 tasks of 4 MBPP problems each: "implement these functions in one module, all tests must pass"
+npx tsx benchmarks/harness/index.ts --live --workload mbpp-bundle --bundle 4 --n 30 --offset 30 \
+  --strategies slm-only,llm-only,frugal-cascade,joule-adaptive
+
+# Three-rung ladder: small -> efficient -> frontier (JOULE_BENCH_MID enables the middle rung)
+JOULE_BENCH_SLM=openrouter:meta-llama/llama-3.1-8b-instruct JOULE_BENCH_MID=google:gemini-2.5-flash \
+  JOULE_BENCH_LLM=openrouter:openai/gpt-4o npx tsx benchmarks/harness/index.ts --live --workload mbpp \
+  --offset 230 --n 50 --strategies slm-only,mid-only,llm-only,joule-adaptive,joule-ladder
+
+# Offline study: can a logistic model over the confidence signals beat the rules?
+python benchmarks/harness/learned-trigger.py --labels main-a,main-b,he-main
+```
+
+`joule-adaptive` is the two-tier policy (small → top); `joule-ladder` climbs small → middle → top.
+The bundle workload raises the step cap to 60 per task and reports test pass fractions, so a
+partial module counts as progress for the verifier. `learned-trigger.py` trains on every
+slm-only trajectory (the run outcome is a clean label for each step, since those runs never
+escalate), holds out 30% of tasks, and replays "escalate when P(success) < theta" against the
+same P(SLM) labels the rules are scored with.
+
+### Learned trigger: result (2026-09-04)
+
+`learned-trigger.py` on the main MBPP and HumanEval runs (1,092 slm-only trajectories over 364 tasks, 30% of tasks held out):
+
+| | AUC |
+|---|---:|
+| per decision point, predicting eventual small-model success | 0.89 |
+| at the first decision only | 0.51 |
+| at the second decision only | 0.89 |
+
+Replayed as a trigger on the held-out trajectories, the best threshold (0.3) gives precision 68% and
+recall 91%; the rule-based policy on the same tasks gives 69% and 90%. The signals carry no
+information before the first tool result and verifier outcome, and after it the rules already act
+on them. A better classifier over the same signals does not help; richer evidence at the step
+(the content of failing tests, the diff the agent made) is the next lever.
+
+### Three-rung ladder (2026-09-04)
+
+50 unseen MBPP problems (offset 230). Small = Llama 3.1 8B, middle = Gemini 2.5 Flash, top = GPT-4o. `joule-adaptive` is the two-tier policy (small → top); `joule-ladder` climbs small → middle → top on evidence, skipping the middle rung on reasoning breakdowns. Labels from a single slm-only run, so precision and recall are noisier than in the scaled run.
+
+```
+| strategy        | tasks | success | avg cost | gate cost | LLM used | avg SLM tok | avg LLM tok | avg latency | consults | handoffs |
+|-----------------|------:|--------:|---------:|----------:|---------:|------------:|------------:|------------:|---------:|---------:|
+| slm-only        |    50 |     62% |  $0.0004 |   $0.0000 |       0% |       19715 |           0 |     21367ms |        0 |        0 |
+| mid-only        |    50 |     96% |  $0.0061 |   $0.0000 |     100% |           0 |           0 |      7755ms |        0 |        0 |
+| llm-only        |    50 |     90% |  $0.0482 |   $0.0000 |     100% |           0 |       18180 |      8559ms |        0 |        0 |
+| joule-adaptive  |    50 |     86% |  $0.0190 |   $0.0000 |      50% |       21153 |        6630 |     23765ms |       24 |       13 |
+| joule-ladder    |    50 |     94% |  $0.0070 |   $0.0000 |      38% |       20295 |        1853 |     41698ms |       25 |       17 |
+
+Routing quality (ground truth from counterfactuals: slm-only 62% over 1 run(s)/task, llm-only 90%):
+| strategy        | success | cost / llm-only | escalated | needed | precision | soft prec. | wasted | recall | consult ok | handoff ok |
+|-----------------|--------:|----------------:|----------:|-------:|----------:|-----------:|-------:|-------:|-----------:|-----------:|
+| mid-only        |     96% |            0.13 |        50 |     14 |       28% |        38% |     31 |   100% |        n/a |        n/a |
+| joule-adaptive  |     86% |            0.39 |        25 |     14 |       44% |        64% |      9 |    79% |        50% |        46% |
+| joule-ladder    |     94% |            0.15 |        19 |     14 |       32% |        58% |      8 |    43% |        22% |        80% |
+
+Latency: avg 20629ms  p50 9238ms  p95 40498ms  max 1158874ms
+```
+
+The ladder reaches 94% at 15% of GPT-4o's cost; the two-tier policy 86% at 39%; GPT-4o alone 90%. The ladder used the middle rung on 18 tasks and the top rung on only 6, and 12 of its 15 handoffs succeeded (80%) against 6 of 13 (46%) when the small model handed straight to GPT-4o. Flash alone solves 96% for $0.006 on this slice, so the cheapest correct choice here is the middle model by itself; the ladder's value is reaching that outcome without knowing in advance which rung is enough. Spend for the run: $4.04, most of it the GPT-4o baseline.
+
+### Long-horizon bundles (2026-09-04)
+
+30 tasks of four MBPP problems each (problems 30 to 150 of the sanitized set), Llama 3.1 8B → Gemini 2.5 Flash, budget raised to 600k tokens and 60 tool calls, step cap 60. Trajectories run 8 to 15 steps on average (up to 40). Labels from a single slm-only run per task.
+
+```
+| strategy        | tasks | success | avg cost | gate cost | LLM used | avg SLM tok | avg LLM tok | avg latency | consults | handoffs |
+|-----------------|------:|--------:|---------:|----------:|---------:|------------:|------------:|------------:|---------:|---------:|
+| slm-only        |    30 |     20% |  $0.0023 |   $0.0000 |       0% |      112067 |           0 |     56057ms |        0 |        0 |
+| llm-only        |    30 |     53% |  $0.0286 |   $0.0000 |     100% |           0 |       79118 |     60723ms |        0 |        0 |
+| frugal-cascade  |    30 |     57% |  $0.0217 |   $0.0000 |      67% |       91374 |       54791 |     54910ms |        0 |        0 |
+| joule-adaptive  |    30 |     67% |  $0.0136 |   $0.0000 |      80% |       76454 |       33876 |     58995ms |       52 |       22 |
+
+Routing quality (ground truth from counterfactuals: slm-only 20% over 1 run(s)/task, llm-only 53%):
+| strategy        | success | cost / llm-only | escalated | needed | precision | soft prec. | wasted | recall | consult ok | handoff ok |
+|-----------------|--------:|----------------:|----------:|-------:|----------:|-----------:|-------:|-------:|-----------:|-----------:|
+| frugal-cascade  |     57% |            0.76 |        20 |     15 |       50% |        80% |      4 |    67% |        n/a |        n/a |
+| joule-adaptive  |     67% |            0.47 |        24 |     15 |       54% |        92% |      2 |    87% |         8% |        55% |
+
+Latency: avg 57671ms  p50 41397ms  p95 118174ms  max 1131185ms
+```
+
+Joule is the best strategy on both axes: 67% success at 47% of the large model's cost, against 57% at 76% for the FrugalGPT-style cascade and 53% for the large model alone. On long trajectories the small model's incremental work is worth keeping: Joule hands off with a partly built module and passing tests, so the large model finishes rather than restarts. Consultations rarely unblock the small model here (2 of 24), handoffs do (12 of 22). This run needed three policy rules that short tasks never exercised: rising test pass fractions count as progress, a test run that repeats a verified result is not a second failure, and failures are counted within a window of recent steps rather than over the whole run. Spend: $1.99.

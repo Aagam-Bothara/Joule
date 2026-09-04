@@ -42,6 +42,13 @@ An ordered rule set maps $(S, c)$ to one of four actions:
 Hard triggers precede soft thresholds: repeated malformed output, a give-up, or $k$ accumulated failures force a handoff; the same failure signature twice, a stall, or a verification failure that survives a retry without improvement triggers a consult; thresholds on $c$ apply only once two failures have accumulated.
 Every escalation is gated by the budget envelope (\S\ref{sec:budget}): a consult must fit in the remaining cost and tokens, and a handoff also consumes an escalation unit.
 
+\paragraph{Ladder.}
+Tiers form a ladder $\langle \text{slm}, \text{mid}, \text{llm} \rangle$ in which the optional middle rung is an efficient large model.
+\textsc{consult} asks the next rung up and \textsc{handoff} moves execution to it; a reasoning breakdown (repeated unparseable output, or a give-up before any step succeeded) skips to the top rung, since the middle rung would only burn a hop.
+After a handoff the policy is rung-local: the new model is judged on its own steps, failures, and consultations, not on the record of the model it replaced.
+Failures are counted within a window of recent steps, so a long task that keeps making verified progress is not mistaken for a stuck one.
+Rungs no provider serves are dropped, so a two-model deployment degrades to the two-tier policy.
+
 \paragraph{Why consult.}
 A handoff bills the remaining trajectory at large-model prices.
 A consult bills one question and one answer, and returns control to the small model.

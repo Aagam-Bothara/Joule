@@ -22,7 +22,7 @@ const SELF_VERIFY_SAMPLES = 3;
 export async function runStrategy(
   workload: Workload,
   strategy: Strategy,
-  createJoule: (workload: Workload, mode: ExecutionMode) => Promise<Joule>,
+  createJoule: (workload: Workload, mode: ExecutionMode, strategy: Strategy) => Promise<Joule>,
   gate?: GateContext,
   budget: Task['budget'] = 'high',
 ): Promise<TaskReport> {
@@ -55,11 +55,11 @@ export async function runStrategy(
   for (let i = 0; i < modes.length; i++) {
     const mode = modes[i];
     workload.setup?.();
-    const joule = await createJoule(workload, mode);
+    const joule = await createJoule(workload, mode, strategy);
     let result: TaskResult | undefined;
     const started = Date.now();
     try {
-      result = await joule.execute({ id: generateId('bench'), description: workload.description, budget, mode, createdAt: new Date().toISOString() });
+      result = await joule.execute({ id: generateId('bench'), description: workload.description, budget: workload.budget ?? budget, mode, createdAt: new Date().toISOString() });
     } catch (err) {
       acc.error = err instanceof Error ? err.message : String(err);
       acc.status = 'error';
@@ -79,6 +79,7 @@ export async function runStrategy(
     acc.cost += result.budgetUsed.costUsd;
     acc.latencyMs += result.trace.totalDurationMs ?? (Date.now() - started);
     acc.slmTokens += tier?.slmTokens ?? 0;
+    acc.midTokens = (acc.midTokens ?? 0) + (tier?.midTokens ?? 0);
     acc.llmTokens += tier?.llmTokens ?? 0;
     acc.consultations += t?.consultations ?? 0;
     acc.handoffs += t?.handoffs ?? 0;
@@ -115,7 +116,8 @@ export async function runStrategy(
     if (!escalate) break;
   }
 
-  acc.llmUsed = acc.llmTokens > 0;
+  // "Escalated" means any rung above the small model was used (middle or top).
+  acc.llmUsed = acc.llmTokens > 0 || (acc.midTokens ?? 0) > 0;
   return acc;
 }
 

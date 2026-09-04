@@ -29,6 +29,7 @@ import {
   type EscalationDecision,
   type EscalationPolicyConfig,
   type ExecutionState,
+  type StepResult,
 } from '@joule/shared';
 import { consultedAbout, lastFailure, maxRepeatedFailure } from './execution-state.js';
 
@@ -37,8 +38,10 @@ export interface PolicyInput {
   confidence: Confidence;
   /** What the agent itself asked for on this turn, if anything */
   agentRequest?: 'consult' | 'give_up' | 'malformed';
-  /** Whether an LLM tier provider is reachable at all */
+  /** Whether a higher rung of the ladder exists and is reachable from the current tier */
   llmAvailable: boolean;
+  /** True when the current tier is the top of the ladder (no rung above) */
+  atTopRung?: boolean;
   /** Escalation units left in the envelope (handoff needs one) */
   canEscalate: boolean;
   /** Continuous affordability check from BudgetManager */
@@ -59,6 +62,8 @@ export const DEFAULT_POLICY_CONFIG: Required<EscalationPolicyConfig> = {
   llmJudge: false,
   stallSteps: 3,
   verifyRetries: 1,
+  ladder: [ModelTier.SLM, ModelTier.MID, ModelTier.LLM],
+  failureWindow: 6,
 };
 
 export class RuleBasedEscalationPolicy {
@@ -91,9 +96,20 @@ export class RuleBasedEscalationPolicy {
   private propose(input: PolicyInput): { action: EscalationAction; reason: string } {
     const { state, confidence } = input;
     const cfg = this.config;
-    const failures = state.failures.length;
-    const repeats = maxRepeatedFailure(state);
+    // Only the current rung's own failures count: after a handoff the new model
+    // starts with a clean slate, otherwise the failures inherited from the rung
+    // below would trigger the next handoff on its first turn.
+    const since = Math.max(state.handoffAtStep ?? -1, state.step - cfg.failureWindow);
+    // ...and only recent ones: "stuck" means failures concentrated in the last
+    // few steps, not a count accumulated over a long, otherwise-progressing run.
+    const ownFailures = state.failures.filter(f => f.step > since);
+    // Failures that moved the verifier forward are progress, and a re-run that
+    // reports the same result is not a new failure; neither counts as being stuck.
+    const failures = Math.max(0, ownFailures.length - progressVerificationFailures(state, since) - duplicateVerificationFailures(state, since));
+    const repeats = maxRepeatedFailure(state, since);
     const last = lastFailure(state);
+    /** Occurrences of the latest failure's signature at this rung (Failure.count is global). */
+    const lastCount = last ? ownFailures.filter(f => f.signature === last.signature).length : 0;
     /** Did this turn end in a failure? Repeat/consult triggers only fire on a failing turn. */
     const failedNow = last !== undefined && last.step === state.step;
 
@@ -102,6 +118,7 @@ export class RuleBasedEscalationPolicy {
       return { action: 'abort', reason: 'budget: not enough tokens for another turn' };
     }
     if (last?.kind === 'missing_tool' && last.count >= 2) {
+      // Global on purpose: a tool that does not exist does not appear at a higher rung.
       return { action: 'abort', reason: `impossible tool requirement: ${last.toolName} is not available` };
     }
     if (state.step >= cfg.maxSteps) {
@@ -115,7 +132,7 @@ export class RuleBasedEscalationPolicy {
     if (failures >= cfg.maxFailuresBeforeHandoff) {
       return { action: 'handoff', reason: `${failures} failures (limit ${cfg.maxFailuresBeforeHandoff})` };
     }
-    if (last?.kind === 'malformed_action' && last.count >= 2) {
+    if (last?.kind === 'malformed_action' && lastCount >= 2) {
       return { action: 'handoff', reason: 'agent cannot produce a valid action' };
     }
     if (state.consultations >= cfg.maxConsultations && confidence.composite < cfg.consultThreshold) {
@@ -130,8 +147,8 @@ export class RuleBasedEscalationPolicy {
         ? { action: 'consult', reason: 'agent asked a focused question' }
         : { action: 'continue', reason: 'agent asked for help before gathering any evidence' };
     }
-    if (failedNow && last && last.count >= 2 && !consultedAbout(state, last.signature)) {
-      return { action: 'consult', reason: `same failure repeated x${last.count}: ${last.message}` };
+    if (failedNow && last && lastCount >= 2 && !consultedAbout(state, last.signature)) {
+      return { action: 'consult', reason: `same failure repeated x${lastCount}: ${last.message}` };
     }
     // Verification failures: the agent gets `verifyRetries` attempts of its own
     // first (a developer reruns tests after a fix). Consult only when the failures
@@ -172,8 +189,8 @@ export class RuleBasedEscalationPolicy {
   ): { action: EscalationAction; reason: string } {
     const { state } = input;
     const cfg = this.config;
-    const pinned = state.mode === 'slm-only' || state.mode === 'llm-only';
-    const atLlm = state.tier === ModelTier.LLM;
+    const pinned = state.mode === 'slm-only' || state.mode === 'mid-only' || state.mode === 'llm-only';
+    const atLlm = input.atTopRung ?? state.tier === ModelTier.LLM;
 
     if (action === 'continue' || action === 'abort') return { action, reason };
 
@@ -193,10 +210,10 @@ export class RuleBasedEscalationPolicy {
         // Failures at the handoff step itself belong to the SLM; count only the LLM's own.
         const sinceHandoff = state.failures.filter(f => f.step > (state.handoffAtStep ?? -1)).length;
         if (input.agentRequest === 'give_up' || sinceHandoff >= cfg.maxFailuresBeforeHandoff) {
-          return { action: 'abort', reason: `${reason} (already at LLM tier)` };
+          return { action: 'abort', reason: `${reason} (already at top tier)` };
         }
       }
-      return { action: 'continue', reason: `${reason} (already at LLM tier)` };
+      return { action: 'continue', reason: `${reason} (already at top tier)` };
     }
 
     // Budget-aware gating for adaptive mode at the SLM tier.
@@ -228,7 +245,9 @@ export class RuleBasedEscalationPolicy {
 
   private stalled(state: ExecutionState): boolean {
     const n = this.config.stallSteps;
-    const recent = state.completedSteps.slice(-n);
+    // Rung-local: steps before the last handoff belong to the previous model.
+    const since = state.handoffAtStep ?? -1;
+    const recent = state.completedSteps.filter(s => s.stepIndex > since).slice(-n);
     if (recent.length < n) return false;
     // A verification that failed but passed more checks than the previous one is progress.
     return recent.every((s, i) => {
@@ -239,24 +258,86 @@ export class RuleBasedEscalationPolicy {
   }
 }
 
-/** Consecutive most-recent steps whose verification failed. */
+/**
+ * Steps a verifier actually ran on, with re-observations collapsed: a failed
+ * verification that immediately follows another failed verification with the
+ * same pass fraction (a test run right after a verified write) is the same
+ * result seen twice, not a new attempt. Unverified steps such as plain file
+ * writes are skipped.
+ */
+function verifiedSteps(state: ExecutionState): StepResult[] {
+  const out: StepResult[] = [];
+  const all = state.completedSteps;
+  for (let i = 0; i < all.length; i++) {
+    const s = all[i];
+    if (s.verified === undefined) continue;
+    const prev = all[i - 1];
+    const duplicate = s.verified === false && prev?.verified === false
+      && s.verifyScore !== undefined && prev.verifyScore !== undefined && s.verifyScore === prev.verifyScore;
+    if (!duplicate) out.push(s);
+  }
+  return out;
+}
+
+/** Consecutive most-recent verified steps whose verification failed. */
 export function verifyFailStreak(state: ExecutionState): number {
+  const vs = verifiedSteps(state);
   let n = 0;
-  for (let i = state.completedSteps.length - 1; i >= 0; i--) {
-    if (state.completedSteps[i].verified === false) n++;
+  for (let i = vs.length - 1; i >= 0; i--) {
+    if (vs[i].verified === false) n++;
     else break;
   }
   return n;
 }
 
-/** Did the last failed verification pass more checks than the one before it? */
+/**
+ * Did the most recent failed verification pass more checks than the verified
+ * attempt before it? Compares verified attempts, so a file write between two
+ * test runs does not hide the progress.
+ */
 export function improvedOnLastRetry(state: ExecutionState): boolean {
-  const steps = state.completedSteps;
-  const last = steps[steps.length - 1];
-  const prev = steps[steps.length - 2];
+  const vs = verifiedSteps(state);
+  const last = vs[vs.length - 1];
+  const prev = vs[vs.length - 2];
   if (!last || !prev || last.verified !== false || prev.verified !== false) return false;
   if (last.verifyScore === undefined || prev.verifyScore === undefined) return false;
   return last.verifyScore > prev.verifyScore;
+}
+
+/**
+ * Verification failures that were progress: they passed more checks than the
+ * verified attempt before them. Building a module incrementally produces a run
+ * of these ("3/12", "6/12", "9/12"); they must not count toward the failure
+ * limit that forces a handoff.
+ */
+export function progressVerificationFailures(state: ExecutionState, sinceStep = -1): number {
+  const vs = verifiedSteps(state);
+  let n = 0;
+  for (let i = 1; i < vs.length; i++) {
+    const s = vs[i];
+    const prev = vs[i - 1];
+    if (s.stepIndex <= sinceStep) continue;
+    if (s.verified === false && s.verifyScore !== undefined && prev.verifyScore !== undefined && s.verifyScore > prev.verifyScore) n++;
+  }
+  return n;
+}
+
+/**
+ * Verification failures that merely re-observed the previous result: a test
+ * run right after a verified write, reporting the same pass fraction, is the
+ * same failure seen twice. It must not count as a second failure.
+ */
+export function duplicateVerificationFailures(state: ExecutionState, sinceStep = -1): number {
+  const steps = state.completedSteps;
+  let n = 0;
+  for (let i = 1; i < steps.length; i++) {
+    const s = steps[i];
+    const prev = steps[i - 1];
+    if (s.stepIndex <= sinceStep) continue;
+    if (s.verified !== false || prev.verified !== false) continue;
+    if (s.verifyScore !== undefined && prev.verifyScore !== undefined && s.verifyScore === prev.verifyScore) n++;
+  }
+  return n;
 }
 
 function stripUndefined<T extends object>(obj?: T): Partial<T> {
