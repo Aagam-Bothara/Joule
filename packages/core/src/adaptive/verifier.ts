@@ -11,9 +11,37 @@
  * separate judged results from deterministic ones.
  */
 
+import { execFile } from 'node:child_process';
 import type { StepResult, StepVerification } from '@joule/shared';
 import type { ToolRegistry } from '../tool-registry.js';
 import { stringifyOutput, truncate } from './execution-state.js';
+
+/**
+ * Cheap static check on a file the agent just wrote: does it parse? Today
+ * only Python (`py_compile`), which covers the coding workloads; other
+ * extensions return `kind: 'none'`. A syntax error is the most common small-
+ * model slip and the cheapest to surface: the exact line goes back to the
+ * agent, and the policy treats it as a slip rather than being stuck.
+ */
+export async function staticCheck(path: string): Promise<VerificationOutcome> {
+  if (!/\.pyi?$/i.test(path)) return { passed: true, evidence: 'no static check for this file type', kind: 'none' };
+  const run = (bin: string) => new Promise<{ ok: boolean; err: string; missing: boolean }>(resolve => {
+    execFile(bin, ['-m', 'py_compile', path], { timeout: 15_000 }, (error, _stdout, stderr) => {
+      const code = (error as { code?: unknown } | null)?.code;
+      resolve({ ok: !error, err: String(stderr ?? '').trim() || (error ? String(error.message) : ''), missing: code === 'ENOENT' });
+    });
+  });
+  let r = await run('python');
+  if (r.missing) r = await run('python3');
+  if (r.missing) return { passed: true, evidence: 'python not available for static check', kind: 'none' };
+  if (r.ok) return { passed: true, evidence: 'compiles', kind: 'static_check' };
+  // Only a real parse error is evidence about the code. A file the checker
+  // cannot open (virtual tool, remote path) is not the agent's mistake.
+  if (!/SyntaxError|IndentationError|TabError/.test(r.err)) return { passed: true, evidence: 'static check not applicable', kind: 'none' };
+  // Keep the informative tail: "SyntaxError: ... (solution.py, line 7)".
+  const line = r.err.split('\n').map(l => l.trim()).filter(Boolean).pop() ?? 'does not compile';
+  return { passed: false, evidence: truncate(line, 300), kind: 'static_check' };
+}
 
 export interface VerificationOutcome {
   passed: boolean;
@@ -46,6 +74,9 @@ export function parsePassFraction(output: string): number | undefined {
 }
 
 export type LlmJudge = (question: string) => Promise<{ passed: boolean; evidence: string }>;
+
+/** Commands whose exit code 1 means "no match", not "failed". */
+const EXPLORATION = /^\s*(?:git\s+)?(?:grep|rg|egrep|fgrep|ag|find|ls|diff|test|\[)\b/;
 
 export class StepVerifier {
   constructor(
@@ -95,6 +126,12 @@ export class StepVerifier {
   private autoVerify(result: StepResult): VerificationOutcome {
     const out = result.output as { exitCode?: unknown; stdout?: unknown; stderr?: unknown } | undefined;
     if (result.success && out && typeof out === 'object' && typeof out.exitCode === 'number') {
+      // grep / find / diff exit 1 to say "nothing matched": that is an answer to
+      // a question the agent asked, not a failed step.
+      const command = typeof result.toolArgs?.command === 'string' ? result.toolArgs.command : '';
+      if (out.exitCode === 1 && EXPLORATION.test(command)) {
+        return { passed: true, evidence: 'no matches (exit 1 from a search command)', kind: 'command_exit', score: 1 };
+      }
       const passed = out.exitCode === 0;
       const combined = `${String(out.stdout ?? '')}\n${String(out.stderr ?? '')}`;
       const score = parsePassFraction(combined);

@@ -6,6 +6,7 @@ import { LIVE_WORKLOADS } from '../workloads/live.js';
 import { loadMbpp } from '../workloads/mbpp.js';
 import { loadHumanEval } from '../workloads/humaneval.js';
 import { loadMbppBundles } from '../workloads/mbpp-bundle.js';
+import { loadSweBench } from '../workloads/swebench.js';
 import { STRATEGIES } from '../strategies/index.js';
 import { runStrategy } from './run-strategy.js';
 import type { GateContext, Strategy, StrategyName, TaskReport, Workload } from '../types.js';
@@ -29,7 +30,7 @@ function parseRef(value: string | undefined, fallback: ModelRef): ModelRef {
 const registryName = (p: ModelRef['provider']): ModelProviderName => (p === 'openrouter' ? 'openai' : p);
 
 export interface LiveRunOptions {
-  workload: 'live' | 'mbpp' | 'humaneval' | 'mbpp-bundle';
+  workload: 'live' | 'mbpp' | 'humaneval' | 'mbpp-bundle' | 'swebench';
   n?: number;
   offset?: number;
   /** Problems per task for the long-horizon bundle workload. Default 4 */
@@ -55,7 +56,9 @@ export async function runLiveBenchmarks(strategyNames: StrategyName[], taskIds?:
       ? loadHumanEval(options.n ?? 164, options.offset ?? 0)
       : options.workload === 'mbpp-bundle'
         ? loadMbppBundles(options.n ?? 30, options.bundle ?? 4, options.offset ?? 0)
-        : LIVE_WORKLOADS;
+        : options.workload === 'swebench'
+          ? loadSweBench(options.n ?? 15, options.offset ?? 0)
+          : LIVE_WORKLOADS;
   if (taskIds) workloads = workloads.filter(w => taskIds.includes(w.id));
 
   const registry = new ModelProviderRegistry();
@@ -84,7 +87,7 @@ export async function runLiveBenchmarks(strategyNames: StrategyName[], taskIds?:
   };
 
   const createJoule = async (workload: Workload, _mode: ExecutionMode, strategy: Strategy): Promise<Joule> => {
-    const escalation = { ...(workload.policy ?? {}), ...(strategy.ladder ? { ladder: strategy.ladder } : {}) };
+    const escalation = { ...(workload.policy ?? {}), ...(strategy.policy ?? {}), ...(strategy.ladder ? { ladder: strategy.ladder } : {}) };
     const joule = new Joule({
       routing: {
         preferLocal: false,
@@ -106,6 +109,7 @@ export async function runLiveBenchmarks(strategyNames: StrategyName[], taskIds?:
     joule.registerTool(fileWriteTool);
     joule.registerTool(shellExecTool);
     joule.registerTool(httpFetchTool);
+    for (const tool of workload.tools?.() ?? []) joule.registerTool(tool);
     return joule;
   };
 
@@ -144,6 +148,24 @@ export async function runLiveBenchmarks(strategyNames: StrategyName[], taskIds?:
   return { reports, models: { slm: `${slm.provider}:${slm.model}`, llm: `${llm.provider}:${llm.model}`, ...(mid ? { mid: `${mid.provider}:${mid.model}` } : {}) } };
 }
 
+/**
+ * Reasoning settings per OpenRouter model. Hybrid "thinking" models spend
+ * their output budget on reasoning tokens before the JSON action, which is
+ * both slow and, for a step agent, wasted: the step is small and verified
+ * afterwards. Default: thinking off for open hybrid models, minimal effort
+ * for OpenAI reasoning models, untouched otherwise. Override with
+ * JOULE_BENCH_REASONING="<model>=off|minimal|low|medium|high,..." .
+ */
+function reasoningFor(model: string): Record<string, unknown> | undefined {
+  const overrides = Object.fromEntries((process.env.JOULE_BENCH_REASONING ?? '').split(',').filter(Boolean).map(kv => {
+    const i = kv.lastIndexOf('=');
+    return [kv.slice(0, i), kv.slice(i + 1)];
+  }));
+  const setting = overrides[model] ?? (/qwen|nemotron|deepseek|glm|gemma/i.test(model) ? 'off' : /gpt-5|\/o[1-9]/i.test(model) ? 'minimal' : undefined);
+  if (!setting) return undefined;
+  return setting === 'off' ? { reasoning: { enabled: false } } : { reasoning: { effort: setting } };
+}
+
 /** One provider instance per registry name, carrying whichever tier models it serves. */
 function buildProviders(slm: ModelRef, llm: ModelRef, mid?: ModelRef): Map<ModelProviderName, ModelProvider> {
   const out = new Map<ModelProviderName, ModelProvider>();
@@ -180,12 +202,15 @@ function buildProviders(slm: ModelRef, llm: ModelRef, mid?: ModelRef): Map<Model
       case 'openrouter': {
         const apiKey = process.env.OPENROUTER_API_KEY;
         if (!apiKey) throw new Error('OPENROUTER_API_KEY is not set');
+        const ids = [models.slmModel, models.midModel, models.llmModel].filter((m): m is string => !!m);
         out.set(name, new OpenAIProvider({
           apiKey,
           ...models,
           baseUrl: 'https://openrouter.ai/api/v1',
           jsonMode: false,
           defaultHeaders: { 'HTTP-Referer': 'https://github.com/Aagam-Bothara/Joule', 'X-Title': 'Joule benchmark' },
+          extraBodyByModel: Object.fromEntries(ids.map(m => [m, reasoningFor(m)]).filter(([, v]) => v !== undefined) as Array<[string, Record<string, unknown>]>),
+          logprobs: process.env.JOULE_BENCH_LOGPROBS === '1',
         }));
         break;
       }

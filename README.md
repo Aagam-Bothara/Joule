@@ -13,7 +13,7 @@ gated by a hard budget.
 
 ![CI](https://github.com/Aagam-Bothara/Joule/actions/workflows/test.yml/badge.svg)
 ![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)
-![Tests](https://img.shields.io/badge/tests-1180%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-1202%20passing-brightgreen)
 ![TypeScript](https://img.shields.io/badge/TypeScript-100%25-blue)
 ![Node.js](https://img.shields.io/badge/node-%3E%3D22-brightgreen)
 
@@ -65,7 +65,7 @@ tests failed twice, one question to the large model unblocked it, and the small 
 ```
 Task
  ↓
-Step agent on the small model  →  execute tool  →  observe  →  verify (tests, exit codes, patterns)
+Step agent on the small model  →  execute tool  →  observe  →  verify (tests, exit codes, compile checks, patterns)
  ↓
 Confidence from evidence only (tool result, verifier, progress, repeated failures, budget)
  ↓
@@ -78,9 +78,9 @@ Escalation policy
 
 - **Trajectory-level, not task-level.** Cascades and routers (FrugalGPT, RouteLLM, AutoMix) decide once per request. Joule decides after every step, from what actually happened.
 - **No self-reported confidence.** The policy never asks the model how sure it is. It reads tool results, deterministic verification, repeated failure signatures, and budget headroom.
-- **Consult before handoff.** Most small-model failures are one wrong decision. A consultation costs one question; a handoff bills the rest of the task at large-model prices.
+- **Consult before handoff.** Most small-model failures are one wrong decision. A consultation costs one question; a handoff bills the rest of the task at large-model prices. The consultant sees the files involved and can hand back the edit itself, so the small model verifies instead of transcribing.
 - **Budget is part of the decision.** Seven-dimensional envelopes (tokens, cost, time, tool calls, escalations, energy, carbon) gate every escalation and stop every run.
-- **Four modes, one engine.** `adaptive` (default), `slm-only`, `llm-only`, and `static-router` share the same tools and prompts, so comparisons are fair.
+- **Five modes, one engine.** `adaptive` (default), `slm-only`, `mid-only`, `llm-only`, and `static-router` share the same tools and prompts, so comparisons are fair. Every design choice has a switch that removes it, so it can be measured.
 
 ---
 
@@ -104,7 +104,8 @@ uses the same engine, tools and prompts.
 
 Joule matches the best success rate within noise at 0.39 of large-model cost, against 0.53 to
 0.66 for the cascades. Of the problems where Joule involved the large model, 89% of handoffs
-succeeded and 40% of consultations let the small model finish on its own. With GPT-4o as the
+succeeded and 40% of consultations let the small model finish on its own (83% with the current
+patch-mode consultations, measured on a further 50 problems below). With GPT-4o as the
 large model on a 20-problem spot check, Joule matched its 95% at 27% of its cost. Precision and recall are
 measured against counterfactual labels, so "precision 68%" means roughly one escalation in three
 went to a problem the small model would probably have solved anyway.
@@ -160,6 +161,43 @@ model when the middle one fails too.
 The ladder touched the frontier model on 6 of 50 problems. 80% of its handoffs succeeded,
 against 46% when the small model handed straight to GPT-4o: the middle rung is both cheaper
 and a better first responder.
+
+**Each design choice, measured.** Same 50 problems, Llama 8B → Flash, one choice removed per row:
+
+| variant | success | cost vs Flash | LLM used on | consultations that finished the task |
+|---|---:|---:|---:|---:|
+| **Joule, full policy** | **98%** | **0.24** | 38% | 83% |
+| no consultations (handoff only) | 98% | 0.40 | 88% | |
+| prose-only consultations (old behaviour) | 98% | 0.42 | 40% | 40% |
+| no static checks | 96% | 0.26 | 38% | 79% |
+| self-reported confidence instead of evidence | 96% | 0.28 | 46% | 74% |
+| no step verification | 80% | 0.21 | 6% | |
+
+Verification is what makes the policy work: without it 8 of 50 runs finish "completed" on wrong
+code. Self-reported confidence is noise: in 72 of 107 decisions right after a failed test run, the
+model still claimed 0.8 or more. Consultations that return the edit doubled the share that let
+the small model finish (40% to 83%) and cut handoffs from 12 to 4; on 30 long four-function tasks
+the same change lifted consultation success from 13% to 32% and success from 60% to 67% at 22%
+less cost.
+
+**Current models.** Qwen3.5 9B → GPT-5.6 Luna → Claude Sonnet 5, 40 problems, all billed at
+OpenRouter's reported cost:
+
+| strategy | success | cost per task | cost vs Sonnet alone |
+|---|---:|---:|---:|
+| Qwen3.5 9B alone | 79% | $0.0021 | 0.04 |
+| Sonnet 5 alone | 100% | $0.0524 | 1.00 |
+| FrugalGPT-style cascade (Qwen → Sonnet) | 100% | $0.0284 | 0.54 |
+| Joule, two tiers (Qwen → Sonnet) | 100% | $0.0081 | 0.15 |
+| **Joule, ladder (Qwen → Luna → Sonnet)** | **100%** | **$0.0041** | **0.08** |
+
+**Real repositories.** Fifteen SWE-bench Lite instances (Django, pytest, pylint) in their official
+docker images, hidden tests, Qwen3.5 9B → Gemini Flash → Gemini Pro, $0.20 cap per task. The 9B
+model alone resolves 2, Flash alone 2, the ladder 7, four of which neither model resolved by itself;
+three were resolved by the 9B model without escalating at all, for one to three cents each. A
+first run with Sonnet 5 on top resolved 8 at 2.4× the cost because unparseable first turns went
+straight to the frontier model; climbing one rung at a time is now the default. Fifteen instances
+is a small sample (see [benchmarks/README.md](benchmarks/README.md) for both runs).
 
 Reproduce with `benchmarks/harness` (see [benchmarks/README.md](benchmarks/README.md)): same
 engine, same tools, same prompts; only the routing strategy changes. Success on coding tasks is

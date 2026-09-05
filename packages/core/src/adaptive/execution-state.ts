@@ -206,6 +206,7 @@ export function toConsultationRequest(
   question: string,
   consultId: string,
   maxTokens: number,
+  options: { files?: boolean; maxFileChars?: number } = {},
 ): ConsultationRequest {
   return {
     consultId,
@@ -216,7 +217,43 @@ export function toConsultationRequest(
     attemptedSolutions: state.completedSteps.filter(s => !s.success || s.verified === false).slice(-5),
     constraints: state.constraints,
     maxTokens,
+    ...(options.files ? { files: currentFiles(state, options.maxFileChars) } : {}),
   };
+}
+
+const FILE_CHARS = 8000;
+const MAX_FILES = 4;
+
+/**
+ * The latest known contents of the files the agent has touched, newest first:
+ * what a write tool was given, or what a read tool returned. This is what a
+ * patch-mode consultant edits against.
+ */
+export function currentFiles(state: ExecutionState, maxChars = FILE_CHARS): Array<{ path: string; content: string }> {
+  const out = new Map<string, string>();
+  for (let i = state.completedSteps.length - 1; i >= 0 && out.size < MAX_FILES; i--) {
+    const s = state.completedSteps[i];
+    if (!s.success) continue;
+    const path = typeof s.toolArgs?.path === 'string' ? s.toolArgs.path : undefined;
+    if (!path || out.has(path)) continue;
+    const written = typeof s.toolArgs?.content === 'string' ? s.toolArgs.content : undefined;
+    const o = s.output && typeof s.output === 'object' ? (s.output as { content?: unknown; _content?: unknown }) : undefined;
+    const edited = typeof o?._content === 'string' ? o._content : undefined;
+    const read = typeof o?.content === 'string' ? o.content : undefined;
+    const content = edited ?? written ?? read;
+    if (content === undefined) continue;
+    out.set(path, content.length > maxChars ? `${content.slice(0, maxChars)}\n... [truncated ${content.length - maxChars} chars]` : content);
+  }
+  return [...out].map(([path, content]) => ({ path, content }));
+}
+
+/** Tool the agent used to write files (defaults to file_write); patch-mode edits go through the same one. */
+export function writeToolName(state: ExecutionState): string {
+  for (let i = state.completedSteps.length - 1; i >= 0; i--) {
+    const s = state.completedSteps[i];
+    if (typeof s.toolArgs?.path === 'string' && typeof s.toolArgs?.content === 'string') return s.toolName;
+  }
+  return 'file_write';
 }
 
 export function toHandoffContext(state: ExecutionState, unresolvedQuestions: string[] = []): HandoffContext {
@@ -269,6 +306,11 @@ export function renderConsultation(req: ConsultationRequest): string {
   if (req.constraints.length > 0) {
     lines.push('CONSTRAINTS');
     for (const c of req.constraints) lines.push(`- ${c}`);
+    lines.push('');
+  }
+  if (req.files && req.files.length > 0) {
+    lines.push('CURRENT FILES');
+    for (const f of req.files) lines.push(`--- ${f.path} ---`, f.content, '--- end ---');
     lines.push('');
   }
   lines.push(`Answer the question directly and concretely in at most ${req.maxTokens} tokens. Do not solve the whole task; the smaller model will continue.`);
@@ -342,5 +384,8 @@ export function summarizeState(state: ExecutionState): string {
 }
 
 export function adviceBlock(advice: Advice): string {
-  return `<advice consult="${advice.consultId}">\nQ: ${advice.question}\nA: ${advice.answer}\n</advice>`;
+  const applied = advice.appliedEdits && advice.edits
+    ? `\n[The consultant's edit${advice.appliedEdits > 1 ? 's were' : ' was'} already applied to: ${advice.edits.slice(0, advice.appliedEdits).map(e => e.path).join(', ')}. Verify the result (run the tests) before finishing.]`
+    : '';
+  return `<advice consult="${advice.consultId}">\nQ: ${advice.question}\nA: ${advice.answer}${applied}\n</advice>`;
 }

@@ -27,9 +27,17 @@ export interface Workload {
   /** What a judge / self-verifier should look at (defaults to the result text) */
   answerForJudge?: (result: TaskResult) => string;
   /** Escalation policy overrides for this workload (e.g. a higher step cap for long-horizon tasks) */
-  policy?: { maxSteps?: number; maxConsultations?: number; maxFailuresBeforeHandoff?: number; failureWindow?: number };
+  policy?: Partial<import('@joule/shared').EscalationPolicyConfig>;
   /** Budget envelope for this workload (default: the 'high' preset) */
   budget?: import('@joule/shared').Task['budget'];
+  /** Restrict the agent to these registered tools (live workloads with their own tools) */
+  taskTools?: string[];
+  /**
+   * Success is the verifier's verdict alone, even when the run did not end in
+   * a final answer (SWE-bench scores the patch, not the agent's claim). The
+   * status is still reported.
+   */
+  successIgnoresStatus?: boolean;
 }
 
 export type StrategyName =
@@ -42,7 +50,13 @@ export type StrategyName =
   | 'automix'
   | 'pre-router'
   | 'joule-adaptive'
-  | 'joule-ladder';
+  | 'joule-ladder'
+  // Ablations: one design choice removed at a time
+  | 'joule-no-consult'
+  | 'joule-advice'
+  | 'joule-no-verify'
+  | 'joule-self-conf'
+  | 'joule-no-static';
 
 /**
  * How a multi-stage strategy decides to move to the next mode:
@@ -62,6 +76,8 @@ export interface Strategy {
   preRoute?: boolean;
   /** Escalation ladder for adaptive runs; omitted = engine default (all available rungs) */
   ladder?: Array<'slm' | 'mid' | 'llm'>;
+  /** Escalation policy overrides (ablations) */
+  policy?: Partial<import('@joule/shared').EscalationPolicyConfig>;
   description: string;
 }
 

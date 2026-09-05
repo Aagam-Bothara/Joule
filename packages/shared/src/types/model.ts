@@ -55,6 +55,8 @@ export interface ModelResponse {
   costUsd: number;
   confidence?: number;
   finishReason: 'stop' | 'length' | 'error';
+  /** Mean log-probability over the completion tokens, when the provider returns logprobs */
+  meanLogprob?: number;
   energyWh?: number;
   carbonGrams?: number;
 }

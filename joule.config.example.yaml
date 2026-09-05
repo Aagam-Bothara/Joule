@@ -58,7 +58,13 @@ routing:
     consultMaxTokens: 800
     stallSteps: 3
     verifyRetries: 1
+    failureWindow: 6            # only failures in the last N steps count as "stuck"
+    consultMode: patch          # patch: the advisor may return a concrete file edit; advice: prose only
+    staticChecks: true          # compile-check written Python files right away
+    observationChars: 1500      # characters of a tool result shown to the agent
     # ladder: [slm, mid, llm]   # rungs to use; a provider's models.mid enables the middle rung
+    # verification: none        # ablation only: disable the step verifier
+    # confidenceSource: self-report   # ablation only: use the model's own confidence claim
 
 # Energy tracking configuration
 energy:

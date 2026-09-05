@@ -60,6 +60,12 @@ export interface Confidence {
   contradiction: number;
   /** Fraction of the cost/token budget still available */
   budgetHeadroom: number;
+  /**
+   * The model's own confidence claim, when the agent was asked for one.
+   * Recorded for the ablation only; the evidence-based composite ignores it
+   * unless `confidenceSource` is 'self-report'.
+   */
+  selfReported?: number;
 }
 
 export interface EscalationDecision {
@@ -93,7 +99,9 @@ export type FailureKind =
   | 'verification_failed'
   | 'missing_tool'
   | 'malformed_action'
-  | 'model_error';
+  | 'model_error'
+  /** A written source file does not compile / parse (cheap static check) */
+  | 'static_check_failed';
 
 export interface Failure {
   step: number;
@@ -112,6 +120,17 @@ export interface Hypothesis {
   source: 'agent' | 'consult';
 }
 
+/**
+ * A concrete change proposed by a consultation. Either a whole-file
+ * replacement (`content`) or one exact `search` -> `replace` substitution.
+ */
+export interface ConsultEdit {
+  path: string;
+  content?: string;
+  search?: string;
+  replace?: string;
+}
+
 export interface Advice {
   consultId: string;
   step: number;
@@ -120,6 +139,10 @@ export interface Advice {
   model: string;
   tokens: number;
   costUsd: number;
+  /** Edits the consultant proposed (patch mode) */
+  edits?: ConsultEdit[];
+  /** How many of them the executor applied */
+  appliedEdits?: number;
 }
 
 export interface PlanVersion {
@@ -174,6 +197,8 @@ export interface ConsultationRequest {
   attemptedSolutions: StepResult[];
   constraints: string[];
   maxTokens: number;
+  /** Current contents of the files the agent has written or read (patch-mode consults) */
+  files?: Array<{ path: string; content: string }>;
 }
 
 export interface HandoffContext {
@@ -226,6 +251,50 @@ export interface EscalationPolicyConfig {
    * task that is otherwise progressing. Default: 6
    */
   failureWindow?: number;
+  /**
+   * What a consultation returns. 'patch' (default): the advisor answers the
+   * question AND may propose concrete file edits, which the executor applies
+   * before handing control back to the small model. 'advice': prose only.
+   */
+  consultMode?: 'advice' | 'patch';
+  /**
+   * 'deterministic' (default) runs the step verifier (declared checks, exit
+   * codes, test counts). 'none' disables verification entirely (ablation only).
+   */
+  verification?: 'deterministic' | 'none';
+  /**
+   * Where the composite confidence comes from. 'evidence' (default) is the
+   * ConfidenceEngine. 'self-report' asks the agent for a confidence number and
+   * uses that instead (ablation only).
+   */
+  confidenceSource?: 'evidence' | 'self-report';
+  /** Compile-check source files right after they are written (Python today). Default: true */
+  staticChecks?: boolean;
+  /** Characters of a tool observation shown to the agent. Default: 1500 */
+  observationChars?: number;
+  /** Output token cap per agent turn. Default: 4096; raise it for repository work (whole-file writes) */
+  maxOutputTokens?: number;
+  /**
+   * What a final answer must be backed by. 'write': the run must contain at
+   * least one successful write/edit step, otherwise the answer is refused,
+   * counted as a failure, and the agent is told to continue. Default: 'none'
+   */
+  finalAnswerRequires?: 'none' | 'write';
+  /**
+   * On a reasoning breakdown (repeated unparseable output, or giving up before
+   * any step succeeded), hand off straight to the top rung instead of the next
+   * one. Default: false. Climbing one rung is cheaper whenever the middle rung
+   * can solve a meaningful share of what the small model cannot, which on real
+   * repositories it does.
+   */
+  breakdownSkipsToTop?: boolean;
+  /**
+   * Steps of pure exploration (successful reads and searches, nothing written,
+   * nothing verified) after which the run counts as stalled and a consult is
+   * triggered. Repository work produces no failures while a model wanders, so
+   * the failure-based rules never fire; this one does. Default: 8
+   */
+  explorationStallSteps?: number;
 }
 
 // ── Reporting ────────────────────────────────────────────────────────

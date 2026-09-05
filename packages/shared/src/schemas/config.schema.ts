@@ -69,6 +69,15 @@ export const routingConfigSchema = z.object({
     verifyRetries: z.number().int().min(0).optional(),
     ladder: z.array(z.enum(['slm', 'mid', 'llm'])).min(1).optional(),
     failureWindow: z.number().int().min(1).optional(),
+    consultMode: z.enum(['advice', 'patch']).optional(),
+    verification: z.enum(['deterministic', 'none']).optional(),
+    confidenceSource: z.enum(['evidence', 'self-report']).optional(),
+    staticChecks: z.boolean().optional(),
+    observationChars: z.number().int().min(200).optional(),
+    maxOutputTokens: z.number().int().min(256).optional(),
+    finalAnswerRequires: z.enum(['none', 'write']).optional(),
+    breakdownSkipsToTop: z.boolean().optional(),
+    explorationStallSteps: z.number().int().min(2).optional(),
   }).optional(),
 });
 

@@ -32,8 +32,10 @@ export type AgentAction =
       verify?: StepVerification;
       hypothesis?: string;
       plan?: string[];
+      /** Self-reported confidence, only when the agent was asked for one (ablation) */
+      confidence?: number;
     }
-  | { type: 'final_answer'; answer: string; plan?: string[] }
+  | { type: 'final_answer'; answer: string; plan?: string[]; confidence?: number }
   | { type: 'ask_consult'; question: string; hypotheses: string[] }
   | { type: 'give_up'; reason: string }
   | { type: 'malformed'; raw: string };
@@ -55,6 +57,11 @@ export interface StepAgentOptions {
   relevantToolsAbove?: number;
   /** Output token cap per agent turn. Default 4096 */
   maxTokens?: number;
+  /**
+   * Ask the model to include a "confidence" number (0..1) in every action.
+   * Used by the self-report ablation only; the default policy never reads it.
+   */
+  askConfidence?: boolean;
 }
 
 const MAX_TOOL_ARG_CHARS = 50_000;
@@ -110,12 +117,12 @@ Respond with ONLY a raw JSON object (no markdown, no code fences, no text outsid
 
 1. Take a step:
 {"action":"tool_call","thought":"<one sentence: why this step>","toolName":"<tool>","toolArgs":{...},"plan":["<remaining steps, short>"],"verify":{"type":"command_exit","command":"<check command>"},"hypothesis":"<optional: what you currently believe>"}
-   - "plan" is required on your first step and whenever it changes; omit otherwise.
+   - "plan" is required on your first step and whenever it changes; omit otherwise.${this.options.askConfidence ? '\n   - Also include "confidence": a number from 0 to 1, your honest probability that the task will be completed correctly if you keep going on your own.' : ''}
    - "verify" is optional. Types: "command_exit" (run "command", pass = exit code 0), "test_result" (like command_exit plus "assertion" regex on output), "output_check" ("assertion" regex over the tool output).
    - Prefer verifying your work with a real check (tests, build, reading the file back) before finishing.
 
 2. Finish:
-{"action":"final_answer","answer":"<complete answer for the user>"}
+{"action":"final_answer","answer":"<complete answer for the user>"${this.options.askConfidence ? ',"confidence":<0..1>' : ''}}
 
 3. Ask for help when you are stuck on ONE specific decision but understand the rest of the task:
 {"action":"ask_consult","question":"<one focused question with the concrete options>","hypotheses":["<what you think>"]}
@@ -184,7 +191,7 @@ Rules:
 
     if (action === 'final_answer' || (action === undefined && obj.answer !== undefined)) {
       const answer = obj.answer ?? obj.result ?? obj.final_answer ?? '';
-      return { type: 'final_answer', answer: typeof answer === 'string' ? answer : JSON.stringify(answer), plan: asStringArray(obj.plan) };
+      return { type: 'final_answer', answer: typeof answer === 'string' ? answer : JSON.stringify(answer), plan: asStringArray(obj.plan), confidence: asUnit(obj.confidence) };
     }
     if (action === 'ask_consult' || (action === undefined && typeof obj.question === 'string')) {
       return { type: 'ask_consult', question: String(obj.question ?? ''), hypotheses: asStringArray(obj.hypotheses) ?? [] };
@@ -212,20 +219,51 @@ Rules:
         verify: parseVerify(call.verify ?? obj.verify),
         hypothesis: typeof (call.hypothesis ?? obj.hypothesis) === 'string' ? String(call.hypothesis ?? obj.hypothesis) : undefined,
         plan: asStringArray(obj.plan ?? call.plan),
+        confidence: asUnit(obj.confidence ?? call.confidence),
       };
     }
     return { type: 'malformed', raw };
   }
 }
 
-function extractJson(raw: string): unknown {
+/** Parse a JSON object out of a model reply (tolerates fences, prose around it, raw newlines in strings). */
+export function extractJson(raw: string): unknown {
   const cleaned = raw.replace(/```(?:json)?\s*\n?/gi, '').replace(/```/g, '').trim();
   const candidates = [cleaned];
   const match = cleaned.match(/\{[\s\S]*\}/);
   if (match && match[0] !== cleaned) candidates.push(match[0]);
+  // Small models sometimes close the object early and keep writing
+  // ('...}},"plan":[...]'). The first balanced object is usually a complete action.
+  const prefix = balancedObjectPrefix(match ? match[0] : cleaned);
+  if (prefix && !candidates.includes(prefix)) candidates.push(prefix);
   for (const c of candidates) {
     try { return JSON.parse(c); } catch { /* try repaired */ }
     try { return JSON.parse(repairJsonStrings(c)); } catch { /* next candidate */ }
+  }
+  return undefined;
+}
+
+/** The shortest prefix of `text` (starting at its first '{') whose braces balance, string-aware. */
+function balancedObjectPrefix(text: string): string | undefined {
+  const start = text.indexOf('{');
+  if (start < 0) return undefined;
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === '\\') escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') inString = true;
+    else if (ch === '{') depth++;
+    else if (ch === '}') {
+      depth--;
+      if (depth === 0) return text.slice(start, i + 1);
+    }
   }
   return undefined;
 }
@@ -254,6 +292,12 @@ function repairJsonStrings(text: string): string {
     }
   }
   return out;
+}
+
+function asUnit(v: unknown): number | undefined {
+  const n = typeof v === 'number' ? v : typeof v === 'string' ? parseFloat(v) : NaN;
+  if (!Number.isFinite(n)) return undefined;
+  return Math.max(0, Math.min(1, n > 1 && n <= 100 ? n / 100 : n));
 }
 
 function asStringArray(v: unknown): string[] | undefined {

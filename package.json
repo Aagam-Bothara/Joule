@@ -1,18 +1,22 @@
 {
   "name": "joule",
   "private": true,
-  "description": "AI agents with a budget, a constitution, and an off switch",
+  "description": "Agent runtime that runs on a small model and escalates to a large one only when the evidence says the step needs it",
   "keywords": [
     "ai-agents",
     "llm",
-    "multi-agent",
-    "governance",
+    "slm",
+    "small-language-models",
+    "model-routing",
+    "cascade",
+    "escalation",
+    "cost-optimization",
     "budget-enforcement",
     "typescript",
     "ollama",
     "openai",
     "anthropic",
-    "constitutional-ai"
+    "openrouter"
   ],
   "scripts": {
     "build": "pnpm -r build",

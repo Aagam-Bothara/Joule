@@ -51,6 +51,12 @@ export interface StepResult {
   verifierKind?: string;
   /** Fraction of checks that passed (0..1), when the verifier could count them */
   verifyScore?: number;
+  /** What the verifier saw (exit code, failing assertion, syntax error line) */
+  verifyEvidence?: string;
+  /** The agent's own confidence claim for this step, when asked (ablation) */
+  selfConfidence?: number;
+  /** Mean token log-probability of the action, when the provider returns logprobs */
+  meanLogprob?: number;
 }
 
 export interface TaskResult {

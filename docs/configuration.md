@@ -176,6 +176,15 @@ routing:
 | `escalation.verifyRetries` | number  | `1`     | Verification failures the agent may retry alone before CONSULT, unless it repeats the identical failure |
 | `escalation.ladder`       | string[] | all available of `slm, mid, llm` | Rungs adaptive execution may use, lowest first; consult and handoff climb one rung, reasoning breakdowns skip to the top |
 | `escalation.failureWindow` | number | `6`    | Failures count only within the last N steps of the current rung, so a long task that keeps progressing is not treated as stuck |
+| `escalation.consultMode`  | string   | `patch` | `patch`: the advisor answers the question and may return a concrete file edit, which is applied before the small model continues. `advice`: prose only |
+| `escalation.staticChecks` | boolean  | `true`  | Compile-check a source file right after the agent writes it (Python today); the error line goes back to the agent and counts as a slip, not as being stuck |
+| `escalation.observationChars` | number | `1500` | Characters of a tool result shown to the agent per step; raise it for repository work |
+| `escalation.verification` | string   | `deterministic` | `none` disables the step verifier entirely. Ablation only |
+| `escalation.confidenceSource` | string | `evidence` | `self-report` asks the agent for a confidence number and uses it instead of the evidence-based composite. Ablation only |
+| `escalation.maxOutputTokens` | number | `4096` | Output token cap per agent turn; raise it for repository work where a step may write a whole file |
+| `escalation.finalAnswerRequires` | string | `none` | `write`: a final answer is refused (and counted as a failure) until the run has changed at least one file; for tasks that are only done when code changed |
+| `escalation.breakdownSkipsToTop` | boolean | `false` | On a reasoning breakdown (repeated unparseable output, give-up with no progress) hand off straight to the top rung instead of the next one |
+| `escalation.explorationStallSteps` | number | `8` | Consecutive successful steps that neither change a file nor verify anything (reads, searches) before a CONSULT; the signal for a model wandering through a repository without failing |
 
 ---
 

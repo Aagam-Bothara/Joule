@@ -8,6 +8,7 @@ import { preRouter } from './pre-router.js';
 import { jouleAdaptive } from './joule-adaptive.js';
 import { jouleLadder } from './joule-ladder.js';
 import { midOnly } from './mid-only.js';
+import { jouleNoConsult, jouleAdvice, jouleNoVerify, jouleSelfConf, jouleNoStatic } from './ablations.js';
 import type { Strategy, StrategyName } from '../types.js';
 
 export const STRATEGIES: Record<StrategyName, Strategy> = {
@@ -21,7 +22,15 @@ export const STRATEGIES: Record<StrategyName, Strategy> = {
   'joule-adaptive': jouleAdaptive,
   'joule-ladder': jouleLadder,
   'mid-only': midOnly,
+  'joule-no-consult': jouleNoConsult,
+  'joule-advice': jouleAdvice,
+  'joule-no-verify': jouleNoVerify,
+  'joule-self-conf': jouleSelfConf,
+  'joule-no-static': jouleNoStatic,
 };
+
+/** The ablation set, in the order the README reports them. */
+export const ABLATION_STRATEGIES: StrategyName[] = ['joule-adaptive', 'joule-no-consult', 'joule-advice', 'joule-no-verify', 'joule-self-conf', 'joule-no-static'];
 
 export const DEFAULT_STRATEGY_ORDER: StrategyName[] = [
   'slm-only',

@@ -22,7 +22,8 @@ At each turn the current model proposes exactly one structured action---a tool c
 
 \paragraph{Deterministic verification.}
 Wherever possible a step is verified without a model: an output pattern, a DOM predicate, or a command exit code with a parsed pass fraction (``3/5 tests passed'').
-A command that exits non-zero fails verification even when the tool call itself succeeded.
+A command that exits non-zero fails verification even when the tool call itself succeeded; a search command that exits 1 to report ``no match'' does not.
+A source file the agent has just written is compile-checked before anything else happens; a syntax error goes back to the agent with the offending line and counts as a slip rather than as being stuck, escalating only if the same error repeats.
 Model-judged verification is opt-in and always labelled, so results can be reported separately.
 
 \paragraph{Evidence-based confidence.}
@@ -44,7 +45,7 @@ Every escalation is gated by the budget envelope (\S\ref{sec:budget}): a consult
 
 \paragraph{Ladder.}
 Tiers form a ladder $\langle \text{slm}, \text{mid}, \text{llm} \rangle$ in which the optional middle rung is an efficient large model.
-\textsc{consult} asks the next rung up and \textsc{handoff} moves execution to it; a reasoning breakdown (repeated unparseable output, or a give-up before any step succeeded) skips to the top rung, since the middle rung would only burn a hop.
+\textsc{consult} asks the next rung up and \textsc{handoff} moves execution to it, including after a reasoning breakdown (repeated unparseable output, or a give-up before any step succeeded); an option sends breakdowns straight to the top rung, and \S\ref{sec:eval-escalation} shows why the default climbs one rung instead.
 After a handoff the policy is rung-local: the new model is judged on its own steps, failures, and consultations, not on the record of the model it replaced.
 Failures are counted within a window of recent steps, so a long task that keeps making verified progress is not mistaken for a stuck one.
 Rungs no provider serves are dropped, so a two-model deployment degrades to the two-tier policy.
@@ -54,5 +55,15 @@ A handoff bills the remaining trajectory at large-model prices.
 A consult bills one question and one answer, and returns control to the small model.
 When the small model is stuck on a single decision, which is the common case on coding tasks, a consult recovers the trajectory at a fraction of a handoff's cost.
 We measure how often it does.
+
+\paragraph{Consultations that return the fix.}
+A consultation originally returned prose.
+On long tasks the small model turned correct advice into an incorrect edit often enough that most consultations ended in a handoff anyway.
+The consultant therefore sees the current contents of the files the run has touched and may return, alongside its answer, a concrete edit: a whole-file replacement for small files or one exact search-and-replace for large ones.
+The runtime applies the edit through the same write tool the agent uses, compile-checks it, records it as a step attributed to the advisor's tier, and returns control to the small model, which verifies and finishes.
+The consultation remains a single call; what changes is that the small model no longer has to transcribe the fix.
+
+\paragraph{Switches for ablation.}
+Each design choice above maps to one policy switch, so the benchmark harness can remove exactly that choice: no consultations (every escalation is a handoff), prose-only consultations, no step verification, the model's self-reported confidence in place of the evidence-based composite, and no static checks.
 
 % ─────────────────────────────────────────────────────────────────────

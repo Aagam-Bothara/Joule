@@ -59,7 +59,7 @@ export async function runStrategy(
     let result: TaskResult | undefined;
     const started = Date.now();
     try {
-      result = await joule.execute({ id: generateId('bench'), description: workload.description, budget: workload.budget ?? budget, mode, createdAt: new Date().toISOString() });
+      result = await joule.execute({ id: generateId('bench'), description: workload.description, budget: workload.budget ?? budget, mode, createdAt: new Date().toISOString(), ...(workload.taskTools ? { tools: workload.taskTools } : {}) });
     } catch (err) {
       acc.error = err instanceof Error ? err.message : String(err);
       acc.status = 'error';

@@ -9,7 +9,7 @@ export function evaluateSuccess(result: TaskResult, workload: Workload): { succe
   if (workload.verify) {
     let ok = false;
     try { ok = workload.verify(result); } catch { ok = false; }
-    return { success: ok && result.status === 'completed', verifierKind: 'deterministic' };
+    return { success: ok && (workload.successIgnoresStatus === true || result.status === 'completed'), verifierKind: 'deterministic' };
   }
   return { success: result.status === 'completed', verifierKind: 'status' };
 }

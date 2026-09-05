@@ -23,16 +23,34 @@ export class OpenAIProvider extends ModelProvider {
   private midModel?: string;
 
   private jsonMode: boolean;
+  private extraBody: Record<string, unknown>;
+  private extraBodyByModel: Record<string, Record<string, unknown>>;
+  private logprobs: boolean;
+  private openRouter: boolean;
 
   /**
    * `baseUrl` points the client at any OpenAI-compatible endpoint (OpenRouter,
    * vLLM, LM Studio). `jsonMode: false` skips `response_format` for endpoints
    * or models that reject it; prompts still ask for JSON.
+   *
+   * `extraBody` / `extraBodyByModel` are merged into every request body: the
+   * place for provider-specific knobs such as OpenRouter's `reasoning`
+   * settings. `logprobs: true` asks for token log-probabilities (models that do
+   * not support them fail the request, so it is opt-in). When the endpoint
+   * reports the billed cost (OpenRouter's `usage.cost`), it is used instead of
+   * the local price table.
    */
-  constructor(config: { apiKey: string; slmModel?: string; midModel?: string; llmModel?: string; baseUrl?: string; jsonMode?: boolean; defaultHeaders?: Record<string, string> }) {
+  constructor(config: {
+    apiKey: string; slmModel?: string; midModel?: string; llmModel?: string; baseUrl?: string; jsonMode?: boolean;
+    defaultHeaders?: Record<string, string>; extraBody?: Record<string, unknown>; extraBodyByModel?: Record<string, Record<string, unknown>>; logprobs?: boolean;
+  }) {
     super();
     this.client = new OpenAI({ apiKey: config.apiKey, ...(config.baseUrl ? { baseURL: config.baseUrl } : {}), ...(config.defaultHeaders ? { defaultHeaders: config.defaultHeaders } : {}) });
     this.jsonMode = config.jsonMode ?? true;
+    this.extraBody = config.extraBody ?? {};
+    this.extraBodyByModel = config.extraBodyByModel ?? {};
+    this.logprobs = config.logprobs ?? false;
+    this.openRouter = (config.baseUrl ?? '').includes('openrouter');
     this.slmModel = config.slmModel ?? 'gpt-4o-mini';
     this.llmModel = config.llmModel ?? 'gpt-4o';
     this.midModel = config.midModel;
@@ -41,6 +59,11 @@ export class OpenAIProvider extends ModelProvider {
 
   async isAvailable(): Promise<boolean> {
     return true;
+  }
+
+  /** Provider-specific request fields (e.g. OpenRouter `reasoning`), global then per model. */
+  private extra(model: string): Record<string, unknown> {
+    return { ...this.extraBody, ...(this.extraBodyByModel[model] ?? {}) };
   }
 
   async chat(request: ModelRequest): Promise<ModelResponse> {
@@ -74,6 +97,9 @@ export class OpenAIProvider extends ModelProvider {
       max_tokens: request.maxTokens ?? (hasImages ? 4096 : 1024),
       temperature: request.temperature ?? 0.1,
       ...(request.responseFormat === 'json' && this.jsonMode ? { response_format: { type: 'json_object' } } : {}),
+      ...(this.logprobs ? { logprobs: true } : {}),
+      ...(this.openRouter ? { usage: { include: true } } : {}),
+      ...(this.extra(request.model) as object),
     });
 
     const latencyMs = monotonicNow() - startTime;
@@ -83,6 +109,10 @@ export class OpenAIProvider extends ModelProvider {
       completionTokens: response.usage?.completion_tokens ?? 0,
       totalTokens: response.usage?.total_tokens ?? 0,
     };
+    const reported = (response.usage as { cost?: unknown } | undefined)?.cost;
+    const costUsd = typeof reported === 'number' && reported > 0 ? reported : this.calculateCost(request.model, tokenUsage);
+    const lps = (choice as { logprobs?: { content?: Array<{ logprob: number }> | null } | null } | undefined)?.logprobs?.content;
+    const meanLogprob = lps && lps.length > 0 ? lps.reduce((a, t) => a + t.logprob, 0) / lps.length : undefined;
 
     return {
       model: request.model,
@@ -91,8 +121,9 @@ export class OpenAIProvider extends ModelProvider {
       content: choice?.message?.content ?? '',
       tokenUsage,
       latencyMs,
-      costUsd: this.calculateCost(request.model, tokenUsage),
+      costUsd,
       finishReason: choice?.finish_reason === 'stop' ? 'stop' : 'length',
+      ...(meanLogprob !== undefined ? { meanLogprob } : {}),
       energyWh: getModelEnergy(request.model, tokenUsage),
     };
   }
@@ -127,6 +158,7 @@ export class OpenAIProvider extends ModelProvider {
       temperature: request.temperature ?? 0.1,
       stream: true,
       stream_options: { include_usage: true },
+      ...(this.extra(request.model) as object),
     });
 
     let lastTokenUsage: StreamChunk['tokenUsage'] | undefined;

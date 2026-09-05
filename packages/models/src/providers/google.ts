@@ -82,7 +82,8 @@ export class GoogleProvider extends ModelProvider {
       tokenUsage,
       latencyMs,
       costUsd: this.calculateCost(request.model, tokenUsage),
-      finishReason: 'stop',
+      // Gemini reports MAX_TOKENS when the output cap cut the reply; the agent loop needs to know.
+      finishReason: response.candidates?.[0]?.finishReason === 'MAX_TOKENS' ? 'length' : 'stop',
       energyWh: getModelEnergy(request.model, tokenUsage),
     };
   }

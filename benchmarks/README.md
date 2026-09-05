@@ -155,12 +155,24 @@ npx tsx benchmarks/harness/index.ts --tasks needs-consult,needs-handoff --json
 
 ```
 harness/
-├── workloads/     mock scenarios, 8 live tasks, and MBPP (427 Python problems, tests as the verifier)
-├── strategies/    slm-only, llm-only, static-router, naive-cascade, frugal-cascade, automix, pre-router, joule-adaptive
+├── workloads/     mock scenarios, 8 live tasks, MBPP (427 problems), HumanEval (164), MBPP bundles (long-horizon),
+│                  SWE-bench Lite (real repositories in their official docker images, hidden tests)
+├── strategies/    slm-only, mid-only, llm-only, static-router, naive-cascade, frugal-cascade, automix, pre-router,
+│                  joule-adaptive, joule-ladder, and the ablations joule-no-consult / joule-advice / joule-no-verify /
+│                  joule-self-conf / joule-no-static
 ├── evaluators/    success (deterministic vs status-judged), cost, latency, escalation
 ├── runners/       mock runner, live runner
+├── report.py      merge reports across seeds / labels into the README tables (mean ± sd, precision, recall)
+├── learned-trigger.py   offline study: can a learned trigger beat the rules?
+├── swe-selftest.ts      checks the SWE-bench evaluation pipeline (base must fail, gold patch must pass)
 └── index.ts       entry point; writes benchmarks/reports/harness-*.json
 ```
+
+Model selection for live runs: `JOULE_BENCH_SLM`, `JOULE_BENCH_MID` (optional middle rung) and
+`JOULE_BENCH_LLM` as `<provider>:<model>` with provider one of `google`, `anthropic`, `openai`,
+`openrouter`, `ollama`. OpenRouter runs report the billed cost from the API response rather than a
+price table. Hybrid "thinking" models get reasoning turned off (open models) or set to minimal
+(OpenAI) by default; override with `JOULE_BENCH_REASONING="<model>=off|minimal|low,..."`.
 
 Every task run yields a `TaskReport`:
 
@@ -518,3 +530,157 @@ Latency: avg 57671ms  p50 41397ms  p95 118174ms  max 1131185ms
 ```
 
 Joule is the best strategy on both axes: 67% success at 47% of the large model's cost, against 57% at 76% for the FrugalGPT-style cascade and 53% for the large model alone. On long trajectories the small model's incremental work is worth keeping: Joule hands off with a partly built module and passing tests, so the large model finishes rather than restarts. Consultations rarely unblock the small model here (2 of 24), handoffs do (12 of 22). This run needed three policy rules that short tasks never exercised: rising test pass fractions count as progress, a test run that repeats a verified result is not a second failure, and failures are counted within a window of recent steps rather than over the whole run. Spend: $1.99.
+
+### Ablations: one design choice removed at a time (2026-09-05)
+
+Same 50 unseen MBPP problems as the ladder run (offset 230), Llama 3.1 8B → Gemini 2.5 Flash,
+three slm-only runs per problem for the labels. Every row is `joule-adaptive` with exactly one
+switch flipped (`benchmarks/harness/strategies/ablations.ts`); engine, tools, prompts and models are
+identical. Consultations in `joule-adaptive` now run in patch mode (the advisor may return the
+edit itself); `joule-advice` is the previous prose-only behaviour.
+
+```
+python benchmarks/harness/report.py --labels abl
+| strategy         | success | cost / llm-only | LLM used | precision | recall | wasted | consult ok | handoff ok | consults | handoffs |
+|------------------|--------:|----------------:|---------:|----------:|-------:|-------:|-----------:|-----------:|---------:|---------:|
+| llm-only (Flash) |     98% |            1.00 |     100% |           |        |        |            |            |          |          |
+| slm-only (Llama) |     67% |            0.13 |       0% |           |        |        |            |            |          |          |
+| joule-adaptive   |     98% |            0.24 |      38% |       53% |    77% |      5 |        83% |        75% |       21 |        4 |
+| joule-advice     |     98% |            0.42 |      40% |       55% |    85% |      2 |        40% |        92% |       34 |       12 |
+| joule-no-consult |     98% |            0.40 |      88% |       30% |   100% |     19 |        n/a |        98% |        0 |       44 |
+| joule-no-static  |     96% |            0.26 |      38% |       53% |    77% |      3 |        79% |        50% |       19 |        4 |
+| joule-self-conf  |     96% |            0.28 |      46% |       52% |    92% |      6 |        74% |        88% |       25 |        8 |
+| joule-no-verify  |     80% |            0.21 |       6% |       67% |    15% |      1 |       100% |       100% |        1 |        2 |
+```
+
+What each row says:
+
+- **Consult before handoff** (`joule-no-consult`): success is unchanged, cost rises from 0.24 to
+  0.40 of Flash-only, and the large model touches 88% of tasks instead of 38%. Without the cheap
+  first step, every escalation is a handoff and most of them were unnecessary (19 wasted, precision
+  30%).
+- **Patch-mode consultations** (`joule-advice` is the old behaviour): with prose advice, 40% of
+  consultations let the small model finish and 12 tasks still needed a handoff; with the advisor
+  returning the edit, 83% of consultations finish the task and 4 handoffs remain. Cost drops from
+  0.42 to 0.24 at the same success rate. This is the fix for the weak consult numbers on long tasks.
+- **Deterministic verification** (`joule-no-verify`): the largest single effect. Without test and
+  exit-code checks the policy sees almost no failures, escalates on 6% of tasks, and 8 runs finish
+  "completed" with wrong code. Success falls from 98% to 80%.
+- **Evidence instead of self-report** (`joule-self-conf`): the model's own confidence claim replaces
+  the composite. The claim averaged 0.81, and in 72 of the 107 decisions where the verifier had just
+  failed the model still claimed 0.8 or more. The hard triggers (repeat failures, verifier streaks)
+  still fire, so success only dips to 96%, but escalations rise (46% of tasks, 6 wasted) and cost
+  goes up 17%. The self-report adds noise, not information.
+- **Static checks** (`joule-no-static`): a small effect on this slice (96% vs 98%, handoff success
+  50% vs 75%); syntax slips are rarer on 3-line functions than on modules.
+
+Spend for the run: about $0.30 on OpenRouter (Llama), the rest on Gemini Flash.
+
+### 2026 model lineup: Qwen3.5 9B → GPT-5.6 Luna → Claude Sonnet 5 (2026-09-05)
+
+40 unseen MBPP problems (offset 230), all three models through OpenRouter, billed cost taken from
+the API response. Small = `qwen/qwen3.5-9b` (thinking off), middle = `openai/gpt-5.6-luna`
+(reasoning effort minimal), top = `anthropic/claude-sonnet-5`. `joule-adaptive` is two-tier
+(Qwen → Sonnet); `joule-ladder` is Qwen → Luna → Sonnet.
+
+```
+python benchmarks/harness/report.py --labels lineup
+| strategy              | success | avg cost | cost / llm-only | LLM used | precision | recall | consult ok | handoff ok | latency |
+|-----------------------|--------:|---------:|----------------:|---------:|----------:|-------:|-----------:|-----------:|--------:|
+| llm-only (Sonnet 5)   |    100% |  $0.0524 |            1.00 |     100% |           |        |            |            |     13s |
+| mid-only (Luna)       |     60% |  $0.0022 |            0.04 |     100% |           |        |            |            |     14s |
+| slm-only (Qwen 9B)    |     79% |  $0.0021 |            0.04 |       0% |           |        |            |            |     24s |
+| frugal-cascade        |    100% |  $0.0284 |            0.54 |      38% |       40% |    86% |            |            |     27s |
+| joule-adaptive        |    100% |  $0.0081 |            0.15 |      22% |       56% |    71% |       100% |       100% |     25s |
+| joule-ladder          |    100% |  $0.0041 |            0.08 |      22% |       78% |   100% |       100% |       100% |     20s |
+```
+
+Every escalating strategy reaches Sonnet's 100%. The ladder does it at 8% of Sonnet's cost, the
+two-tier policy at 15%, the FrugalGPT-style cascade at 54%. The ladder used the middle rung on 6
+tasks and Sonnet on 3, and every consultation and handoff succeeded. Two things worth knowing
+about the models themselves: a 2026 9B model solves 79% of this slice alone (Llama 3.1 8B: 62%),
+and GPT-5.6 Luna with reasoning set to minimal was the weakest executor here (60%), failing
+mostly by giving up or producing unparseable actions; as a consultant and a rung above the 9B it
+was still enough to lift the ladder to 100% without reaching Sonnet on most tasks. Spend: about
+$3.50, most of it the Sonnet baseline.
+
+### Long-horizon bundles: prose advice vs patch-mode consultations (2026-09-05)
+
+The weak number in the first long-horizon run was consultation success (2 of 24). Patch-mode
+consultations are the fix: the advisor sees the current file and may return the edit itself. To
+measure it on long trajectories, 30 new bundles of four MBPP problems (problems 2 to 121, a
+different slice from the run above), Llama 3.1 8B → Gemini 2.5 Flash, two slm-only runs per
+bundle for the labels (the small model alone solves 12%; 24 of 30 bundles are "hard", pSlm < 0.5).
+`joule-advice` is the prose-only behaviour, `joule-adaptive` the patch-mode default; same engine,
+same static checks, same failure-counting rules.
+
+```
+| strategy       | success | avg cost | LLM used | escalated on hard bundles | consults | consult ok | handoffs | handoff ok | steps |
+|----------------|--------:|---------:|---------:|--------------------------:|---------:|-----------:|---------:|-----------:|------:|
+| slm-only (x2)  |     12% |  $0.0027 |       0% |                           |          |            |          |            |       |
+| joule-advice   |     60% |  $0.0125 |      83% |                     21/24 |       41 |       3/24 |       20 |      10/20 |  12.1 |
+| joule-adaptive |     67% |  $0.0097 |      73% |                     18/24 |       37 |       7/22 |       14 |       7/14 |  11.1 |
+```
+
+With the edit coming back instead of prose, the share of consultations that let the small model
+finish rises from 13% to 32%, seven bundles are solved by consultation alone (three before), and
+the number of handoffs falls from 20 to 14. Success is higher (67% vs 60%) and cost lower (22%
+less) on the same bundles. Consultations still do not carry most of the load on long tasks;
+handoffs do, and half of those succeed. Spend: about $1.20, nearly all Gemini Flash.
+
+### Real repositories: SWE-bench Lite (2026-09-05)
+
+Function-level problems say nothing about repository work, so the harness now runs SWE-bench
+Lite instances in their official evaluation images (`benchmarks/harness/workloads/swebench.ts`).
+The agent gets the issue text and three tools that execute inside the container (`repo_shell`,
+`repo_read`, `repo_edit`/`repo_write`) plus the repository's own test command, and never sees the
+hidden tests. Scoring is the SWE-bench criterion: the instance's test patch is applied over the
+agent's changes and every FAIL_TO_PASS and PASS_TO_PASS test must pass, whether or not the agent
+declared itself done. `swe-selftest.ts` checks the pipeline on every instance (base commit fails,
+gold patch passes); 23 of the 25 pulled instances pass that check and the other two are excluded.
+Slice: 10 Django 4.0, 4 pytest 5.4, 1 pylint 2.15 (sympy was dropped: one test file takes 15+
+minutes to run in its 2017 environment). Per-task cost ceiling $0.20, 30 steps, 40 tool calls.
+
+Small = Qwen3.5 9B (OpenRouter, thinking off), middle = Gemini 2.5 Flash. Two runs:
+
+```
+Run 1: top = Claude Sonnet 5, reasoning breakdowns skip straight to the top rung (the old rule)
+| strategy      | resolved | avg cost | agent finished | notes                                            |
+|---------------|---------:|---------:|---------------:|--------------------------------------------------|
+| slm-only      |     2/15 |   $0.012 |           1/15 |                                                  |
+| mid-only      |     6/15 |   $0.038 |          11/15 |                                                  |
+| joule-ladder  |     8/15 |   $0.121 |           6/15 | middle rung used on 3, Sonnet on 11 (8 rung skips) |
+
+Run 2: top = Gemini 2.5 Pro, breakdowns climb one rung (the new default), parser fix for early-closed JSON
+| strategy      | resolved | avg cost | agent finished | notes                                            |
+|---------------|---------:|---------:|---------------:|--------------------------------------------------|
+| slm-only      |     2/15 |   $0.020 |           1/15 |                                                  |
+| mid-only      |     2/15 |   $0.039 |           5/15 |                                                  |
+| joule-ladder  |     7/15 |   $0.051 |          10/15 | middle rung used on 9, Pro on 5; 4 instances resolved that neither model resolved alone |
+```
+
+What the runs show:
+
+- **The ladder resolves more than any single model in it**, in both runs: 8/15 and 7/15 against
+  6/15 and 2/15 for the middle model alone and 2/15 for the small model. In run 2, four of the
+  seven resolved instances were resolved by neither the 9B model nor Flash on their own; three
+  were resolved by the 9B model without escalating at all, at 1 to 3 cents each.
+- **Where the cost goes.** In run 1 the old rule sent every reasoning breakdown straight to Sonnet,
+  which happened on 8 of 15 instances and made the ladder three times more expensive than Flash
+  alone. Climbing one rung instead (run 2) halves the cost per task and changes the outcome on only
+  one instance. This is why `breakdownSkipsToTop` now defaults to false.
+- **The first run found real bugs.** Exit code 1 from `grep` was counted as a failed step (three
+  searches with no match aborted the small model); whole-file rewrites of 600-line Django files
+  exceeded the 4k-token output cap; the small model often closes the JSON object early and keeps
+  writing; and an agent that finishes without changing any file was accepted. All four are fixed
+  (`EXPLORATION` exit codes, `maxOutputTokens`, balanced-prefix parsing, `finalAnswerRequires`).
+- **What the trajectories look like now.** Where the policy escalated, the reasons were what the
+  design intends: three failures in the recent window, repeated unparseable output, a confidence
+  drop below the handoff threshold. The remaining weakness is the opposite case: a small model
+  that reads files for 30 steps without failing produces no evidence and hits the step limit
+  (2 of the 8 unresolved instances in run 2). Time-based stall detection on unverified reads is the
+  next rule to add.
+- **Fifteen instances is a small sample.** Flash alone went from 6 to 2 resolved between runs with
+  no code change that affects it; treat every number here as ±2 instances.
+
+Spend: run 1 about $2.60 (Sonnet $1.60), run 2 about $1.60 (Gemini) plus $0.50 of Qwen.

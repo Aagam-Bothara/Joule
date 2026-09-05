@@ -77,6 +77,54 @@ On 50 further MBPP problems with Gemini~2.5~Flash as a middle rung and GPT-4o as
 The ladder used the middle rung on 18 problems and the top rung on 6; 80\% of its handoffs succeeded, against 46\% for direct handoffs to the frontier model.
 Flash alone solves 96\% of this slice for 13\% of GPT-4o's cost, so the cheapest correct choice here is the middle model by itself; the ladder's contribution is reaching that outcome without knowing in advance which rung suffices.
 
+\paragraph{Ablations.}
+Table~\ref{tab:ablations} removes one design choice at a time on 50 further MBPP problems with the main pair (three SLM-only runs per problem for the labels).
+Without consultations, success is unchanged but cost rises from 24\% to 40\% of the large model's and the large model touches 88\% of tasks instead of 38\%: every escalation is a handoff and most are unnecessary (precision 30\%).
+Without deterministic verification the policy sees almost no failures, escalates on 6\% of tasks, and 8 of 50 runs finish ``completed'' with wrong code; success falls to 80\%.
+With the model's self-reported confidence in place of the evidence-based composite, the model claimed a confidence of at least 0.8 in 72 of the 107 decisions that immediately followed a failed verification; the hard triggers still fire, so success only dips to 96\%, but escalations rise (46\% of tasks) and cost by 17\%.
+Prose-only consultations (the earlier design) keep success at 98\% but only 40\% of them let the small model finish, against 83\% when the consultant returns the edit; handoffs fall from 12 to 4 and cost from 42\% to 24\%.
+Static checks are a small effect on three-line functions (96\% versus 98\%).
+
+\begin{table}[t]
+\centering
+\small
+\caption{Ablations on 50 MBPP problems, Llama~3.1~8B $\rightarrow$ Gemini~2.5~Flash. Each row is the full policy with one choice removed. Consult ok: consultations after which the small model finished without a handoff.}
+\label{tab:ablations}
+\begin{tabular}{lrrrrrr}
+\toprule
+Variant & Success & Cost/LLM & LLM used & Precision & Recall & Consult ok \\
+\midrule
+LLM-only & 98\% & 1.00 & 100\% & -- & -- & -- \\
+SLM-only & 67\% & 0.13 & 0\% & -- & -- & -- \\
+\textbf{Joule (full)} & \textbf{98\%} & \textbf{0.24} & 38\% & 53\% & 77\% & 83\% \\
+No consultations & 98\% & 0.40 & 88\% & 30\% & 100\% & -- \\
+Prose-only consultations & 98\% & 0.42 & 40\% & 55\% & 85\% & 40\% \\
+No static checks & 96\% & 0.26 & 38\% & 53\% & 77\% & 79\% \\
+Self-reported confidence & 96\% & 0.28 & 46\% & 52\% & 92\% & 74\% \\
+No verification & 80\% & 0.21 & 6\% & 67\% & 15\% & -- \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Consultations on long tasks.}
+On 30 further four-problem bundles (the small model alone solves 12\%), returning the edit raises the share of consultations after which the small model finishes from 13\% to 32\%, reduces handoffs from 20 to 14, and improves success from 60\% to 67\% at 22\% lower cost.
+Handoffs still carry most of the load on long tasks; consultations now carry a meaningful part of it.
+
+\paragraph{A 2026 model lineup.}
+The comparison holds for current models.
+With Qwen3.5~9B as the small model, GPT-5.6~Luna (minimal reasoning) as the middle rung, and Claude~Sonnet~5 on top, on 40 further MBPP problems every escalating strategy reaches Sonnet's 100\%; the ladder does so at 8\% of Sonnet's cost, the two-tier policy at 15\%, and the FrugalGPT-style cascade at 54\%.
+The ladder used the middle rung on 6 problems and Sonnet on 3, with precision 78\% and recall 100\%.
+The 9B model alone solves 79\% of the slice (Llama~3.1~8B: 62\%); the middle model alone, at minimal reasoning effort, only 60\%, yet as a rung above the 9B model it was enough to keep Sonnet out of most tasks.
+
+\paragraph{Real repositories.}
+To test the policy on repository work rather than single functions, we run SWE-bench Lite~\cite{jimenez2024swebench} instances in their official evaluation images: the agent sees the issue text and edits, reads, and runs commands inside the container; the hidden tests are applied afterwards and an instance counts as resolved only if every FAIL\_TO\_PASS and PASS\_TO\_PASS test passes.
+On 15 instances (Django, pytest, pylint) with Qwen3.5~9B $\rightarrow$ Gemini~2.5~Flash $\rightarrow$ Gemini~2.5~Pro and a \$0.20 cost ceiling per task, the small model alone resolves 2, the middle model alone 2, and the ladder 7, four of which neither model resolved on its own; three were resolved by the 9B model without escalating, at one to three cents each.
+A first run of the same slice with Claude~Sonnet~5 on top and the earlier rule that sends reasoning breakdowns straight to the top rung resolved 8 of 15 at 2.4$\times$ the cost, because the 9B model's unparseable first turns on 8 instances went directly to the frontier model; climbing one rung instead is now the default.
+That run also exposed defects that function-level problems never trigger: search commands that exit 1 were counted as failed steps, whole-file rewrites of 600-line files exceeded the output cap, and a run that finished without changing any file was accepted.
+The remaining weakness is the opposite of over-escalation: a small model that reads files for thirty steps without ever failing produces no evidence and exhausts its step budget.
+We have since added an exploration-stall rule (eight consecutive successful steps that neither change a file nor verify anything trigger a consult); it is implemented and unit-tested but not yet measured on the repository slice.
+Fifteen instances is a small sample; the middle model alone moved between 6 and 2 resolved across the two runs with no change that affects it.
+
 \paragraph{Small-model compatibility.}
 Nine small models from 3B to 70B drove the same step agent on 20 further problems with Gemini~2.5~Flash as the large model.
 All reach 90--100\% success under adaptive escalation; the 7B--8B open models (Qwen~2.5~7B, Llama~3.1~8B) finish 100\% at about \$0.003 per problem, a third of the large model's cost, with essentially no unparseable turns.
@@ -92,6 +140,7 @@ Replayed as a trigger (escalate when predicted success falls below $\theta$) on 
 We read this as evidence that the rule set is already close to what the current signals support; better triggers need richer evidence at the step, such as the content of failing tests, not a better classifier over the same signals.
 
 \paragraph{Limitations.}
-Two coding workloads, one small model in the main comparison, and rule-based triggers whose thresholds were set by hand.
+Three coding workloads, one small model in the main comparison, a 15-instance repository slice, and rule-based triggers whose thresholds were set by hand.
+The three-rung and repository results are single-seed.
 Latency is not a win: adaptive runs take 1.7$\times$ longer than the large model alone, because the small model takes more turns and each is slower.
 The counterfactual labels are themselves estimates from three runs of a stochastic model.

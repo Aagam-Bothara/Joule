@@ -64,6 +64,15 @@ export const DEFAULT_POLICY_CONFIG: Required<EscalationPolicyConfig> = {
   verifyRetries: 1,
   ladder: [ModelTier.SLM, ModelTier.MID, ModelTier.LLM],
   failureWindow: 6,
+  consultMode: 'patch',
+  verification: 'deterministic',
+  confidenceSource: 'evidence',
+  staticChecks: true,
+  observationChars: 1500,
+  maxOutputTokens: 4096,
+  finalAnswerRequires: 'none',
+  breakdownSkipsToTop: false,
+  explorationStallSteps: 8,
 };
 
 export class RuleBasedEscalationPolicy {
@@ -105,7 +114,11 @@ export class RuleBasedEscalationPolicy {
     const ownFailures = state.failures.filter(f => f.step > since);
     // Failures that moved the verifier forward are progress, and a re-run that
     // reports the same result is not a new failure; neither counts as being stuck.
-    const failures = Math.max(0, ownFailures.length - progressVerificationFailures(state, since) - duplicateVerificationFailures(state, since));
+    // A static-check failure (a file that does not compile) is a cheap slip the
+    // agent gets to fix on its own; it only matters when the same one repeats,
+    // which the repeat trigger below catches.
+    const cheap = ownFailures.filter(f => f.kind === 'static_check_failed').length;
+    const failures = Math.max(0, ownFailures.length - cheap - progressVerificationFailures(state, since) - duplicateVerificationFailures(state, since));
     const repeats = maxRepeatedFailure(state, since);
     const last = lastFailure(state);
     /** Occurrences of the latest failure's signature at this rung (Failure.count is global). */
@@ -161,6 +174,9 @@ export class RuleBasedEscalationPolicy {
     }
     if (this.stalled(state)) {
       return { action: 'consult', reason: `no verified progress in the last ${cfg.stallSteps} steps` };
+    }
+    if (this.exploring(state)) {
+      return { action: 'consult', reason: `${cfg.explorationStallSteps} steps of reading and searching without a change or a verified result` };
     }
 
     // ── 4. Soft thresholds ──────────────────────────────────────────
@@ -243,6 +259,21 @@ export class RuleBasedEscalationPolicy {
     return { action, reason };
   }
 
+  /**
+   * Exploration stall: the last N steps all succeeded but none changed a file
+   * and none was verified. A model reading a repository for twenty turns never
+   * fails, so no other rule sees it. Fires once per stretch: a consult resets
+   * the window, and so does any write or verified step.
+   */
+  private exploring(state: ExecutionState): boolean {
+    const n = this.config.explorationStallSteps;
+    const since = Math.max(state.handoffAtStep ?? -1, ...state.advice.map(a => a.step));
+    const recent = state.completedSteps.filter(s => s.stepIndex > since).slice(-n);
+    if (recent.length < n) return false;
+    return recent.every(s => s.success && s.verified === undefined && !(typeof s.toolArgs?.content === 'string')
+      && (s.output === undefined || typeof s.output !== 'object' || (s.output as { written?: unknown }).written !== true));
+  }
+
   private stalled(state: ExecutionState): boolean {
     const n = this.config.stallSteps;
     // Rung-local: steps before the last handoff belong to the previous model.
@@ -271,6 +302,8 @@ function verifiedSteps(state: ExecutionState): StepResult[] {
   for (let i = 0; i < all.length; i++) {
     const s = all[i];
     if (s.verified === undefined) continue;
+    // Static checks are not attempts at the task's own verifier.
+    if (s.verifierKind === 'static_check') continue;
     const prev = all[i - 1];
     const duplicate = s.verified === false && prev?.verified === false
       && s.verifyScore !== undefined && prev.verifyScore !== undefined && s.verifyScore === prev.verifyScore;

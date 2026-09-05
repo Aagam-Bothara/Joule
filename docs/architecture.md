@@ -359,7 +359,8 @@ EscalationPolicy
 | `StepVerifier` | Deterministic checks: `output_check`, `dom_check`, `command_exit`, `test_result`. Command outputs with a non-zero exit code fail verification even when the tool call succeeded. `llm_judge` is opt-in and always labelled. |
 | `ConfidenceEngine` | `composite = w·toolSuccess + w·verification + w·progress + w·budgetHeadroom + w·(1−repeatedFailure) − w·repeatedFailure − w·contradiction`. No model self-report enters it. |
 | `RuleBasedEscalationPolicy` | Ordered rules: abort hard stops → handoff hard triggers (3 failures, give-up, repeated malformed output, consults exhausted) → consult triggers (same failure twice, verification contradiction, stall, agent asked) → soft thresholds. Every escalation is gated by `BudgetManager.canAfford`; a handoff also consumes an escalation unit. |
-| `Consultant` | Builds a `ConsultationRequest` (goal, question, evidence, hypotheses, attempts, constraints, token cap) and asks the LLM once. The answer is injected into the SLM's next turn and the following steps carry the `consultId`. |
+| `Consultant` | Builds a `ConsultationRequest` (goal, question, evidence, hypotheses, attempts, constraints, token cap, current file contents) and asks the next rung once. In `patch` mode (default) the reply may carry a concrete file edit that the executor applies before the small model continues; the advice and the applied edit are injected into the SLM's next turn and the following steps carry the `consultId`. |
+| Static check | A source file the agent has just written is compile-checked (`py_compile` for Python) before anything else happens. A syntax error goes straight back to the agent with the line, counts as a cheap slip rather than a failure, and only escalates when the same error repeats. |
 | Handoff | `HandoffContext` is rendered from the state and becomes the LLM's only prompt; the same `StepAgent` continues at the LLM tier. |
 | Trajectory | Every step logs an `escalation_decision` event; the trace carries a per-tier token/cost rollup (`tierUsage`), and `TaskResult.trajectory` is the per-task report used by the benchmarks. |
 
@@ -383,7 +384,10 @@ provider with `models.mid`, and its provider order with `routing.providerPriorit
 
 - CONSULT asks the next rung up; HANDOFF moves execution to the next rung up.
 - A reasoning breakdown (repeated unparseable output, or giving up before any step succeeded)
-  skips straight to the top rung, since the middle rung would only burn a hop.
+  hands off like any other failure, one rung up. `breakdownSkipsToTop` sends it straight to the
+  top rung instead; on real repositories that turned out to be the single largest cost driver,
+  because the middle rung resolves a good share of what the small model cannot at a fraction of
+  the frontier price.
 - Rungs no provider serves are dropped, so a two-model setup behaves exactly as before.
 - `routing.escalation.ladder` restricts the rungs (for example `['slm', 'llm']` to compare
   two-tier and three-tier on the same models). `mid-only` pins execution to the middle rung.
@@ -393,6 +397,39 @@ provider with `models.mid`, and its provider order with `routing.providerPriorit
 Why: on the benchmarks, the middle rung resolved almost everything the small model could not,
 and the frontier model was rarely needed. Escalating to the frontier directly costs four to
 eight times more per rescued task than escalating to the efficient model first.
+
+### Patch-mode consultations
+
+A consultation used to return prose. On short tasks that worked; on long tasks
+the small model turned correct advice into an incorrect edit often enough that
+most consultations ended in a handoff anyway. In `patch` mode the advisor
+answers the question and, when the fix is a code change it can state exactly,
+returns the edit itself: a whole-file `content` for small files or one exact
+`search`/`replace` pair for large ones. The executor applies it through the
+same write tool the agent uses (so sandboxing and tracing apply), the static
+check runs on it, and the small model is told the edit is in place and asked
+to verify. The applied edit is a step of its own in the trajectory, attributed
+to the advisor's tier and the consult id. Edits on files the run has not
+touched, or whose search text does not match exactly once, are dropped; the
+prose advice still returns. `consultMode: advice` restores the old behaviour.
+
+### Ablation switches
+
+Each design claim has a switch that removes exactly that choice so the
+benchmark harness can measure it (`benchmarks/harness/strategies/ablations.ts`):
+
+| Claim | Switch | Harness strategy |
+| --- | --- | --- |
+| Consult before handoff | `maxConsultations: 0` | `joule-no-consult` |
+| Patch-mode consultations | `consultMode: advice` | `joule-advice` |
+| Deterministic verification | `verification: none` | `joule-no-verify` |
+| No self-reported confidence | `confidenceSource: self-report` | `joule-self-conf` |
+| Static checks as evidence | `staticChecks: false` | `joule-no-static` |
+
+The self-report switch asks the agent for a `confidence` number in every action
+and uses it as the composite; the evidence sub-signals are still recorded so
+the two can be compared decision by decision. The verification switch removes
+declared checks, exit-code checks and static checks together.
 
 ### What counts as a failure
 
@@ -411,3 +448,11 @@ policy now applies these rules before any threshold:
 - **Rung-local after a handoff.** The model that takes over is judged on its own steps,
   failures and consultations; the record of the model it replaced does not trigger its next
   handoff, which would otherwise happen on its first turn.
+- **Reading is not progress.** Eight successful steps in a row that neither change a file nor
+  verify anything (reads, searches, listings) trigger a consult. On repositories a small model
+  can explore for thirty turns without a single failure; the failure-based rules never see it,
+  this one does. A consult, a write or a verified step resets the window.
+- **A syntax error is a slip, not being stuck.** A static-check failure on a freshly written
+  file is excluded from the failure count and from the verification retry budget; the agent
+  gets the error line and fixes it. Only the same syntax error twice in a row escalates, through
+  the ordinary repeat rule.

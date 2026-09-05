@@ -188,7 +188,8 @@ describe('AdaptiveExecutor — modes and escalation', () => {
     expect(llmCalls[0].messages).toHaveLength(1);
     expect(llmCalls[0].messages[0].content).toContain('QUESTION');
     expect(llmCalls[0].messages[0].content).toContain('flaky_tool');
-    expect(llmCalls[0].maxTokens).toBe(800);
+    // Patch-mode consults may carry a file edit, so the cap is above the 800-token advice budget.
+    expect(llmCalls[0].maxTokens).toBeGreaterThanOrEqual(800);
 
     // The SLM's next turn saw the advice, and the following step is attributed to the consult.
     const slmAfterAdvice = calls.filter(c => c.tier === 'slm')[2];
@@ -439,12 +440,12 @@ describe('AdaptiveExecutor — modes and escalation', () => {
     expect(renderTrajectory(t)).toContain('HANDOFF to MID');
   });
 
-  it('ladder: a reasoning breakdown skips the middle rung', async () => {
+  it('ladder: a reasoning breakdown skips the middle rung when breakdownSkipsToTop is set', async () => {
     const { executor, calls } = build({
       slm: ['not an action', 'still prose'],
       mid: [finalAnswer('mid should not be used')],
       llm: [finalAnswer('answer from llm')],
-    }, tools);
+    }, tools, { escalation: { breakdownSkipsToTop: true } });
 
     const result = await executor.execute(task('adaptive'));
 
@@ -452,6 +453,21 @@ describe('AdaptiveExecutor — modes and escalation', () => {
     expect(result.result).toBe('answer from llm');
     expect(calls.some(c => c.tier === 'mid')).toBe(false);
     expect(result.trajectory?.steps.find(s => s.action === 'handoff')?.reason).toContain('skipped rung');
+  });
+
+  it('ladder: by default a reasoning breakdown climbs one rung like any other handoff', async () => {
+    const { executor, calls } = build({
+      slm: ['not an action', 'still prose'],
+      mid: [finalAnswer('answer from mid')],
+      llm: [finalAnswer('llm should not be used')],
+    }, tools);
+
+    const result = await executor.execute(task('adaptive'));
+
+    expect(result.status).toBe('completed');
+    expect(result.result).toBe('answer from mid');
+    expect(calls.some(c => c.tier === 'llm')).toBe(false);
+    expect(result.trajectory?.steps.find(s => s.action === 'handoff')?.reason).not.toContain('skipped rung');
   });
 
   it('mid-only pins the middle rung', async () => {

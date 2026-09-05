@@ -7,6 +7,8 @@
  *   npx tsx benchmarks/harness/index.ts --live --strategies slm-only,llm-only,frugal-cascade,automix,pre-router,joule-adaptive
  *   npx tsx benchmarks/harness/index.ts --tasks needs-consult,needs-handoff --json
  *   npx tsx benchmarks/harness/index.ts --live ... --resume benchmarks/reports/partial-mbpp-<label>.json   # continue a crashed run
+ *   npx tsx benchmarks/harness/index.ts --live --workload swebench --n 15 --strategies slm-only,mid-only,joule-ladder
+ *   npx tsx benchmarks/harness/index.ts --live --workload mbpp --n 50 --offset 230 --strategies joule-adaptive,joule-no-consult,joule-advice,joule-no-verify,joule-self-conf,joule-no-static
  *
  * Model pair for live runs: JOULE_BENCH_SLM / JOULE_BENCH_LLM as <provider>:<model>
  * (google | anthropic | openai | openrouter | ollama). JOULE_BENCH_LABEL names the
@@ -75,7 +77,7 @@ export function renderReport(report: HarnessReport): string {
 async function main(): Promise<void> {
   const live = process.argv.includes('--live');
   const json = process.argv.includes('--json');
-  const workload = (arg('--workload') as 'live' | 'mbpp' | 'humaneval' | 'mbpp-bundle' | undefined) ?? (live ? 'live' : 'mock');
+  const workload = (arg('--workload') as 'live' | 'mbpp' | 'humaneval' | 'mbpp-bundle' | 'swebench' | undefined) ?? (live ? 'live' : 'mock');
   const n = arg('--n') ? Number(arg('--n')) : undefined;
   const bundle = arg('--bundle') ? Number(arg('--bundle')) : undefined;
   const offset = arg('--offset') ? Number(arg('--offset')) : undefined;
@@ -97,7 +99,7 @@ async function main(): Promise<void> {
   let models: HarnessReport['models'];
   if (live) {
     const r = await runLiveBenchmarks(strategies, tasks, {
-      workload: workload === 'mbpp' ? 'mbpp' : workload === 'humaneval' ? 'humaneval' : workload === 'mbpp-bundle' ? 'mbpp-bundle' : 'live', n, offset, repeats, resume, bundle,
+      workload: workload === 'mbpp' ? 'mbpp' : workload === 'humaneval' ? 'humaneval' : workload === 'mbpp-bundle' ? 'mbpp-bundle' : workload === 'swebench' ? 'swebench' : 'live', n, offset, repeats, resume, bundle,
       onCheckpoint: rs => writeFileSync(checkpointFile, JSON.stringify({ partial: true, workload, label, tasks: rs }, null, 2)),
     });
     reports = r.reports;
