@@ -277,9 +277,12 @@ export interface EscalationPolicyConfig {
   /**
    * What a final answer must be backed by. 'write': the run must contain at
    * least one successful write/edit step, otherwise the answer is refused,
-   * counted as a failure, and the agent is told to continue. Default: 'none'
+   * counted as a failure, and the agent is told to continue. 'verified': the
+   * run must also contain a step that verified successfully (a test or check
+   * that passed) after the most recent change, so a plausible-looking edit
+   * that was never checked cannot end the task. Default: 'none'
    */
-  finalAnswerRequires?: 'none' | 'write';
+  finalAnswerRequires?: 'none' | 'write' | 'verified';
   /**
    * On a reasoning breakdown (repeated unparseable output, or giving up before
    * any step succeeded), hand off straight to the top rung instead of the next
@@ -295,6 +298,12 @@ export interface EscalationPolicyConfig {
    * the failure-based rules never fire; this one does. Default: 8
    */
   explorationStallSteps?: number;
+  /**
+   * Count the step cap per rung: after a handoff the new model gets a fresh
+   * `maxSteps` of its own instead of whatever the previous rung left. The cost
+   * ceiling remains the hard limit. Default: false
+   */
+  rungLocalSteps?: boolean;
 }
 
 // ── Reporting ────────────────────────────────────────────────────────
@@ -309,6 +318,9 @@ export interface TierUsage {
   slmCalls: number;
   midCalls: number;
   llmCalls: number;
+  /** Input tokens across all tiers, and the part providers served from their prompt cache */
+  promptTokens: number;
+  cachedPromptTokens: number;
 }
 
 export interface TrajectoryStep {

@@ -56,7 +56,8 @@ export type StrategyName =
   | 'joule-advice'
   | 'joule-no-verify'
   | 'joule-self-conf'
-  | 'joule-no-static';
+  | 'joule-no-static'
+  | 'joule-ladder-strict';
 
 /**
  * How a multi-stage strategy decides to move to the next mode:
@@ -107,6 +108,9 @@ export interface TaskReport {
   /** Tokens at the optional middle rung */
   midTokens?: number;
   llmTokens: number;
+  /** Input tokens of Joule's model calls, and the part served from provider prompt caches */
+  promptTokens?: number;
+  cachedPromptTokens?: number;
   /** Did this strategy use any rung above the small model (middle or top)? */
   llmUsed: boolean;
   consultations: number;

@@ -368,13 +368,13 @@ describe('Budget and trace additions', () => {
   });
 
   it('computeTierUsage splits model_call events by tier', () => {
-    const ev = (tier: string, totalTokens: number, costUsd: number) => ({
-      id: 'e', traceId: 't', type: 'model_call' as const, timestamp: 0, wallClock: '', data: { tier, totalTokens, costUsd },
+    const ev = (tier: string, totalTokens: number, costUsd: number, extra: Record<string, number> = {}) => ({
+      id: 'e', traceId: 't', type: 'model_call' as const, timestamp: 0, wallClock: '', data: { tier, totalTokens, costUsd, ...extra },
     });
     const usage = computeTierUsage([{
-      id: 's', traceId: 't', name: 'root', startTime: 0, events: [ev('slm', 100, 0.001), ev('llm', 50, 0.01)],
-      children: [{ id: 'c', traceId: 't', name: 'child', startTime: 0, events: [ev('slm', 20, 0.0002)], children: [] }],
+      id: 's', traceId: 't', name: 'root', startTime: 0, events: [ev('slm', 100, 0.001), ev('llm', 50, 0.01, { promptTokens: 40, cachedPromptTokens: 30 })],
+      children: [{ id: 'c', traceId: 't', name: 'child', startTime: 0, events: [ev('slm', 20, 0.0002, { promptTokens: 15 })], children: [] }],
     }]);
-    expect(usage).toEqual({ slmTokens: 120, midTokens: 0, llmTokens: 50, slmCostUsd: 0.0012, midCostUsd: 0, llmCostUsd: 0.01, slmCalls: 2, midCalls: 0, llmCalls: 1 });
+    expect(usage).toEqual({ slmTokens: 120, midTokens: 0, llmTokens: 50, slmCostUsd: 0.0012, midCostUsd: 0, llmCostUsd: 0.01, slmCalls: 2, midCalls: 0, llmCalls: 1, promptTokens: 55, cachedPromptTokens: 30 });
   });
 });

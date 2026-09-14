@@ -8,7 +8,7 @@ import { preRouter } from './pre-router.js';
 import { jouleAdaptive } from './joule-adaptive.js';
 import { jouleLadder } from './joule-ladder.js';
 import { midOnly } from './mid-only.js';
-import { jouleNoConsult, jouleAdvice, jouleNoVerify, jouleSelfConf, jouleNoStatic } from './ablations.js';
+import { jouleNoConsult, jouleAdvice, jouleNoVerify, jouleSelfConf, jouleNoStatic, jouleLadderStrict } from './ablations.js';
 import type { Strategy, StrategyName } from '../types.js';
 
 export const STRATEGIES: Record<StrategyName, Strategy> = {
@@ -27,6 +27,7 @@ export const STRATEGIES: Record<StrategyName, Strategy> = {
   'joule-no-verify': jouleNoVerify,
   'joule-self-conf': jouleSelfConf,
   'joule-no-static': jouleNoStatic,
+  'joule-ladder-strict': jouleLadderStrict,
 };
 
 /** The ablation set, in the order the README reports them. */

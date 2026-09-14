@@ -684,3 +684,51 @@ What the runs show:
   no code change that affects it; treat every number here as ±2 instances.
 
 Spend: run 1 about $2.60 (Sonnet $1.60), run 2 about $1.60 (Gemini) plus $0.50 of Qwen.
+
+A follow-up on the two instances that hit the step limit in run 2, after adding the
+exploration-stall rule (`explorationStallSteps`, default 8): django-13925 resolved (2/2 hidden
+tests) and pytest-7220 did not. Neither outcome is the rule's doing: in both runs the small model
+escalated earlier through a breakdown or a give-up, and the stall rule never fired. It stays
+implemented and unit-tested but unmeasured; a proper test needs the full slice. Cost: 7 cents.
+
+### The cheap 2026 stack, 100 problems (2026-09-06)
+
+The same comparison on models a student can afford: small = Qwen3.5 9B (thinking off), middle =
+DeepSeek V4 Flash, top = DeepSeek V4 Pro, all through OpenRouter at the billed price. 100 unseen
+MBPP problems (offset 230), three small-model-only runs per problem for the labels.
+
+```
+python benchmarks/harness/report.py --labels lineup2
+| strategy                  | success | avg cost | cost / Pro | LLM used | precision | recall | wasted | consult ok | handoff ok |
+|---------------------------|--------:|---------:|-----------:|---------:|----------:|-------:|-------:|-----------:|-----------:|
+| Qwen3.5 9B alone (x3)     |     79% |  $0.0022 |       0.19 |       0% |           |        |        |            |            |
+| DeepSeek V4 Flash alone   |     97% |  $0.0015 |       0.13 |     100% |       18% |   100% |     67 |            |            |
+| DeepSeek V4 Pro alone     |     98% |  $0.0114 |       1.00 |     100% |           |        |        |            |            |
+| FrugalGPT-style cascade   |     98% |  $0.0068 |       0.59 |      54% |       24% |    72% |     32 |            |            |
+| Joule two-tier (9B -> Pro)|     98% |  $0.0042 |       0.37 |      28% |       46% |    72% |      7 |        80% |        92% |
+| Joule ladder              |     98% |  $0.0031 |       0.27 |      25% |       48% |    67% |      6 |        64% |        89% |
+```
+
+Every escalating strategy reaches the frontier model's 98%. The ladder does it at 27% of the
+frontier's cost, the two-tier policy at 37%, the cascade at 59%. Two more seeds of both Joule
+policies on the same problems (`report.py --labels lineup2,lineup2-s2,lineup2-s3 --seeds`) give
+two-tier 98% ± 1.5 at 0.37 ± 0.00 and ladder 96% ± 2.0 at 0.27 ± 0.05, so the cost ratios are
+stable and the ladder gives up about two points of success for a quarter less cost; the cascade escalates on 54 of
+100 problems and 32 of those escalations go to problems the small model solves at least four
+times in five. Only 18 of the 100 problems actually need escalation (the 9B model solves the rest
+on its own most of the time), which is why every strategy's precision is lower here than on the
+Llama runs: there is less to find.
+
+How much of the top model's accuracy survives a handoff: the report's `handoff kept` column divides
+success on handed-off problems by V4 Pro's success alone on the same problems (the "retention" that
+cross-model KV-cache transfer work reports; Heo et al., arXiv:2608.03893, get 73–98% within one
+model family). Over the three seeds the two-tier policy keeps 93% and the ladder 86%, so the
+ladder's two lost points come from problems it hands off, partly because its first handoff lands
+on V4 Flash rather than Pro. Earlier stacks keep 95–100% by the same measure.
+
+The caveat from the Gemini runs holds with this stack too. DeepSeek V4 Flash alone is 97% at
+$0.0015, cheaper than the 9B model, because it finishes in fewer steps. On problems this small a
+capable cheap model needs no escalation, and the ladder pays for the small model's turns before
+reaching it. Joule's case is the workload where no single cheap model suffices, which is the
+repository slice below, not three-line functions. Spend: about $3.60. Latency: the ladder averaged
+31 s per problem against 15 s for Pro alone.

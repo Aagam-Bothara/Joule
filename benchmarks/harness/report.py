@@ -3,6 +3,11 @@ Merge harness reports and summarise them the way the README tables need:
 per-strategy success, cost, cost ratio vs llm-only, escalation precision /
 recall against counterfactual labels, and mean +/- sd across seeds.
 
+"handoff kept" is success on handed-off tasks divided by llm-only's success on
+the same tasks: how much of the top model's accuracy survives the switch.
+"cached input" is the share of Joule's input tokens served from provider
+prompt caches (reports written before that was recorded show n/a).
+
     python benchmarks/harness/report.py --labels abl            # one run
     python benchmarks/harness/report.py --labels ladder-v2,ladder-s2,ladder-s3 --seeds
     python benchmarks/harness/report.py --labels abl --workload mbpp --json out.json
@@ -27,7 +32,8 @@ def arg(name, default=None):
 def load(labels, workload):
     out = []
     for label in labels:
-        files = sorted(glob.glob(os.path.join(REPORTS, f'harness-live-{workload}-{label}-*.json')))
+        # The timestamp follows the label directly, so 'lineup2' does not also match 'lineup2-s2'.
+        files = sorted(glob.glob(os.path.join(REPORTS, f'harness-live-{workload}-{label}-20[0-9][0-9]-*.json')))
         if not files:
             print(f'no report for label {label}', file=sys.stderr)
             continue
@@ -67,7 +73,7 @@ def summarise(reports, per_seed=False):
         cost = sum(t['cost'] for t in runs)
         llm_cost = sum(llm[t['workloadId']]['cost'] for t in runs if t['workloadId'] in llm)
         escalated = needed = tp = wasted = 0
-        consulted = consult_ok = handed = hand_ok = 0
+        consulted = consult_ok = handed = hand_ok = hand_top = 0
         for t in runs:
             p = p_slm.get(t['workloadId'])
             l = llm.get(t['workloadId'])
@@ -85,7 +91,10 @@ def summarise(reports, per_seed=False):
             if t['handoffs'] > 0:
                 handed += 1
                 hand_ok += t['success']
+                hand_top += l['success']
         rate = lambda a, b: a / b if b else None
+        prompt = sum(t.get('promptTokens') or 0 for t in runs)
+        cached = sum(t.get('cachedPromptTokens') or 0 for t in runs)
         baseline = runs and runs[0]['strategy'] in ('slm-only', 'llm-only', 'mid-only')
         if baseline:
             escalated = needed = tp = wasted = 0
@@ -94,6 +103,7 @@ def summarise(reports, per_seed=False):
             'costRatio': cost / llm_cost if llm_cost else None, 'llmUsed': sum(1 for t in runs if t['llmUsed']) / n if n else None,
             'precision': None if baseline else rate(tp, escalated), 'recall': None if baseline else rate(tp, needed), 'wasted': None if baseline else wasted, 'escalated': escalated, 'needed': needed,
             'consultOk': rate(consult_ok, consulted), 'handoffOk': rate(hand_ok, handed), 'consults': consulted, 'handoffs': handed,
+            'handoffKept': rate(hand_ok, hand_top), 'cachedShare': rate(cached, prompt),
         }
 
     strategies = sorted({t['strategy'] for t in tasks}, key=lambda s: (s not in ('slm-only', 'llm-only', 'mid-only'), s))
@@ -148,11 +158,11 @@ def main():
     summary, n_labels, n_llm = summarise(reports, per_seed)
     print(f'reports: {", ".join(r["_file"] for r in reports)}')
     print(f'labels: pSlm for {n_labels} tasks, llm-only for {n_llm} tasks' + (f'; per-seed mean ± sd over {max(v.get("seeds", 1) for v in summary.values())} seeds' if per_seed else ''))
-    print('| strategy | tasks | success | avg cost | cost / llm-only | LLM used | precision | recall | wasted | consult ok | handoff ok |')
-    print('|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|')
+    print('| strategy | tasks | success | avg cost | cost / llm-only | LLM used | precision | recall | wasted | consult ok | handoff ok | handoff kept | cached input |')
+    print('|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|')
     for s, m in summary.items():
         sd = (lambda k: m.get(k + 'Sd')) if per_seed else (lambda k: None)
-        print(f"| {s} | {int(m['tasks'])} | {fmt(m['success'], 'pct', sd('success'))} | {fmt(m['avgCost'], 'usd')} | {fmt(m['costRatio'], 'ratio', sd('costRatio'))} | {fmt(m['llmUsed'])} | {fmt(m['precision'], 'pct', sd('precision'))} | {fmt(m['recall'], 'pct', sd('recall'))} | {m['wasted'] if m['wasted'] is None else round(m['wasted'], 1)} | {fmt(m['consultOk'])} | {fmt(m['handoffOk'])} |")
+        print(f"| {s} | {int(m['tasks'])} | {fmt(m['success'], 'pct', sd('success'))} | {fmt(m['avgCost'], 'usd')} | {fmt(m['costRatio'], 'ratio', sd('costRatio'))} | {fmt(m['llmUsed'])} | {fmt(m['precision'], 'pct', sd('precision'))} | {fmt(m['recall'], 'pct', sd('recall'))} | {m['wasted'] if m['wasted'] is None else round(m['wasted'], 1)} | {fmt(m['consultOk'])} | {fmt(m['handoffOk'])} | {fmt(m['handoffKept'])} | {fmt(m['cachedShare'])} |")
     out = arg('--json')
     if out:
         with open(out, 'w', encoding='utf-8') as f:

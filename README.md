@@ -13,7 +13,7 @@ gated by a hard budget.
 
 ![CI](https://github.com/Aagam-Bothara/Joule/actions/workflows/test.yml/badge.svg)
 ![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)
-![Tests](https://img.shields.io/badge/tests-1202%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-1205%20passing-brightgreen)
 ![TypeScript](https://img.shields.io/badge/TypeScript-100%25-blue)
 ![Node.js](https://img.shields.io/badge/node-%3E%3D22-brightgreen)
 
@@ -190,6 +190,13 @@ OpenRouter's reported cost:
 | FrugalGPT-style cascade (Qwen → Sonnet) | 100% | $0.0284 | 0.54 |
 | Joule, two tiers (Qwen → Sonnet) | 100% | $0.0081 | 0.15 |
 | **Joule, ladder (Qwen → Luna → Sonnet)** | **100%** | **$0.0041** | **0.08** |
+
+On a stack a student can afford (Qwen3.5 9B → DeepSeek V4 Flash → DeepSeek V4 Pro, 100 problems),
+the ladder reaches 96% ± 2 at 27% of DeepSeek Pro's cost and the two-tier policy 98% ± 1.5 at 37%
+(three seeds); the cascade needs 59% for 98%. DeepSeek Flash alone
+is 97% for even less, which is the honest limit of small-model-first on three-line functions: when a
+cheap model needs no help, there is nothing to escalate. The repository result below is where
+escalation earns its keep.
 
 **Real repositories.** Fifteen SWE-bench Lite instances (Django, pytest, pylint) in their official
 docker images, hidden tests, Qwen3.5 9B → Gemini Flash → Gemini Pro, $0.20 cap per task. The 9B

@@ -115,6 +115,10 @@ The comparison holds for current models.
 With Qwen3.5~9B as the small model, GPT-5.6~Luna (minimal reasoning) as the middle rung, and Claude~Sonnet~5 on top, on 40 further MBPP problems every escalating strategy reaches Sonnet's 100\%; the ladder does so at 8\% of Sonnet's cost, the two-tier policy at 15\%, and the FrugalGPT-style cascade at 54\%.
 The ladder used the middle rung on 6 problems and Sonnet on 3, with precision 78\% and recall 100\%.
 The 9B model alone solves 79\% of the slice (Llama~3.1~8B: 62\%); the middle model alone, at minimal reasoning effort, only 60\%, yet as a rung above the 9B model it was enough to keep Sonnet out of most tasks.
+On a cheaper stack (Qwen3.5~9B $
+ightarrow$ DeepSeek~V4~Flash $
+ightarrow$ DeepSeek~V4~Pro, 100 further problems, three small-model-only runs per problem), every escalating strategy matches the top model's 98\%; over three seeds the two-tier policy reaches 98\% $\pm$ 1.5 at 37\% of the top model's cost and the ladder 96\% $\pm$ 2.0 at 27\% $\pm$ 5, against 59\% for the FrugalGPT-style cascade.
+The middle model alone reaches 97\% for 13\%, cheaper than the small model itself because it finishes in fewer steps; on problems this small a capable cheap model needs no escalation, and the small-model-first design pays for the small model's turns before reaching it.
 
 \paragraph{Real repositories.}
 To test the policy on repository work rather than single functions, we run SWE-bench Lite~\cite{jimenez2024swebench} instances in their official evaluation images: the agent sees the issue text and edits, reads, and runs commands inside the container; the hidden tests are applied afterwards and an instance counts as resolved only if every FAIL\_TO\_PASS and PASS\_TO\_PASS test passes.

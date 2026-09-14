@@ -68,10 +68,12 @@ export class GoogleProvider extends ModelProvider {
 
     const text = response.text();
     const usage = response.usageMetadata;
+    const cachedPromptTokens = (usage as { cachedContentTokenCount?: number } | undefined)?.cachedContentTokenCount ?? 0;
     const tokenUsage = {
       promptTokens: usage?.promptTokenCount ?? 0,
       completionTokens: usage?.candidatesTokenCount ?? 0,
       totalTokens: usage?.totalTokenCount ?? 0,
+      ...(cachedPromptTokens > 0 ? { cachedPromptTokens } : {}),
     };
 
     return {

@@ -63,7 +63,7 @@ import {
   writeToolName,
 } from './execution-state.js';
 import { ConfidenceEngine } from './confidence-engine.js';
-import { RuleBasedEscalationPolicy } from './escalation-policy.js';
+import { RuleBasedEscalationPolicy, stepsTowardCap } from './escalation-policy.js';
 import { StepAgent, type AgentAction, type StepAgentTurn } from './step-agent.js';
 import { StepVerifier, staticCheck } from './verifier.js';
 import { Consultant } from './consultant.js';
@@ -188,7 +188,7 @@ export class AdaptiveExecutor {
     while (state.status === 'running') {
       state.budget = usage();
       budget.checkBudget(envelope);
-      if (state.step >= cfg.maxSteps) {
+      if (stepsTowardCap(state, cfg.rungLocalSteps) >= cfg.maxSteps) {
         const decision = this.policy.evaluate({
           state, confidence: this.engine.compute(state, state.budget), llmAvailable: nextTier() !== undefined, atTopRung: nextTier() === undefined,
           canEscalate: false, canAfford: () => true, estimatedConsultCostUsd: 0, estimatedHandoffCostUsd: 0, minTurnTokens: 0,
@@ -255,14 +255,23 @@ export class AdaptiveExecutor {
           }
           case 'final_answer': {
             if (action.plan) pushPlan(state, action.plan, 'agent');
-            if (cfg.finalAnswerRequires === 'write' && !state.completedSteps.some(s => s.success && isWriteStep(s))) {
-              // Finishing without doing the work is a failure signal like any other:
-              // it is counted, the agent is sent back, and repeats escalate.
-              attach.turnDescriptions[state.step] = 'final answer without a change (refused)';
-              recordFailure(state, { toolName: 'agent', message: 'finished without changing any file', kind: 'verification_failed' });
-              recordObservation(state, { source: 'agent', content: `final answer refused: no file was changed. ${truncate(action.answer, 200)}`, success: false });
-              pendingUser.push('Your final answer was not accepted: the task requires a code change and no file has been changed yet. Make the change, verify it, then finish. Respond with the next action as JSON.');
-              break;
+            if (cfg.finalAnswerRequires !== 'none') {
+              // Finishing without doing (or checking) the work is a failure signal like
+              // any other: it is counted, the agent is sent back, and repeats escalate.
+              const lastWrite = state.completedSteps.filter(s => s.success && isWriteStep(s)).at(-1);
+              const verifiedSince = lastWrite !== undefined && state.completedSteps.some(s => s.stepIndex > lastWrite.stepIndex && s.success && s.verified === true);
+              const refusal = !lastWrite
+                ? 'no file has been changed yet. Make the change, verify it, then finish.'
+                : cfg.finalAnswerRequires === 'verified' && !verifiedSince
+                  ? 'nothing has been verified since your last change. Run the relevant tests or a check that exits 0, then finish.'
+                  : undefined;
+              if (refusal) {
+                attach.turnDescriptions[state.step] = `final answer refused (${lastWrite ? 'unverified change' : 'no change'})`;
+                recordFailure(state, { toolName: 'agent', message: lastWrite ? 'finished without verifying the change' : 'finished without changing any file', kind: 'verification_failed' });
+                recordObservation(state, { source: 'agent', content: `final answer refused: ${refusal} ${truncate(action.answer, 200)}`, success: false });
+                pendingUser.push(`Your final answer was not accepted: ${refusal} Respond with the next action as JSON.`);
+                break;
+              }
             }
             attach.turnDescriptions[state.step] = 'final answer';
             state.result = action.answer;
