@@ -115,9 +115,7 @@ The comparison holds for current models.
 With Qwen3.5~9B as the small model, GPT-5.6~Luna (minimal reasoning) as the middle rung, and Claude~Sonnet~5 on top, on 40 further MBPP problems every escalating strategy reaches Sonnet's 100\%; the ladder does so at 8\% of Sonnet's cost, the two-tier policy at 15\%, and the FrugalGPT-style cascade at 54\%.
 The ladder used the middle rung on 6 problems and Sonnet on 3, with precision 78\% and recall 100\%.
 The 9B model alone solves 79\% of the slice (Llama~3.1~8B: 62\%); the middle model alone, at minimal reasoning effort, only 60\%, yet as a rung above the 9B model it was enough to keep Sonnet out of most tasks.
-On a cheaper stack (Qwen3.5~9B $
-ightarrow$ DeepSeek~V4~Flash $
-ightarrow$ DeepSeek~V4~Pro, 100 further problems, three small-model-only runs per problem), every escalating strategy matches the top model's 98\%; over three seeds the two-tier policy reaches 98\% $\pm$ 1.5 at 37\% of the top model's cost and the ladder 96\% $\pm$ 2.0 at 27\% $\pm$ 5, against 59\% for the FrugalGPT-style cascade.
+On a cheaper stack (Qwen3.5~9B $\rightarrow$ DeepSeek~V4~Flash $\rightarrow$ DeepSeek~V4~Pro, 100 further problems, three small-model-only runs per problem), every escalating strategy matches the top model's 98\%; over three seeds the two-tier policy reaches 98\% $\pm$ 1.5 at 37\% of the top model's cost and the ladder 96\% $\pm$ 2.0 at 27\% $\pm$ 5, against 59\% for the FrugalGPT-style cascade.
 The middle model alone reaches 97\% for 13\%, cheaper than the small model itself because it finishes in fewer steps; on problems this small a capable cheap model needs no escalation, and the small-model-first design pays for the small model's turns before reaching it.
 
 \paragraph{Real repositories.}
@@ -126,8 +124,13 @@ On 15 instances (Django, pytest, pylint) with Qwen3.5~9B $\rightarrow$ Gemini~2.
 A first run of the same slice with Claude~Sonnet~5 on top and the earlier rule that sends reasoning breakdowns straight to the top rung resolved 8 of 15 at 2.4$\times$ the cost, because the 9B model's unparseable first turns on 8 instances went directly to the frontier model; climbing one rung instead is now the default.
 That run also exposed defects that function-level problems never trigger: search commands that exit 1 were counted as failed steps, whole-file rewrites of 600-line files exceeded the output cap, and a run that finished without changing any file was accepted.
 The remaining weakness is the opposite of over-escalation: a small model that reads files for thirty steps without ever failing produces no evidence and exhausts its step budget.
-We have since added an exploration-stall rule (eight consecutive successful steps that neither change a file nor verify anything trigger a consult); it is implemented and unit-tested but not yet measured on the repository slice.
+We have since added an exploration-stall rule (eight consecutive successful steps that neither change a file nor verify anything trigger a consult); it did not fire once in the 95-instance run described next, where the small model fails by producing malformed actions rather than by reading aimlessly.
 Fifteen instances is a small sample; the middle model alone moved between 6 and 2 resolved across the two runs with no change that affects it.
+On 95 instances (83 Django, 8 pytest, 3 pylint, 1 Flask) with the cheaper stack above, the result does not hold.
+The middle model alone (DeepSeek~V4~Flash) resolves 44 at \$0.011 per task, the ladder 37 at \$0.026, and the small model alone 10.
+The 9B model produces malformed actions twice in a row on 53 of its 95 solo runs, and 51 of the ladder's 99 handoffs are for that reason; it spends two thirds of the ladder's tokens while costing as much per task as the middle model, and because the step cap is shared across rungs, the median handoff at step 8 leaves the stronger model 22 of 30 steps.
+Where the ladder hands off, it resolves 28 of 69 instances against 31 for the middle model alone on the same instances; the larger loss is on instances the small model never hands off (9 of 26, against 13).
+Small-model-first pays when the small model is both cheaper per task than the rung above and able to act; on repository work with this pair it is neither, and the open question becomes whether escalating from the strongest cheap model beats that model alone.
 
 \paragraph{Small-model compatibility.}
 Nine small models from 3B to 70B drove the same step agent on 20 further problems with Gemini~2.5~Flash as the large model.
@@ -144,7 +147,7 @@ Replayed as a trigger (escalate when predicted success falls below $\theta$) on 
 We read this as evidence that the rule set is already close to what the current signals support; better triggers need richer evidence at the step, such as the content of failing tests, not a better classifier over the same signals.
 
 \paragraph{Limitations.}
-Three coding workloads, one small model in the main comparison, a 15-instance repository slice, and rule-based triggers whose thresholds were set by hand.
+Three coding workloads, one small model in the main comparison, two repository runs (15 and 95 instances) of which the ladder wins only the smaller one, where its middle model was weaker, and rule-based triggers whose thresholds were set by hand.
 The three-rung and repository results are single-seed.
 Latency is not a win: adaptive runs take 1.7$\times$ longer than the large model alone, because the small model takes more turns and each is slower.
 The counterfactual labels are themselves estimates from three runs of a stochastic model.

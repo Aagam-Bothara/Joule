@@ -57,7 +57,8 @@ export type StrategyName =
   | 'joule-no-verify'
   | 'joule-self-conf'
   | 'joule-no-static'
-  | 'joule-ladder-strict';
+  | 'joule-ladder-strict'
+  | 'joule-rung-local';
 
 /**
  * How a multi-stage strategy decides to move to the next mode:

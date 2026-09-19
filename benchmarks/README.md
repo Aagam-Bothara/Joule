@@ -661,7 +661,8 @@ Run 2: top = Gemini 2.5 Pro, breakdowns climb one rung (the new default), parser
 
 What the runs show:
 
-- **The ladder resolves more than any single model in it**, in both runs: 8/15 and 7/15 against
+- **On this slice the ladder resolves more than any single model in it** (the 95-instance run
+  below does not reproduce this), in both runs: 8/15 and 7/15 against
   6/15 and 2/15 for the middle model alone and 2/15 for the small model. In run 2, four of the
   seven resolved instances were resolved by neither the 9B model nor Flash on their own; three
   were resolved by the 9B model without escalating at all, at 1 to 3 cents each.
@@ -688,8 +689,9 @@ Spend: run 1 about $2.60 (Sonnet $1.60), run 2 about $1.60 (Gemini) plus $0.50 o
 A follow-up on the two instances that hit the step limit in run 2, after adding the
 exploration-stall rule (`explorationStallSteps`, default 8): django-13925 resolved (2/2 hidden
 tests) and pytest-7220 did not. Neither outcome is the rule's doing: in both runs the small model
-escalated earlier through a breakdown or a give-up, and the stall rule never fired. It stays
-implemented and unit-tested but unmeasured; a proper test needs the full slice. Cost: 7 cents.
+escalated earlier through a breakdown or a give-up, and the stall rule never fired. Cost: 7 cents.
+In the 95-instance run below it did not fire once either: there the 9B model fails by producing
+malformed actions, not by reading aimlessly.
 
 ### The cheap 2026 stack, 100 problems (2026-09-06)
 
@@ -729,6 +731,53 @@ on V4 Flash rather than Pro. Earlier stacks keep 95–100% by the same measure.
 The caveat from the Gemini runs holds with this stack too. DeepSeek V4 Flash alone is 97% at
 $0.0015, cheaper than the 9B model, because it finishes in fewer steps. On problems this small a
 capable cheap model needs no escalation, and the ladder pays for the small model's turns before
-reaching it. Joule's case is the workload where no single cheap model suffices, which is the
-repository slice below, not three-line functions. Spend: about $3.60. Latency: the ladder averaged
-31 s per problem against 15 s for Pro alone.
+reaching it. Joule's case is the workload where no single cheap model suffices; the 95-instance
+repository run below finds DeepSeek V4 Flash close to being that model there too. Spend: about
+$3.60. Latency: the ladder averaged 31 s per problem against 15 s for Pro alone.
+
+### Real repositories at scale: 95 SWE-bench Lite instances (2026-09-06)
+
+The repository slice grown to 95 instances (83 Django, 8 pytest, 3 pylint, 1 Flask), same settings
+as above (30 steps, 40 tool calls, per-task cost ceiling), on the cheap stack: Qwen3.5 9B →
+DeepSeek V4 Flash → DeepSeek V4 Pro through OpenRouter. One seed; Pro alone was not run.
+
+```
+Label swe100
+| strategy                | resolved | avg cost | agent finished | notes                                    |
+|-------------------------|---------:|---------:|---------------:|------------------------------------------|
+| Qwen3.5 9B alone        |    10/95 |  $0.0112 |          13/95 | 53 runs end on malformed actions         |
+| DeepSeek V4 Flash alone |    44/95 |  $0.0105 |          53/95 |                                          |
+| Joule ladder            |    37/95 |  $0.0259 |          59/95 | Flash used on 73, Pro on 38              |
+```
+
+What the run shows:
+
+- **The ladder loses to its own middle rung.** Flash alone resolves 7 more instances at about 40%
+  of the ladder's cost. On the same instances the ladder resolves 9 that Flash does not and misses
+  16 that Flash resolves; 7 of its 37 come from the 9B model without escalating, and 7 were
+  resolved by neither model on its own. This does not reproduce the 15-instance result above,
+  where the middle model (Gemini 2.5 Flash) resolved 2 to 6 of 15 alone; DeepSeek V4 Flash
+  resolves 46% on its own.
+- **The 9B model cannot drive this agent.** 53 of its 95 solo runs end because it produced
+  malformed actions twice in a row, and 51 of the ladder's 99 handoffs are for the same reason
+  (43 more follow three failures). It spends 12.5M of the ladder's 18.5M tokens and, at $0.011 per
+  task alone, is no cheaper than Flash, which finishes in fewer, better turns. The harness runs
+  OpenRouter models without JSON mode.
+- **Steps spent on the small model are not refunded.** The median handoff comes at step 8 of 30
+  and the cap is shared across rungs (`rungLocalSteps` is off by default), so the stronger model
+  inherits what is left: 24 ladder runs end on the step limit (Flash alone: 22), some after
+  handoffs at steps 25 and 26.
+- **Handoffs themselves mostly keep the stronger model's accuracy.** On the 69 instances the
+  ladder handed off, it resolves 28 against 31 for Flash alone on the same instances (90%). The
+  larger loss is on the 26 it never handed off: 9 against Flash's 13, the 9B model holding on too
+  long.
+- **Noise.** Two report files exist for this run (08:18 and 08:26 UTC); 51 of the 285 task
+  records differ between them and 8 outcomes flip. The numbers above are from the later one;
+  differences of a few instances are within noise.
+
+Spend: about $4.50 (ladder $2.46, Flash $1.00, 9B $1.07). Latency per instance: Flash 103 s,
+ladder 149 s.
+
+The open question is no longer whether a 9B model can lead on repositories (with this pair it
+cannot) but whether escalation beats the best cheap model on its own. The next run is Flash → Pro
+with a fresh step allowance after a handoff (`joule-rung-local`) on the same 95 instances.

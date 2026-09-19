@@ -26,5 +26,13 @@ export const jouleSelfConf: Strategy = { name: 'joule-self-conf', modes: ['adapt
  */
 export const jouleLadderStrict: Strategy = { name: 'joule-ladder-strict', modes: ['adaptive'], ladder: ['slm', 'mid', 'llm'], policy: { finalAnswerRequires: 'verified', rungLocalSteps: true }, description: 'Joule ladder, verified finish and per-rung step budget' };
 
+/**
+ * Two tiers with a per-rung step allowance. Run with the middle model as the
+ * small tier (e.g. DeepSeek V4 Flash -> V4 Pro): on SWE-bench the 9B rung could
+ * not act and its steps were not refunded, so this asks whether escalation
+ * beats the strongest cheap model on its own.
+ */
+export const jouleRungLocal: Strategy = { name: 'joule-rung-local', modes: ['adaptive'], ladder: ['slm', 'llm'], policy: { rungLocalSteps: true }, description: 'Joule two tiers, fresh step allowance after a handoff' };
+
 /** No compile check on written files. Tests the static-check evidence signal. */
 export const jouleNoStatic: Strategy = { name: 'joule-no-static', modes: ['adaptive'], ladder: ['slm', 'llm'], policy: { staticChecks: false }, description: 'Joule without static checks' };

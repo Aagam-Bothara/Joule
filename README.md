@@ -195,16 +195,18 @@ On a stack a student can afford (Qwen3.5 9B → DeepSeek V4 Flash → DeepSeek V
 the ladder reaches 96% ± 2 at 27% of DeepSeek Pro's cost and the two-tier policy 98% ± 1.5 at 37%
 (three seeds); the cascade needs 59% for 98%. DeepSeek Flash alone
 is 97% for even less, which is the honest limit of small-model-first on three-line functions: when a
-cheap model needs no help, there is nothing to escalate. The repository result below is where
-escalation earns its keep.
+cheap model needs no help, there is nothing to escalate.
 
-**Real repositories.** Fifteen SWE-bench Lite instances (Django, pytest, pylint) in their official
-docker images, hidden tests, Qwen3.5 9B → Gemini Flash → Gemini Pro, $0.20 cap per task. The 9B
-model alone resolves 2, Flash alone 2, the ladder 7, four of which neither model resolved by itself;
-three were resolved by the 9B model without escalating at all, for one to three cents each. A
-first run with Sonnet 5 on top resolved 8 at 2.4× the cost because unparseable first turns went
-straight to the frontier model; climbing one rung at a time is now the default. Fifteen instances
-is a small sample (see [benchmarks/README.md](benchmarks/README.md) for both runs).
+**Real repositories.** SWE-bench Lite instances in their official docker images, scored by the
+hidden tests. On a first 15-instance slice (Qwen3.5 9B → Gemini Flash → Gemini Pro) the ladder
+resolved 7, against 2 for each model alone. On 95 instances with the cheap stack that result does
+not hold: DeepSeek V4 Flash alone resolves 44 at $0.011 per task, the ladder 37 at $0.026, the 9B
+model alone 10. The 9B model fails to produce a valid action on more than half of the instances,
+spends two thirds of the ladder's tokens while costing as much per task as Flash, and the steps it
+uses are not refunded after a handoff. Where the ladder does hand off it keeps 90% of Flash's
+success on the same instances, so the loss is the small rung, not the handoff. A Flash → Pro run
+with a fresh step allowance after a handoff is the next experiment (both repository runs in
+[benchmarks/README.md](benchmarks/README.md)).
 
 Reproduce with `benchmarks/harness` (see [benchmarks/README.md](benchmarks/README.md)): same
 engine, same tools, same prompts; only the routing strategy changes. Success on coding tasks is
