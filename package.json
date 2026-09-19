@@ -24,7 +24,9 @@
     "test:run": "vitest run",
     "lint": "eslint packages/",
     "clean": "pnpm -r clean",
-    "dev": "pnpm -r --parallel dev"
+    "dev": "pnpm -r --parallel dev",
+    "lifecycle:collect": "tsx benchmarks/lifecycle/cli.ts collect",
+    "lifecycle:analyze": "tsx benchmarks/lifecycle/cli.ts analyze"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

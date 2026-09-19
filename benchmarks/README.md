@@ -166,7 +166,43 @@ harness/
 ├── learned-trigger.py   offline study: can a learned trigger beat the rules?
 ├── swe-selftest.ts      checks the SWE-bench evaluation pipeline (base must fail, gold patch must pass)
 └── index.ts       entry point; writes benchmarks/reports/harness-*.json
+
+lifecycle/
+├── record.ts      one experiment record per agent run, from the lifecycle events a run emits
+├── analyze.ts     percentiles, tool-wait buckets, cross-agent concurrency, model-demand overlap
+├── types.ts       record / workflow-summary / aggregate shapes
+└── cli.ts         collect and analyze; writes benchmarks/experiments/lifecycle/
 ```
+
+### Lifecycle characterization
+
+Every instrumented run emits agent lifecycle events (`ready`, `model_running`, `tool_wait`,
+`completed` / `failed` / `cancelled`) and a timing rollup. This tooling turns those into a dataset
+and characterizes it: where the wall clock goes, how long individual tool-wait windows are, and how
+much of the work actually overlaps across agents.
+
+```bash
+npx tsx benchmarks/lifecycle/cli.ts collect            # benchmarks/reports/harness-*.json -> runs.jsonl
+npx tsx benchmarks/lifecycle/cli.ts analyze            # runs.jsonl -> report + workflows.jsonl + summary.json
+npx tsx benchmarks/lifecycle/cli.ts analyze <file.json|file.jsonl> [--out-dir <dir>] [--json]
+pnpm lifecycle:collect && pnpm lifecycle:analyze       # same two steps through package scripts
+```
+
+Datasets land in `benchmarks/experiments/lifecycle/` (`runs.jsonl`, `workflows.jsonl`,
+`summary.json`) and are gitignored like `benchmarks/reports/`; the code that produces them is not.
+One record per agent run carries identity (`agentId`, `agentRole`, `parentTaskId`), the timing
+rollup, every individual tool-wait window, and the raw events. Crew runs produce one record per
+agent, so full-mode and direct-mode agents are directly comparable.
+
+Concurrency is computed by sweeping lifecycle interval boundaries, never by polling:
+`maxConcurrentAgents`, `maxConcurrentModelRunning`, `maxConcurrentToolWait`, their time-weighted
+averages, and `modelDemandOverlapMs` — the wall-clock time two or more agents under one parent task
+are inside a model call at once. Tool-wait windows are also bucketed (`<100ms`, `100-500ms`,
+`500ms-1s`, `1-2s`, `2-5s`, `5-10s`, `10s+`) so the distribution is visible rather than an average.
+
+One caveat: lifecycle timestamps come from a monotonic clock, which is only comparable inside a
+single process. Records carry the `runId` they came from, and concurrency is only ever computed
+within one `runId`.
 
 Model selection for live runs: `JOULE_BENCH_SLM`, `JOULE_BENCH_MID` (optional middle rung) and
 `JOULE_BENCH_LLM` as `<provider>:<model>` with provider one of `google`, `anthropic`, `openai`,
