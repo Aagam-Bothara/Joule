@@ -1,6 +1,7 @@
 import {
   type Task,
   type TaskResult,
+  type TaskStatus,
   type AgentDefinition,
   type ModelRequest,
   type ChatMessage,
@@ -16,6 +17,7 @@ import type { BudgetManager, BudgetEnvelopeInstance } from './budget-manager.js'
 import { ModelRouter } from './model-router.js';
 import { ToolRegistry } from './tool-registry.js';
 import type { ProgressCallback } from './task-executor.js';
+import { AgentLifecycleTracker } from './adaptive/lifecycle.js';
 
 /**
  * A parsed tool call extracted from the LLM's JSON response.
@@ -95,6 +97,16 @@ export class DirectExecutor {
     const traceId = generateId('direct-trace');
     const maxIterations = agent.maxIterations ?? 10;
     const wallTimeoutMs = DEFAULT_WALL_TIMEOUT_MS;
+
+    // The same tracker the adaptive path uses, so direct-mode agents produce
+    // comparable events. Identity comes from the task the crew built; a
+    // standalone run falls back to the agent definition's own id and role.
+    const lifecycle = new AgentLifecycleTracker({
+      taskId,
+      agentId: task.agentId ?? agent.id,
+      agentRole: task.agentRole ?? agent.role,
+      parentTaskId: task.parentTaskId,
+    });
 
     // Build system prompt with tool descriptions + site knowledge
     const systemPrompt = this.buildSystemPrompt(agent, task.description);
@@ -178,6 +190,7 @@ export class DirectExecutor {
       };
 
       let response;
+      lifecycle.modelStart(decision.model, { iteration, tier: decision.tier, provider: decision.provider });
       try {
         response = await provider.chat(request);
       } catch (err) {
@@ -188,8 +201,11 @@ export class DirectExecutor {
           durationMs: monotonicNow() - llmSpanStart,
           metadata: { error: lastError, iteration },
         });
+        // The loop ends here, so the run dies inside the model call.
+        lifecycle.fail(err, { iteration, phase: 'model' });
         break;
       }
+      lifecycle.modelEnd(response.model, { iteration, tier: decision.tier });
 
       const llmDuration = monotonicNow() - llmSpanStart;
       traceSpans.push({
@@ -267,6 +283,9 @@ export class DirectExecutor {
           const sanitizedArgs = this.sanitizeToolArgs(toolCall.toolArgs);
 
           const toolSpanStart = monotonicNow();
+          // Only real tool work counts as waiting; the circuit-breaker and
+          // argument checks above are in-memory and stay out of the timeline.
+          lifecycle.toolStart(toolCall.toolName, { iteration });
           try {
             const result = await this.tools.invoke({
               toolName: toolCall.toolName,
@@ -298,6 +317,10 @@ export class DirectExecutor {
               durationMs: toolDuration,
               metadata: { success: false, error: errMsg, iteration },
             });
+          } finally {
+            // A throwing tool must not leave the lifecycle stuck in tool_wait;
+            // a failed tool call is reported to the agent and the run continues.
+            lifecycle.toolEnd(toolCall.toolName, { iteration });
           }
         }
 
@@ -330,6 +353,15 @@ export class DirectExecutor {
         : undefined;
     }
 
+    // Close the lifecycle on whatever ended the loop, matching `status` below.
+    const status: TaskStatus = finalAnswer ? 'completed' : 'failed';
+    if (!lifecycle.isTerminal()) {
+      if (status === 'completed') lifecycle.complete({ iterations: iteration });
+      else lifecycle.fail(lastError, { iterations: iteration });
+    }
+    const lifecycleEvents = lifecycle.events;
+    const lifecycleMetrics = lifecycle.metrics();
+
     const elapsedMs = monotonicNow() - startTime;
     const finalUsage = this.budgetManager.getUsage(envelope);
     const budgetUsed: BudgetUsage = {
@@ -357,7 +389,7 @@ export class DirectExecutor {
       id: generateId('result'),
       taskId,
       traceId,
-      status: finalAnswer ? 'completed' : 'failed',
+      status,
       result: finalAnswer,
       stepResults: [],
       budgetUsed,
@@ -371,26 +403,49 @@ export class DirectExecutor {
           allocated: envelope.envelope,
           used: budgetUsed,
         },
-        spans: traceSpans.map(s => ({
-          id: generateId('span'),
-          traceId,
-          name: s.name,
-          startTime: new Date(s.startedAt).getTime(),
-          endTime: new Date(s.startedAt).getTime() + s.durationMs,
-          events: s.metadata ? [{
-            id: generateId('evt'),
+        spans: [
+          ...traceSpans.map(s => ({
+            id: generateId('span'),
             traceId,
-            type: 'info' as const,
-            timestamp: new Date(s.startedAt).getTime(),
-            wallClock: s.startedAt,
-            duration: s.durationMs,
-            data: s.metadata,
-          }] : [],
-          children: [],
-        })),
+            name: s.name,
+            startTime: new Date(s.startedAt).getTime(),
+            endTime: new Date(s.startedAt).getTime() + s.durationMs,
+            events: s.metadata ? [{
+              id: generateId('evt'),
+              traceId,
+              type: 'info' as const,
+              timestamp: new Date(s.startedAt).getTime(),
+              wallClock: s.startedAt,
+              duration: s.durationMs,
+              data: s.metadata,
+            }] : [],
+            children: [],
+          })),
+          // Lifecycle transitions as `agent_lifecycle` events: the same type and
+          // payload the adaptive path logs through TraceLogger, so a consumer
+          // reads both modes the same way.
+          ...(lifecycleEvents.length > 0 ? [{
+            id: generateId('span'),
+            traceId,
+            name: 'agent-lifecycle',
+            startTime: lifecycle.startTime,
+            endTime: lifecycleEvents[lifecycleEvents.length - 1].timestamp,
+            events: lifecycleEvents.map(e => ({
+              id: generateId('evt'),
+              traceId,
+              type: 'agent_lifecycle' as const,
+              timestamp: e.timestamp,
+              wallClock: new Date(Date.now() - (monotonicNow() - e.timestamp)).toISOString(),
+              data: { ...e } as Record<string, unknown>,
+            })),
+            children: [],
+          }] : []),
+        ],
       },
       error: lastError,
       completedAt: isoNow(),
+      lifecycle: lifecycleEvents,
+      lifecycleMetrics,
     };
   }
 

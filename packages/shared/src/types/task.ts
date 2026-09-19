@@ -4,6 +4,7 @@ import type { EfficiencyReport } from './energy.js';
 import type { SessionMessage } from './session.js';
 import type { ModelTier } from './model.js';
 import type { ExecutionMode, ExecutionState, TrajectoryReport } from './execution.js';
+import type { AgentLifecycleEvent, LifecycleMetrics } from './lifecycle.js';
 
 export interface Task {
   id: string;
@@ -89,6 +90,14 @@ export interface TaskResult {
   trajectory?: TrajectoryReport;
   /** Adaptive execution: final structured state */
   executionState?: ExecutionState;
+  /**
+   * Agent lifecycle transitions for this run, oldest first. Every execution
+   * mode that is instrumented reports the same events here, so runs are
+   * comparable regardless of which executor produced them.
+   */
+  lifecycle?: AgentLifecycleEvent[];
+  /** Model / tool-wait timing rollup over `lifecycle` */
+  lifecycleMetrics?: LifecycleMetrics;
 }
 
 // --- Task Specification (structured goal + success criteria) ---

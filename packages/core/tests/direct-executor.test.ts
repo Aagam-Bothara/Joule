@@ -372,4 +372,158 @@ describe('DirectExecutor', () => {
       expect(result.status).toBe('completed');
     });
   });
+
+  // -------------------------------------------------------------------------
+  // Lifecycle instrumentation — same tracker, events and metrics as the
+  // adaptive path, so direct-mode crew agents are not invisible.
+  // -------------------------------------------------------------------------
+
+  describe('lifecycle instrumentation', () => {
+    it('records ready -> model_running -> ready -> completed for a direct answer', async () => {
+      const { executor, envelope } = buildExecutor(['{"answer": "The answer is 42"}']);
+
+      const result = await executor.execute(makeTask(), envelope, makeAgent());
+
+      expect(result.status).toBe('completed');
+      expect(result.lifecycle!.map(e => e.to)).toEqual(['model_running', 'ready', 'completed']);
+      expect(result.lifecycle!.map(e => e.reason)).toEqual(['model_start', 'model_end', 'task_complete']);
+      expect(result.lifecycle![0].model).toBe('test-slm');
+
+      const m = result.lifecycleMetrics!;
+      expect(m.modelCalls).toBe(1);
+      expect(m.toolCalls).toBe(0);
+      expect(m.toolWaitMs).toBe(0);
+      expect(m.idleFraction).toBe(0);
+      expect(m.avgToolWaitMs).toBe(0);
+      expect(m.finalState).toBe('completed');
+      expect(m.modelRuntimeMs + m.toolWaitMs + m.otherMs).toBe(m.totalRuntimeMs);
+    });
+
+    it('wraps real tool work in tool_wait and leaves in-memory work out of it', async () => {
+      const { executor, envelope, tools } = buildExecutor([
+        '{"tool_calls": [{"toolName": "slow_tool", "toolArgs": {}}]}',
+        '{"answer": "done"}',
+      ]);
+      tools.register({
+        name: 'slow_tool',
+        description: 'Waits on something external',
+        inputSchema: z.object({}),
+        outputSchema: z.any(),
+        execute: async () => {
+          await new Promise(resolve => setTimeout(resolve, 25));
+          return { ok: true };
+        },
+      }, 'builtin');
+
+      const result = await executor.execute(makeTask(), envelope, makeAgent());
+
+      expect(result.lifecycle!.map(e => e.to)).toEqual([
+        'model_running', 'ready',   // first LLM call
+        'tool_wait', 'ready',       // slow_tool
+        'model_running', 'ready',   // second LLM call
+        'completed',
+      ]);
+      expect(result.lifecycle!.find(e => e.reason === 'tool_start')!.tool).toBe('slow_tool');
+
+      const m = result.lifecycleMetrics!;
+      expect(m.toolCalls).toBe(1);
+      expect(m.modelCalls).toBe(2);
+      expect(m.toolWaitMs).toBeGreaterThanOrEqual(20);
+      expect(m.idleFraction).toBeGreaterThan(0);
+      expect(m.avgToolWaitMs).toBe(m.toolWaitMs);
+      expect(m.finalState).toBe('completed');
+    });
+
+    it('returns to ready after a throwing tool, without ending the run', async () => {
+      const { executor, envelope, tools } = buildExecutor([
+        '{"tool_calls": [{"toolName": "exploding_tool", "toolArgs": {}}]}',
+        '{"answer": "recovered"}',
+      ]);
+      tools.register({
+        name: 'exploding_tool',
+        description: 'Throws',
+        inputSchema: z.object({}),
+        outputSchema: z.any(),
+        execute: async () => { throw new Error('tool exploded'); },
+      }, 'builtin');
+
+      const result = await executor.execute(makeTask(), envelope, makeAgent());
+
+      expect(result.status).toBe('completed');
+      expect(result.lifecycle!.map(e => e.to)).toEqual([
+        'model_running', 'ready', 'tool_wait', 'ready', 'model_running', 'ready', 'completed',
+      ]);
+    });
+
+    it('carries crew identity onto every event and keeps agents distinct', async () => {
+      const crewTask = (agentId: string, role: string): Task => ({
+        ...makeTask(),
+        agentId,
+        agentRole: role,
+        parentTaskId: 'task-root',
+      });
+      const researcher = buildExecutor(['{"answer": "found it"}']);
+      const reviewer = buildExecutor(['{"answer": "looks good"}']);
+
+      const a = await researcher.executor.execute(
+        crewTask('agent_researcher', 'researcher'), researcher.envelope,
+        makeAgent({ id: 'agent_researcher', role: 'researcher' }),
+      );
+      const b = await reviewer.executor.execute(
+        crewTask('agent_reviewer', 'reviewer'), reviewer.envelope,
+        makeAgent({ id: 'agent_reviewer', role: 'reviewer' }),
+      );
+
+      expect(a.lifecycle!.every(e => e.agentId === 'agent_researcher' && e.agentRole === 'researcher' && e.parentTaskId === 'task-root')).toBe(true);
+      expect(b.lifecycle!.every(e => e.agentId === 'agent_reviewer' && e.agentRole === 'reviewer' && e.parentTaskId === 'task-root')).toBe(true);
+      expect(a.lifecycle![0].agentId).not.toBe(b.lifecycle![0].agentId);
+      expect(a.lifecycle![0].taskId).toBe(a.taskId);
+    });
+
+    it('falls back to the agent definition for a standalone direct task', async () => {
+      const { executor, envelope } = buildExecutor(['{"answer": "x"}']);
+
+      const result = await executor.execute(makeTask(), envelope, makeAgent({ id: 'test-agent', role: 'test' }));
+
+      expect(result.lifecycle!.every(e => e.agentId === 'test-agent' && e.agentRole === 'test')).toBe(true);
+      expect(result.lifecycle![0].parentTaskId).toBeUndefined();
+    });
+
+    it('marks a failed model call as failed without changing error semantics', async () => {
+      const { executor, envelope, provider } = buildExecutor(['{"answer": "never reached"}']);
+      provider.chat.mockRejectedValueOnce(new Error('provider exploded'));
+
+      const result = await executor.execute(makeTask(), envelope, makeAgent());
+
+      expect(result.status).toBe('failed');
+      expect(result.error).toContain('provider exploded');
+      expect(result.lifecycle!.map(e => e.to)).toEqual(['model_running', 'failed']);
+      expect(result.lifecycle![1]).toMatchObject({ from: 'model_running', reason: 'error' });
+      expect(result.lifecycle![1].metadata).toMatchObject({ error: 'provider exploded' });
+      expect(result.lifecycleMetrics!.finalState).toBe('failed');
+    });
+
+    it('ends failed from ready when the run stops for a non-model reason', async () => {
+      const { executor, envelope } = buildExecutor(['   ']);
+
+      const result = await executor.execute(makeTask(), envelope, makeAgent());
+
+      expect(result.status).toBe('failed');
+      const last = result.lifecycle![result.lifecycle!.length - 1];
+      expect(last).toMatchObject({ from: 'ready', to: 'failed', reason: 'error' });
+      expect(last.metadata).toMatchObject({ error: 'LLM returned empty response' });
+    });
+
+    it('puts the transitions in the returned trace as agent_lifecycle events', async () => {
+      const { executor, envelope } = buildExecutor(['{"answer": "done"}']);
+
+      const result = await executor.execute(makeTask(), envelope, makeAgent());
+
+      const span = result.trace.spans.find(s => s.name === 'agent-lifecycle');
+      expect(span).toBeDefined();
+      expect(span!.events.every(e => e.type === 'agent_lifecycle')).toBe(true);
+      expect(span!.events.map(e => e.data.to)).toEqual(['model_running', 'ready', 'completed']);
+      expect(span!.events.every(e => e.data.agentId === 'test-agent')).toBe(true);
+    });
+  });
 });

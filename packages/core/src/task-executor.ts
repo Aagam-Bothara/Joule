@@ -524,12 +524,15 @@ export class TaskExecutor {
     }
 
     const trace = this.tracer.getTrace(traceId, budgetUsed);
+    // Computed once so the trajectory and the result carry identical numbers.
+    const lifecycleEvents = ctx.adaptive?.lifecycle?.events;
+    const lifecycleMetrics = ctx.adaptive?.lifecycle?.metrics();
     const trajectory = ctx.adaptive?.state
       ? buildTrajectoryReport(ctx.adaptive.state, trace, status, {
           llmPricePerToken: ctx.adaptive.llmPricePerToken,
           stepDescriptions: ctx.adaptive.turnDescriptions,
-          lifecycleEvents: ctx.adaptive.lifecycle?.events,
-          lifecycleMetrics: ctx.adaptive.lifecycle?.metrics(),
+          lifecycleEvents,
+          lifecycleMetrics,
         })
       : undefined;
 
@@ -551,6 +554,8 @@ export class TaskExecutor {
       mode: ctx.mode,
       trajectory,
       executionState: ctx.adaptive?.state,
+      lifecycle: lifecycleEvents,
+      lifecycleMetrics,
     };
   }
 
