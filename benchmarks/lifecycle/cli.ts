@@ -12,10 +12,12 @@
  * same way benchmarks/reports/ is.
  */
 
+import { execSync } from 'node:child_process';
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { analyzeRecords, renderLifecycleReport } from './analyze.js';
 import { parseJsonl, recordsFromHarnessReport, toJsonl } from './record.js';
+import { renderValidation, validateRecords } from './validate.js';
 import type { AgentLifecycleRecord } from './types.js';
 
 const REPORTS_DIR = join('benchmarks', 'reports');
@@ -27,23 +29,41 @@ function arg(name: string): string | undefined {
   return i >= 0 ? process.argv[i + 1] : undefined;
 }
 
+/** What a report contributed, for the manifest. */
+interface CollectedSource {
+  file: string;
+  workload?: string;
+  timestamp?: string;
+  models?: unknown;
+  records: number;
+}
+
 /** Records from every harness report in `dir` (one runId per report file). */
-function collect(dir: string, label?: string): AgentLifecycleRecord[] {
+function collect(dir: string, label?: string): { records: AgentLifecycleRecord[]; sources: CollectedSource[] } {
   if (!existsSync(dir)) throw new Error(`No reports directory at ${dir}`);
   const files = readdirSync(dir)
     .filter(f => f.startsWith('harness-') && f.endsWith('.json'))
     .filter(f => (label ? f.includes(label) : true))
     .sort();
   const records: AgentLifecycleRecord[] = [];
-  let withLifecycle = 0;
+  const sources: CollectedSource[] = [];
   for (const file of files) {
-    const report = JSON.parse(readFileSync(join(dir, file), 'utf8')) as unknown;
+    const report = JSON.parse(readFileSync(join(dir, file), 'utf8')) as { workload?: string; timestamp?: string; models?: unknown };
     const found = recordsFromHarnessReport(report, basename(file, '.json'));
-    if (found.length > 0) withLifecycle++;
+    if (found.length === 0) continue;
     records.push(...found);
+    sources.push({ file, workload: report.workload, timestamp: report.timestamp, models: report.models, records: found.length });
   }
-  process.stderr.write(`scanned ${files.length} report(s), ${withLifecycle} with lifecycle data\n`);
-  return records;
+  process.stderr.write(`scanned ${files.length} report(s), ${sources.length} with lifecycle data\n`);
+  return { records, sources };
+}
+
+function gitCommit(): string | undefined {
+  try {
+    return execSync('git rev-parse --short HEAD', { encoding: 'utf8' }).trim();
+  } catch {
+    return undefined;
+  }
 }
 
 function loadRecords(file: string): AgentLifecycleRecord[] {
@@ -58,11 +78,30 @@ function main(): void {
 
   if (command === 'collect') {
     const dir = arg('--reports') ?? REPORTS_DIR;
-    const out = arg('--out') ?? DEFAULT_RUNS;
-    const records = collect(dir, arg('--label'));
+    const outDir = arg('--out-dir') ?? EXPERIMENTS_DIR;
+    const out = arg('--out') ?? join(outDir, 'runs.jsonl');
+    const label = arg('--label');
+    const { records, sources } = collect(dir, label);
     mkdirSync(dirname(out), { recursive: true });
     writeFileSync(out, toJsonl(records));
+
+    const validation = validateRecords(records);
+    const manifest = {
+      label: label ?? basename(dirname(out)),
+      generatedAt: new Date().toISOString(),
+      gitCommit: gitCommit(),
+      source: 'harness-reports',
+      sources,
+      executionModes: [...new Set(records.map(r => r.executionMode))],
+      records: records.length,
+      agents: new Set(records.map(r => r.agentId)).size,
+      dataQuality: { usable: validation.ok.length, rejected: validation.rejected.length, issues: validation.issues },
+      notes: 'Each harness report is one process; lifecycle timestamps are comparable within a runId only.',
+    };
+    writeFileSync(join(dirname(out), 'manifest.json'), JSON.stringify(manifest, null, 2));
+
     process.stderr.write(`${records.length} record(s) written to ${out}\n`);
+    process.stderr.write(`${renderValidation(validation)}\n`);
     return;
   }
 
@@ -81,16 +120,23 @@ function main(): void {
   }
 
   const records = loadRecords(input);
-  const analysis = analyzeRecords(records, input);
+  // Malformed traces are reported and excluded rather than silently averaged in.
+  const validation = validateRecords(records);
+  const analysis = analyzeRecords(validation.ok, input);
   const outDir = arg('--out-dir') ?? dirname(input);
   mkdirSync(outDir, { recursive: true });
   writeFileSync(join(outDir, 'workflows.jsonl'), analysis.workflows.map(w => JSON.stringify(w)).join('\n') + (analysis.workflows.length > 0 ? '\n' : ''));
-  writeFileSync(join(outDir, 'summary.json'), JSON.stringify(analysis, null, 2));
+  writeFileSync(join(outDir, 'summary.json'), JSON.stringify({
+    ...analysis,
+    dataQuality: { usable: validation.ok.length, rejected: validation.rejected.length, issues: validation.issues },
+  }, null, 2));
 
   if (process.argv.includes('--json')) {
     console.log(JSON.stringify(analysis, null, 2));
   } else {
     console.log(renderLifecycleReport(analysis));
+    console.log('');
+    console.log(renderValidation(validation));
     console.log('');
     console.log(`Workflows written to ${join(outDir, 'workflows.jsonl')}`);
     console.log(`Summary written to   ${join(outDir, 'summary.json')}`);

@@ -1,0 +1,34 @@
+{
+  "name": "repo-analysis",
+  "description": "Three analysts inspect the same part of the repository at the same time (parallel strategy)",
+  "strategy": "parallel",
+  "agents": [
+    {
+      "id": "researcher",
+      "role": "Research Analyst",
+      "instructions": "You inspect source code. Use file_read to read the files the task names, and shell_exec only for simple listing commands. Report what the code does in at most 8 bullet points, citing file paths you actually read.",
+      "allowedTools": ["file_read", "shell_exec"],
+      "budgetShare": 0.34,
+      "maxRetries": 0
+    },
+    {
+      "id": "reviewer",
+      "role": "Code Reviewer",
+      "instructions": "You review source code for correctness risks. Use file_read on the files the task names. Report at most 5 concrete risks, each with the file path and what could go wrong. Do not restate what the code does.",
+      "allowedTools": ["file_read", "shell_exec"],
+      "budgetShare": 0.33,
+      "maxRetries": 0
+    },
+    {
+      "id": "tester",
+      "role": "Test Analyst",
+      "instructions": "You judge test coverage. Use shell_exec to list the test files and file_read to read one of them. Report which behaviours are covered and which are not, at most 6 bullet points.",
+      "allowedTools": ["file_read", "shell_exec"],
+      "budgetShare": 0.33,
+      "maxRetries": 0,
+      "executionMode": "full"
+    }
+  ],
+  "budget": "high",
+  "aggregation": "concat"
+}

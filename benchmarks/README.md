@@ -170,7 +170,10 @@ harness/
 lifecycle/
 ├── record.ts      one experiment record per agent run, from the lifecycle events a run emits
 ├── analyze.ts     percentiles, tool-wait buckets, cross-agent concurrency, model-demand overlap
+├── validate.ts    data-quality checks; malformed traces are flagged and excluded, not averaged in
 ├── types.ts       record / workflow-summary / aggregate shapes
+├── crews/         crew definitions for the crew experiment (real file_read / shell_exec work)
+├── crew-runner.ts runs real crews in one process and writes records + manifest
 └── cli.ts         collect and analyze; writes benchmarks/experiments/lifecycle/
 ```
 
@@ -203,6 +206,35 @@ are inside a model call at once. Tool-wait windows are also bucketed (`<100ms`, 
 One caveat: lifecycle timestamps come from a monotonic clock, which is only comparable inside a
 single process. Records carry the `runId` they came from, and concurrency is only ever computed
 within one `runId`.
+
+#### Collecting real workloads
+
+Two experiments feed the same pipeline. Single-agent runs come from the existing harness — MBPP
+writes a real file and runs a real Python process per task, so its waits are genuine:
+
+```bash
+JOULE_BENCH_SLM=openrouter:<small> JOULE_BENCH_LLM=openrouter:<large> JOULE_BENCH_LABEL=real-single \
+  npx tsx benchmarks/harness/index.ts --live --workload mbpp --n 20 --offset 400 --strategies joule-adaptive
+npx tsx benchmarks/lifecycle/cli.ts collect --label real-single --out-dir benchmarks/experiments/lifecycle/real-single
+npx tsx benchmarks/lifecycle/cli.ts analyze benchmarks/experiments/lifecycle/real-single/runs.jsonl
+```
+
+Crew runs come from `crew-runner.ts`, which executes the definitions in `lifecycle/crews/` against
+real repository work and writes records plus a manifest:
+
+```bash
+OPENROUTER_API_KEY=... npx tsx benchmarks/lifecycle/crew-runner.ts --workflows 10 --model <model>
+npx tsx benchmarks/lifecycle/cli.ts analyze benchmarks/experiments/lifecycle/real-crews/runs.jsonl
+# cheap plumbing check against a local model, one workflow, no API cost:
+npx tsx benchmarks/lifecycle/crew-runner.ts --workflows 1 --crew smoke --provider ollama --model phi3:latest \
+  --out-dir benchmarks/experiments/lifecycle/smoke --label smoke
+```
+
+The runner changes nothing about execution: `parallel` crews overlap their agents through
+`Promise.allSettled`, `sequential` ones do not, and everything runs in one process so the
+concurrency numbers stay valid. Each experiment directory gets a `manifest.json` with the label,
+timestamp, git commit, provider/model, execution modes, the workflows or reports it came from, and
+the data-quality result.
 
 Model selection for live runs: `JOULE_BENCH_SLM`, `JOULE_BENCH_MID` (optional middle rung) and
 `JOULE_BENCH_LLM` as `<provider>:<model>` with provider one of `google`, `anthropic`, `openai`,

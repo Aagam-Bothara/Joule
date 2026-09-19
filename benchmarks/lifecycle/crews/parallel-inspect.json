@@ -1,0 +1,41 @@
+{
+  "name": "parallel-inspect",
+  "description": "Four agents inspect different parts of the repository simultaneously (parallel strategy, widest concurrency)",
+  "strategy": "parallel",
+  "agents": [
+    {
+      "id": "structure",
+      "role": "Structure Analyst",
+      "instructions": "Use shell_exec to list the directory the task names and file_read to read its index or entry file. Report the layout in at most 6 bullet points.",
+      "allowedTools": ["file_read", "shell_exec"],
+      "budgetShare": 0.25,
+      "maxRetries": 0
+    },
+    {
+      "id": "types",
+      "role": "Type Analyst",
+      "instructions": "Use file_read on the type definitions the task names. Report the main types and what they represent, at most 6 bullet points.",
+      "allowedTools": ["file_read", "shell_exec"],
+      "budgetShare": 0.25,
+      "maxRetries": 0
+    },
+    {
+      "id": "tests",
+      "role": "Test Analyst",
+      "instructions": "Use shell_exec to list test files and file_read to read one. Report what is tested, at most 6 bullet points.",
+      "allowedTools": ["file_read", "shell_exec"],
+      "budgetShare": 0.25,
+      "maxRetries": 0
+    },
+    {
+      "id": "docs",
+      "role": "Documentation Analyst",
+      "instructions": "Use file_read on the README or docs files the task names. Report what the documentation claims, at most 6 bullet points, and note anything that looks out of date.",
+      "allowedTools": ["file_read", "shell_exec"],
+      "budgetShare": 0.25,
+      "maxRetries": 0
+    }
+  ],
+  "budget": "high",
+  "aggregation": "concat"
+}
