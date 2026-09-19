@@ -75,6 +75,22 @@ export function parsePassFraction(output: string): number | undefined {
 
 export type LlmJudge = (question: string) => Promise<{ passed: boolean; evidence: string }>;
 
+/**
+ * Where a verification actually waits. Verification is not one kind of wait:
+ * a command or browser check waits on a tool, an LLM judge waits on inference.
+ * The caller wraps each so instrumentation can tell them apart instead of
+ * charging the whole phase to one of them; by default both just run.
+ */
+export interface VerificationPhases {
+  tool<T>(name: string, run: () => Promise<T>): Promise<T>;
+  model<T>(run: () => Promise<T>): Promise<T>;
+}
+
+export const PASSTHROUGH_PHASES: VerificationPhases = {
+  tool: (_name, run) => run(),
+  model: run => run(),
+};
+
 /** Commands whose exit code 1 means "no match", not "failed". */
 const EXPLORATION = /^\s*(?:git\s+)?(?:grep|rg|egrep|fgrep|ag|find|ls|diff|test|\[)\b/;
 
@@ -84,7 +100,11 @@ export class StepVerifier {
     private options: { allowLlmJudge?: boolean; judge?: LlmJudge } = {},
   ) {}
 
-  async verify(verify: StepVerification | undefined, result: StepResult): Promise<VerificationOutcome> {
+  async verify(
+    verify: StepVerification | undefined,
+    result: StepResult,
+    phases: VerificationPhases = PASSTHROUGH_PHASES,
+  ): Promise<VerificationOutcome> {
     if (!verify || verify.type === 'none') {
       return this.autoVerify(result);
     }
@@ -94,24 +114,26 @@ export class StepVerifier {
         return { ...matchOutput(verify.assertion, stringifyOutput(result.output)), kind: 'output_check' };
 
       case 'dom_check':
-        return this.domCheck(verify, result);
+        return this.domCheck(verify, result, phases);
 
       case 'command_exit':
       case 'test_result':
-        return this.commandCheck(verify);
+        return this.commandCheck(verify, phases);
 
-      case 'llm_judge':
-        if (!this.options.allowLlmJudge || !this.options.judge) {
+      case 'llm_judge': {
+        const judge = this.options.judge;
+        if (!this.options.allowLlmJudge || !judge) {
           return this.autoVerify(result);
         }
         try {
-          const judged = await this.options.judge(
+          const judged = await phases.model(() => judge(
             `Assertion: ${verify.assertion}\nTool: ${result.toolName}\nOutput: ${truncate(stringifyOutput(result.output), 1200)}`,
-          );
+          ));
           return { ...judged, kind: 'llm_judge' };
         } catch (err) {
           return { passed: false, evidence: `judge failed: ${errMsg(err)}`, kind: 'llm_judge' };
         }
+      }
 
       default:
         return this.autoVerify(result);
@@ -145,10 +167,11 @@ export class StepVerifier {
     return { passed: true, evidence: 'no verifier declared', kind: 'none' };
   }
 
-  private async domCheck(verify: StepVerification, result: StepResult): Promise<VerificationOutcome> {
+  private async domCheck(verify: StepVerification, result: StepResult, phases: VerificationPhases): Promise<VerificationOutcome> {
     if (this.tools.has('browser_evaluate')) {
       try {
-        const evalResult = await this.tools.invoke({ toolName: 'browser_evaluate', input: { script: verify.assertion } });
+        const evalResult = await phases.tool('browser_evaluate', () =>
+          this.tools.invoke({ toolName: 'browser_evaluate', input: { script: verify.assertion } }));
         const passed = evalResult.success && Boolean(evalResult.output);
         return { passed, evidence: truncate(stringifyOutput(evalResult.output), 200), kind: 'dom_check' };
       } catch {
@@ -158,19 +181,20 @@ export class StepVerifier {
     return { ...matchOutput(verify.assertion, stringifyOutput(result.output)), kind: 'output_check' };
   }
 
-  private async commandCheck(verify: StepVerification): Promise<VerificationOutcome> {
+  private async commandCheck(verify: StepVerification, phases: VerificationPhases): Promise<VerificationOutcome> {
     const kind = verify.type;
-    if (!verify.command) {
+    const command = verify.command;
+    if (!command) {
       return { passed: false, evidence: `${kind} verification needs a command`, kind };
     }
     if (!this.tools.has('shell_exec')) {
       return { passed: false, evidence: 'shell_exec tool not registered', kind };
     }
     try {
-      const res = await this.tools.invoke({
+      const res = await phases.tool('shell_exec', () => this.tools.invoke({
         toolName: 'shell_exec',
-        input: { command: verify.command, ...(verify.cwd ? { cwd: verify.cwd } : {}) },
-      });
+        input: { command, ...(verify.cwd ? { cwd: verify.cwd } : {}) },
+      }));
       const out = (res.output ?? {}) as { stdout?: string; stderr?: string; exitCode?: number };
       const expected = verify.expectedExitCode ?? 0;
       const exitOk = res.success && out.exitCode === expected;

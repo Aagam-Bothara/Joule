@@ -53,7 +53,8 @@ export type TraceEventType =
   | 'escalation_decision'
   | 'consultation'
   | 'handoff'
-  | 'step_verified';
+  | 'step_verified'
+  | 'agent_lifecycle';
 
 export interface TraceEvent {
   id: string;

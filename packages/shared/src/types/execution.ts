@@ -17,6 +17,7 @@
 import type { BudgetUsage } from './budget.js';
 import type { ModelTier } from './model.js';
 import type { StepResult } from './task.js';
+import type { AgentLifecycleEvent, LifecycleMetrics } from './lifecycle.js';
 
 // ── Modes ────────────────────────────────────────────────────────────
 
@@ -370,4 +371,8 @@ export interface TrajectoryReport {
   steps: TrajectoryStep[];
   consults: TrajectoryConsult[];
   decisions: EscalationDecision[];
+  /** Lifecycle transitions of the run, oldest first (instrumentation only) */
+  lifecycle?: AgentLifecycleEvent[];
+  /** Model / tool-wait timing rollup over `lifecycle` */
+  lifecycleMetrics?: LifecycleMetrics;
 }

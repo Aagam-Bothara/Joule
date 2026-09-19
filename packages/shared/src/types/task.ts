@@ -15,6 +15,14 @@ export interface Task {
   sessionId?: string;
   /** Execution strategy. Defaults to routing.defaultMode (static-router). */
   mode?: ExecutionMode;
+  /**
+   * Identity of the agent working this task, when several agents work toward
+   * one goal (crews, sub-agents). Each gets its own lifecycle; `parentTaskId`
+   * ties them back to the task they were spawned from.
+   */
+  agentId?: string;
+  agentRole?: string;
+  parentTaskId?: string;
   createdAt: string;
 }
 

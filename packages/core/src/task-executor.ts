@@ -528,6 +528,8 @@ export class TaskExecutor {
       ? buildTrajectoryReport(ctx.adaptive.state, trace, status, {
           llmPricePerToken: ctx.adaptive.llmPricePerToken,
           stepDescriptions: ctx.adaptive.turnDescriptions,
+          lifecycleEvents: ctx.adaptive.lifecycle?.events,
+          lifecycleMetrics: ctx.adaptive.lifecycle?.metrics(),
         })
       : undefined;
 

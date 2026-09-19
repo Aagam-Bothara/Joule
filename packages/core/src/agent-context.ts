@@ -75,6 +75,11 @@ export function createAgentContext(params: {
     tools: agent.allowedTools,
     createdAt: isoNow(),
     sessionId: task.sessionId,
+    // Identity for instrumentation: every agent in the crew runs its own
+    // lifecycle, all of them under the task the crew was given.
+    agentId: agent.id,
+    agentRole: agent.role,
+    parentTaskId: task.id,
   };
 
   return { agent, envelope, filteredTools, planner, enrichedTask };
