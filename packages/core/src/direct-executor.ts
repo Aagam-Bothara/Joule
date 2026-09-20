@@ -18,6 +18,7 @@ import { ModelRouter } from './model-router.js';
 import { ToolRegistry } from './tool-registry.js';
 import type { ProgressCallback } from './task-executor.js';
 import { AgentLifecycleTracker } from './adaptive/lifecycle.js';
+import { VerifiedEditGate } from './verified-edit.js';
 
 /**
  * A parsed tool call extracted from the LLM's JSON response.
@@ -97,6 +98,11 @@ export class DirectExecutor {
     const traceId = generateId('direct-trace');
     const maxIterations = agent.maxIterations ?? 10;
     const wallTimeoutMs = DEFAULT_WALL_TIMEOUT_MS;
+
+    // Opt-in verified-edit gate: without a policy on the task this stays
+    // undefined and every write behaves exactly as it did before.
+    const gate = task.verifiedEdit ? new VerifiedEditGate(task.verifiedEdit) : undefined;
+    if (gate) await gate.establishBaseline();
 
     // The same tracker the adaptive path uses, so direct-mode agents produce
     // comparable events. Identity comes from the task the crew built; a
@@ -286,6 +292,10 @@ export class DirectExecutor {
           // Only real tool work counts as waiting; the circuit-breaker and
           // argument checks above are in-memory and stay out of the timeline.
           lifecycle.toolStart(toolCall.toolName, { iteration });
+          // Opt-in: remember the file this write is about to replace, so a
+          // regression can be undone.
+          const guarded = gate?.guards(toolCall.toolName, sanitizedArgs) === true;
+          const before = guarded ? gate!.snapshot(sanitizedArgs) : undefined;
           try {
             const result = await this.tools.invoke({
               toolName: toolCall.toolName,
@@ -295,7 +305,13 @@ export class DirectExecutor {
             const toolDuration = monotonicNow() - toolSpanStart;
             const output = this.truncate(String(result.output ?? 'OK'), 1000);
 
-            if (result.success) {
+            if (result.success && before) {
+              // The write landed; keep it only if the workspace still verifies.
+              const decision = await gate!.review(before, toolCall.toolName);
+              toolResults.push(decision.kept
+                ? `[${toolCall.toolName}] Success: ${output}${decision.message ? ` (${decision.message})` : ''}`
+                : `[${toolCall.toolName}] REJECTED: ${decision.message}`);
+            } else if (result.success) {
               toolResults.push(`[${toolCall.toolName}] Success: ${output}`);
             } else {
               toolResults.push(`[${toolCall.toolName}] Error: ${result.error ?? 'Unknown error'}`);
@@ -446,6 +462,7 @@ export class DirectExecutor {
       completedAt: isoNow(),
       lifecycle: lifecycleEvents,
       lifecycleMetrics,
+      ...(gate ? { verifiedEdits: gate.stats } : {}),
     };
   }
 

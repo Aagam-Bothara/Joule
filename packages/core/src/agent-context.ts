@@ -80,6 +80,7 @@ export function createAgentContext(params: {
     agentId: agent.id,
     agentRole: agent.role,
     parentTaskId: task.id,
+    ...(task.verifiedEdit ? { verifiedEdit: task.verifiedEdit } : {}),
   };
 
   return { agent, envelope, filteredTools, planner, enrichedTask };

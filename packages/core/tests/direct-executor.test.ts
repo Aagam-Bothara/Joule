@@ -1,10 +1,14 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { z } from 'zod';
 import { DirectExecutor } from '../src/direct-executor.js';
 import { BudgetManager } from '../src/budget-manager.js';
 import { ModelRouter } from '../src/model-router.js';
 import { ToolRegistry } from '../src/tool-registry.js';
 import { ModelProviderRegistry } from '@joule/models';
+import { fileWriteTool } from '@joule/tools';
 import { ModelTier, generateId } from '@joule/shared';
 import type { Task, RoutingConfig, AgentDefinition } from '@joule/shared';
 
@@ -370,6 +374,101 @@ describe('DirectExecutor', () => {
 
       // The injection should be sanitized, not crash the executor
       expect(result.status).toBe('completed');
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Verified-edit gate: a later write that breaks a passing workspace is
+  // undone. Opt-in, so a task without a policy behaves exactly as before.
+  // -------------------------------------------------------------------------
+
+  describe('verified-edit gate', () => {
+    let dir: string;
+
+    beforeEach(() => {
+      dir = mkdtempSync(join(tmpdir(), 'joule-direct-gate-'));
+      // A checker with no shell quoting of its own: exit 0 iff the file is good.
+      writeFileSync(join(dir, 'check.js'), [
+        'const fs = require("fs");',
+        'const p = require("path").join(__dirname, "solution.py");',
+        'if (!fs.existsSync(p)) process.exit(1);',
+        'process.exit(fs.readFileSync(p, "utf8").includes("GOOD") ? 0 : 1);',
+      ].join('\n'));
+    });
+
+    afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+    /** buildExecutor only knows test_tool; the gate needs a real writer. */
+    const buildWriter = (responses: string[]) => {
+      const built = buildExecutor(responses);
+      built.tools.register(fileWriteTool, 'builtin');
+      return built;
+    };
+
+    const solution = () => join(dir, 'solution.py').replace(/\\/g, '/');
+    const write = (content: string) =>
+      JSON.stringify({ tool_calls: [{ toolName: 'file_write', toolArgs: { path: solution(), content } }] });
+    const policy = () => ({ command: 'node check.js', cwd: dir, timeoutMs: 20_000 });
+
+    it('rolls back a write that breaks a passing workspace', async () => {
+      const { executor, envelope } = buildWriter([
+        write('# GOOD v1'),
+        write('# BROKEN by a later agent'),
+        '{"answer": "done"}',
+      ]);
+
+      const result = await executor.execute(
+        { ...makeTask(), verifiedEdit: policy() }, envelope, makeAgent({ allowedTools: ['file_write'] }),
+      );
+
+      // The good version survived the bad write.
+      expect(readFileSync(join(dir, 'solution.py'), 'utf8')).toBe('# GOOD v1');
+      expect(result.verifiedEdits).toMatchObject({ rollbacks: 1, verified: true });
+      expect(result.status).toBe('completed');
+    });
+
+    it('keeps a write that leaves the workspace passing', async () => {
+      const { executor, envelope } = buildWriter([
+        write('# GOOD v1'),
+        write('# GOOD v2 improved'),
+        '{"answer": "done"}',
+      ]);
+
+      const result = await executor.execute(
+        { ...makeTask(), verifiedEdit: policy() }, envelope, makeAgent({ allowedTools: ['file_write'] }),
+      );
+
+      expect(readFileSync(join(dir, 'solution.py'), 'utf8')).toBe('# GOOD v2 improved');
+      expect(result.verifiedEdits).toMatchObject({ rollbacks: 0 });
+    });
+
+    it('lets an agent iterate freely until something first passes', async () => {
+      const { executor, envelope } = buildWriter([
+        write('# still wrong'),
+        write('# GOOD at last'),
+        '{"answer": "done"}',
+      ]);
+
+      const result = await executor.execute(
+        { ...makeTask(), verifiedEdit: policy() }, envelope, makeAgent({ allowedTools: ['file_write'] }),
+      );
+
+      expect(readFileSync(join(dir, 'solution.py'), 'utf8')).toBe('# GOOD at last');
+      expect(result.verifiedEdits?.rollbacks).toBe(0);
+    });
+
+    it('does nothing at all without a policy on the task', async () => {
+      const { executor, envelope } = buildWriter([
+        write('# GOOD v1'),
+        write('# BROKEN'),
+        '{"answer": "done"}',
+      ]);
+
+      const result = await executor.execute(makeTask(), envelope, makeAgent({ allowedTools: ['file_write'] }));
+
+      // Unchanged behaviour: the breaking write stands.
+      expect(readFileSync(join(dir, 'solution.py'), 'utf8')).toBe('# BROKEN');
+      expect(result.verifiedEdits).toBeUndefined();
     });
   });
 

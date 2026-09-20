@@ -24,7 +24,24 @@ export interface Task {
   agentId?: string;
   agentRole?: string;
   parentTaskId?: string;
+  /**
+   * Opt-in verified-edit gate. When set, an agent's write is checked with this
+   * command and rolled back if it turns a passing state into a failing one.
+   * Without it, writes behave exactly as before.
+   */
+  verifiedEdit?: VerifiedEditPolicy;
   createdAt: string;
+}
+
+/** How to check the workspace, and which tools to guard. */
+export interface VerifiedEditPolicy {
+  /** Shell command whose exit code decides whether the workspace is passing */
+  command: string;
+  /** Directory to run it in */
+  cwd?: string;
+  timeoutMs?: number;
+  /** Tools treated as writes; defaults to file_write / file_edit / repo_write / repo_edit */
+  tools?: string[];
 }
 
 export type TaskStatus =
@@ -98,6 +115,8 @@ export interface TaskResult {
   lifecycle?: AgentLifecycleEvent[];
   /** Model / tool-wait timing rollup over `lifecycle` */
   lifecycleMetrics?: LifecycleMetrics;
+  /** Verified-edit gate activity, when a policy was set on the task */
+  verifiedEdits?: { checks: number; rollbacks: number; verified?: boolean };
 }
 
 // --- Task Specification (structured goal + success criteria) ---

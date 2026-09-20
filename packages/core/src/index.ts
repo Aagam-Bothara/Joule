@@ -14,6 +14,7 @@ export { OptimizedMemory, SemanticIndex, FactExtractor } from './memory/index.js
 export { ConstitutionEnforcer } from './constitution.js';
 export { CrewOrchestrator } from './crew-orchestrator.js';
 export { DirectExecutor } from './direct-executor.js';
+export { VerifiedEditGate, type CheckResult, type EditDecision } from './verified-edit.js';
 export { createAgentContext, type AgentContext } from './agent-context.js';
 export { ComputerAgent, type ComputerAgentOptions, type ComputerAgentResult, type ComputerAgentAction } from './computer-agent.js';
 export { Scheduler, matchesCron, parseCron, validateCron } from './scheduler.js';
