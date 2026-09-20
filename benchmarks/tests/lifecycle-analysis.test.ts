@@ -15,6 +15,7 @@ import {
   bucketToolWaits,
   concurrencyProfile,
   percentile,
+  renderAgentBands,
   renderLifecycleReport,
   summarizeWorkflow,
   summarizeWorkflows,
@@ -332,6 +333,29 @@ describe('aggregate', () => {
     expect(a.toolWaitMs.count).toBe(0);
     expect(Number.isFinite(a.idleFraction.mean)).toBe(true);
     expect(renderLifecycleReport(analyzeRecords([], 'none'))).toContain('No lifecycle records found.');
+  });
+
+  it('renders agent bands on a shared time axis', () => {
+    // a: model 0-100 then tool 100-200. b: starts halfway, model 100-200.
+    const a = record('agent_a', [
+      { to: 'model_running', at: 0 },
+      { to: 'ready', at: 100 },
+      { to: 'tool_wait', at: 100, tool: 'shell_exec' },
+      { to: 'ready', at: 200 },
+      { to: 'completed', at: 200 },
+    ], { parentTaskId: 'task-root', taskId: 'a', agentRole: 'researcher' });
+    const b = record('agent_b', [
+      { to: 'model_running', at: 100 },
+      { to: 'ready', at: 200 },
+      { to: 'completed', at: 200 },
+    ], { parentTaskId: 'task-root', taskId: 'b', agentRole: 'reviewer' });
+
+    const bands = renderAgentBands([a, b], 10).split('\n');
+    expect(bands[0]).toContain('researcher');
+    expect(bands[0]).toMatch(/\|#{5}-{5}\|/);
+    // The later agent's band is blank until it starts, then all model.
+    expect(bands[1]).toMatch(/\| {5}#{5}\|/);
+    expect(renderAgentBands([], 10)).toBe('(no lifecycle events)');
   });
 
   it('renders a human-readable report', () => {

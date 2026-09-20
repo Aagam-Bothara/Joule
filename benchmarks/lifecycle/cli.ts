@@ -15,7 +15,7 @@
 import { execSync } from 'node:child_process';
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
-import { analyzeRecords, renderLifecycleReport } from './analyze.js';
+import { analyzeRecords, renderAgentBands, renderLifecycleReport, summarizeWorkflows } from './analyze.js';
 import { parseJsonl, recordsFromHarnessReport, toJsonl } from './record.js';
 import { renderValidation, validateRecords } from './validate.js';
 import type { AgentLifecycleRecord } from './types.js';
@@ -43,7 +43,9 @@ function collect(dir: string, label?: string): { records: AgentLifecycleRecord[]
   if (!existsSync(dir)) throw new Error(`No reports directory at ${dir}`);
   const files = readdirSync(dir)
     .filter(f => f.startsWith('harness-') && f.endsWith('.json'))
-    .filter(f => (label ? f.includes(label) : true))
+    // The timestamp must follow the label, so "real-single" does not also
+    // match "real-single-sanity".
+    .filter(f => (label ? f.includes(`-${label}-20`) : true))
     .sort();
   const records: AgentLifecycleRecord[] = [];
   const sources: CollectedSource[] = [];
@@ -102,6 +104,28 @@ function main(): void {
 
     process.stderr.write(`${records.length} record(s) written to ${out}\n`);
     process.stderr.write(`${renderValidation(validation)}\n`);
+    return;
+  }
+
+  if (command === 'bands') {
+    const file = process.argv[3] && !process.argv[3].startsWith('--') ? process.argv[3] : DEFAULT_RUNS;
+    const records = loadRecords(file);
+    const width = Number(arg('--width') ?? '64');
+    const wanted = arg('--workflow');
+    const groupOf = (r: AgentLifecycleRecord): string => r.parentTaskId ?? r.taskId;
+
+    // Default to the workflow with the most agents running models at once —
+    // the one that shows what concurrency actually looked like.
+    const pick = wanted ?? summarizeWorkflows(records)
+      .sort((a, b) => b.maxConcurrentModelRunning - a.maxConcurrentModelRunning || b.modelDemandOverlapFraction - a.modelDemandOverlapFraction)[0]?.parentTaskId;
+    const members = records.filter(r => groupOf(r) === pick);
+    if (members.length === 0) {
+      process.stderr.write(`No records for workflow ${pick}\n`);
+      process.exitCode = 1;
+      return;
+    }
+    console.log(`Workflow ${pick}  (${members.length} agent run(s))`);
+    console.log(renderAgentBands(members, width));
     return;
   }
 
