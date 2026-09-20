@@ -50,6 +50,8 @@ export interface LifecycleSource {
 
 export interface RecordOptions {
   runId: string;
+  /** Benchmark problem or SWE-bench instance this run came from */
+  workloadId?: string;
   /** Defaults to 'full' when the result carries a trajectory, else 'direct' */
   executionMode?: AgentExecutionMode;
   /** Defaults to status === 'completed' */
@@ -70,6 +72,7 @@ export function toLifecycleRecord(result: LifecycleSource, opts: RecordOptions):
   return {
     runId: opts.runId,
     taskId: first.taskId ?? result.taskId,
+    ...(opts.workloadId ? { workloadId: opts.workloadId } : {}),
     ...(first.parentTaskId ? { parentTaskId: first.parentTaskId } : {}),
     agentId: first.agentId,
     ...(first.agentRole ? { agentRole: first.agentRole } : {}),
@@ -147,7 +150,7 @@ export function recordsFromHarnessReport(report: unknown, runId: string): AgentL
         lifecycleMetrics: trajectory.lifecycleMetrics,
         trajectory,
       },
-      { runId, executionMode: 'full', success: task.success },
+      { runId, executionMode: 'full', success: task.success, ...(task.workloadId ? { workloadId: task.workloadId } : {}) },
     );
     if (record) out.push(record);
   }

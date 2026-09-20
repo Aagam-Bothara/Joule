@@ -14,7 +14,9 @@ import {
   analyzeRecords,
   bucketToolWaits,
   concurrencyProfile,
+  hideableWindows,
   percentile,
+  waitsOverThresholds,
   renderAgentBands,
   renderLifecycleReport,
   summarizeWorkflow,
@@ -173,7 +175,7 @@ describe('experiment records', () => {
 
     const records = recordsFromHarnessReport(report, 'harness-live-mbpp-x');
     expect(records).toHaveLength(1);
-    expect(records[0]).toMatchObject({ runId: 'harness-live-mbpp-x', executionMode: 'full', success: true, taskId: 'task-9' });
+    expect(records[0]).toMatchObject({ runId: 'harness-live-mbpp-x', executionMode: 'full', success: true, taskId: 'task-9', workloadId: 'mbpp-1' });
 
     expect(parseJsonl<AgentLifecycleRecord>(toJsonl(records))).toEqual(records);
     expect(toJsonl([])).toBe('');
@@ -190,6 +192,33 @@ describe('statistics', () => {
     expect(percentile(values, 0.95)).toBe(100);
     expect(percentile([], 0.9)).toBe(0);
     expect(percentile([42], 0.95)).toBe(42);
+  });
+
+  it('counts waits above each reported threshold', () => {
+    const shares = waitsOverThresholds([100, 600, 1500, 3000, 7000, 12_000]);
+    expect(shares.map(s => [s.thresholdMs, s.count])).toEqual([
+      [500, 5], [1000, 4], [2000, 3], [5000, 2], [10_000, 1],
+    ]);
+    expect(shares[0].fraction).toBeCloseTo(5 / 6, 6);
+    expect(waitsOverThresholds([]).every(s => s.count === 0 && s.fraction === 0)).toBe(true);
+  });
+
+  it('computes hideable time for hypothetical overheads', () => {
+    // 2s + 300ms + 50ms = 2350ms of measured wait.
+    const h = hideableWindows([2000, 300, 50], [100, 250, 500, 1000, 2000]);
+
+    expect(h[0]).toMatchObject({ migrationCostMs: 100, eligibleWaits: 2 });
+    // (2000-100) + (300-100) = 2100 of 2350
+    expect(h[0].hideableMs).toBe(2100);
+    expect(h[0].hideableFraction).toBeCloseTo(2100 / 2350, 6);
+    expect(h[0].eligibleFraction).toBeCloseTo(2 / 3, 6);
+
+    // At 1s only the 2s wait qualifies; at 2s nothing is strictly longer.
+    expect(h[3]).toMatchObject({ eligibleWaits: 1, hideableMs: 1000 });
+    expect(h[4]).toMatchObject({ eligibleWaits: 0, hideableMs: 0, hideableFraction: 0 });
+
+    const empty = hideableWindows([]);
+    expect(empty.every(x => x.eligibleWaits === 0 && x.hideableFraction === 0)).toBe(true);
   });
 
   it('buckets tool-wait windows by duration', () => {

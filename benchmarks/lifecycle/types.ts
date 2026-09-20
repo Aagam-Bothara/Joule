@@ -20,6 +20,8 @@ export interface AgentLifecycleRecord {
   /** The process/run this came from; timestamps are only comparable within it */
   runId: string;
   taskId: string;
+  /** Workload identity the run came from (benchmark problem / SWE-bench instance) */
+  workloadId?: string;
   parentTaskId?: string;
   agentId: string;
   agentRole?: string;
@@ -93,6 +95,32 @@ export interface DurationBucket {
   percentage: number;
 }
 
+/** Share of tool-wait windows longer than a threshold. */
+export interface ThresholdShare {
+  thresholdMs: number;
+  count: number;
+  /** Share of all tool-wait windows, 0..1 */
+  fraction: number;
+}
+
+/**
+ * How much tool-wait time would remain usable if something with a fixed
+ * start-up cost were run inside those windows. Arithmetic over measured
+ * durations only: nothing here migrates, moves or schedules anything, and no
+ * cost value is endorsed as achievable.
+ */
+export interface HideableWindow {
+  /** Hypothetical fixed overhead, in ms */
+  migrationCostMs: number;
+  /** Waits strictly longer than the overhead */
+  eligibleWaits: number;
+  eligibleFraction: number;
+  /** Sum of max(0, wait - overhead) */
+  hideableMs: number;
+  /** hideableMs / total tool-wait time */
+  hideableFraction: number;
+}
+
 /** Per execution mode, so full and direct agents can be compared. */
 export interface ModeBreakdown {
   executionMode: AgentExecutionMode;
@@ -113,6 +141,10 @@ export interface LifecycleAggregate {
   idleFraction: IdleStats;
   toolWaitMs: ToolWaitStats;
   buckets: DurationBucket[];
+  /** Waits above 500ms / 1s / 2s / 5s / 10s */
+  overThresholds: ThresholdShare[];
+  /** Analysis-only: usable time left under hypothetical fixed overheads */
+  hideable: HideableWindow[];
 
   /** Totals across every record, for a quick where-does-the-time-go view */
   totals: {
