@@ -73,15 +73,26 @@ export const ROLES_BY_WIDTH: Record<CrewWidth, AgentDefinition[]> = {
   4: [RESEARCHER, IMPLEMENTER, REVIEWER, TESTER],
 };
 
+/**
+ * Every agent is given the same budget at every width.
+ *
+ * Under the default share-based allocation the crew budget is divided among
+ * the agents, so the implementer ran on ~100k tokens at width 1 but ~33k at
+ * width 3 — and several implementer failures in datasets E and E2 sit right at
+ * that 33k line. Crew width would then be two variables at once: how many
+ * agents there are, and how much the one that writes the code is allowed to
+ * spend. `fixed_per_agent` separates them; the crew envelope still records the
+ * group's total spending, it just no longer caps any member.
+ */
 export function crewForWidth(width: CrewWidth): CrewDefinition {
   const agents = ROLES_BY_WIDTH[width];
-  const share = Number((1 / agents.length).toFixed(4));
   return {
     name: `crew-width-${width}`,
     description: `Fixed crew of ${agents.length} for the crew-scaling experiment`,
     strategy: 'sequential',
-    agents: agents.map(a => ({ ...a, budgetShare: share })),
+    agents: agents.map(a => ({ ...a })),
     budget: 'high',
+    budgetMode: 'fixed_per_agent',
     aggregation: 'last',
   };
 }

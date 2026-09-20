@@ -104,6 +104,22 @@ export interface CrewDefinition {
   /** Budget for the entire crew */
   budget?: BudgetPresetName | Partial<BudgetEnvelope>;
 
+  /**
+   * How `budget` is divided among the agents.
+   *
+   * - 'share' (default): the crew budget is split by `budgetShare`, so the
+   *   crew as a whole is capped and each extra agent shrinks the others.
+   * - 'fixed_per_agent': every agent gets the crew budget as its own ceiling,
+   *   so adding an agent adds capacity instead of taking it from the agents
+   *   already there.
+   *
+   * The second mode exists for experiments that vary crew size: under 'share'
+   * an implementer at width 1 gets three times the tokens it gets at width 3,
+   * which makes crew width and per-agent budget the same variable. Production
+   * crews keep the capped default unless they opt in.
+   */
+  budgetMode?: 'share' | 'fixed_per_agent';
+
   /** How to combine agent results into the final output */
   aggregation?: 'concat' | 'last' | 'custom';
 

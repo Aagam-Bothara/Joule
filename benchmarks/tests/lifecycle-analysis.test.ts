@@ -2,11 +2,14 @@ import { describe, it, expect } from 'vitest';
 import type { AgentLifecycleEvent, AgentLifecycleState, LifecycleMetrics } from '@joule/shared';
 import {
   activeInterval,
+  failureStage,
   intervalsInState,
   parseJsonl,
   recordsFromHarnessReport,
+  sanitizeFailure,
   toJsonl,
   toLifecycleRecord,
+  toolCallSequence,
   toolWaitWindows,
 } from '../lifecycle/record.js';
 import {
@@ -28,7 +31,7 @@ import type { AgentLifecycleRecord } from '../lifecycle/types.js';
 
 // ── Builders ────────────────────────────────────────────────────────
 
-interface Step { to: AgentLifecycleState; at: number; tool?: string; model?: string }
+interface Step { to: AgentLifecycleState; at: number; tool?: string; model?: string; metadata?: Record<string, unknown> }
 
 interface Identity { taskId?: string; parentTaskId?: string; agentRole?: string }
 
@@ -45,6 +48,7 @@ function events(agentId: string, steps: Step[], id: Identity = {}): AgentLifecyc
       timestamp: s.at,
       ...(s.tool ? { tool: s.tool } : {}),
       ...(s.model ? { model: s.model } : {}),
+      ...(s.metadata ? { metadata: s.metadata } : {}),
     };
     from = s.to;
     return event;
@@ -159,6 +163,75 @@ describe('experiment records', () => {
     expect(r.toolWaitMs).toBe(200);
     expect(r.totalRuntimeMs).toBe(410);
     expect(r.idleFraction).toBeCloseTo(200 / 410, 6);
+  });
+
+  it('keeps the tool sequence, with the outcome of each call', () => {
+    const r = record('agent_reviewer', [
+      { to: 'tool_wait', at: 0, tool: 'file_read' },
+      { to: 'ready', at: 50, tool: 'file_read', metadata: { ok: true } },
+      { to: 'tool_wait', at: 60, tool: 'file_write' },
+      { to: 'ready', at: 90, tool: 'file_write', metadata: { ok: false, rolledBack: true } },
+      { to: 'tool_wait', at: 100, tool: 'shell_exec' },
+      { to: 'ready', at: 180, tool: 'shell_exec', metadata: { ok: false, error: 'exit 1\n  at frame' } },
+      { to: 'completed', at: 200 },
+    ]);
+
+    // The question the counts could not answer: did this agent read, or write?
+    expect(r.tools.map(t => t.tool)).toEqual(['file_read', 'file_write', 'shell_exec']);
+    expect(r.tools[0]).toMatchObject({ ok: true, durationMs: 50 });
+    expect(r.tools[1]).toMatchObject({ ok: false, rolledBack: true });
+    // The stack is dropped; the reason is kept.
+    expect(r.tools[2].error).toBe('exit 1');
+  });
+
+  it('records a tool call the run died inside', () => {
+    // Failing out of a tool closes the window, so the wait is still measured.
+    expect(toolCallSequence(events('a', [
+      { to: 'tool_wait', at: 0, tool: 'shell_exec' },
+      { to: 'failed', at: 90 },
+    ]))).toEqual([{ tool: 'shell_exec', durationMs: 90 }]);
+
+    // A stream that simply stops mid-call has no measured end; the call is
+    // still listed, because which tool was in flight is the evidence.
+    expect(toolCallSequence(events('a', [
+      { to: 'tool_wait', at: 0, tool: 'shell_exec' },
+    ]))).toEqual([{ tool: 'shell_exec', durationMs: 0, ok: false }]);
+  });
+
+  it('keeps why a run failed and how far it got', () => {
+    // The shape that made fifteen crew agents unexplainable: no calls, no
+    // tools, just a terminal failure.
+    const evs = events('agent_tester', [{ to: 'failed', at: 5 }]);
+    const r = toLifecycleRecord(
+      { taskId: 't', status: 'failed', error: 'Budget exhausted during direct execution', lifecycle: evs, lifecycleMetrics: metricsFrom(evs) },
+      { runId: 'run-1' },
+    )!;
+
+    expect(r).toMatchObject({
+      success: false,
+      status: 'failed',
+      error: 'Budget exhausted during direct execution',
+      failedFrom: 'ready', // never reached a model or a tool
+    });
+    expect(r.modelCalls).toBe(0);
+    expect(r.tools).toEqual([]);
+  });
+
+  it('leaves a completed run with no failure fields', () => {
+    const r = record('agent_ok', AGENT_STEPS);
+    expect(r.error).toBeUndefined();
+    expect(r.failedFrom).toBeUndefined();
+    expect(failureStage(events('a', AGENT_STEPS))).toBeUndefined();
+  });
+
+  it('reduces a failure message to its reason', () => {
+    expect(sanitizeFailure(new Error('LLM call failed\n    at chat (openai.ts:1)'))).toBe('LLM call failed');
+    expect(sanitizeFailure('401 unauthorized for key sk-or-v1-abcdef0123456789'))
+      .toBe('401 unauthorized for key sk-[redacted]');
+    expect(sanitizeFailure('Bearer abcdefghijklmnop rejected')).toBe('Bearer [redacted] rejected');
+    expect(sanitizeFailure('x'.repeat(400))).toHaveLength(301);
+    expect(sanitizeFailure(undefined)).toBeUndefined();
+    expect(sanitizeFailure('   ')).toBeUndefined();
   });
 
   it('skips results without lifecycle instrumentation', () => {

@@ -1754,7 +1754,13 @@ If on track, drift should be an empty array. If drifting, list specific reasons.
       const before = guarded ? gate!.snapshot(step.toolArgs) : undefined;
 
       const toolResult = this.activeLifecycle
-        ? await inToolWait(this.activeLifecycle, step.toolName, () => this.tools.invoke(invocation), { step: step.index })
+        ? await inToolWait(
+          this.activeLifecycle,
+          step.toolName,
+          () => this.tools.invoke(invocation),
+          { step: step.index },
+          r => ({ ok: r.success, ...(r.error ? { error: r.error } : {}) }),
+        )
         : await this.tools.invoke(invocation);
       this.tracer.logToolCall(traceId, invocation, toolResult);
 

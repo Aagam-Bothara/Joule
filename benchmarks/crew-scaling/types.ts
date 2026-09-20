@@ -5,16 +5,33 @@
  * a crew, and no policy in Joule reads these records.
  */
 
+import type { ToolCallRecord } from '../lifecycle/types.js';
+
+export type { ToolCallRecord };
+
 export type CrewWidth = 1 | 2 | 3 | 4;
 
 export interface AgentContribution {
   agentId: string;
   role?: string;
   success?: boolean;
+  /**
+   * The run's own terminal status, and why it ended that way.
+   *
+   * Counts alone cannot separate an agent that had nothing to do from one that
+   * was never able to start: fifteen agents across datasets E and E2 made zero
+   * model calls and the artifacts could not say why.
+   */
+  status?: string;
+  error?: string;
+  /** Lifecycle state the run failed from; `ready` means it never started work */
+  failedFrom?: string;
   costUsd?: number;
   tokens?: number;
   modelCalls: number;
   toolCalls: number;
+  /** Every tool call in order, with its outcome */
+  tools?: ToolCallRecord[];
   /**
    * Writes this agent proposed versus writes that survived verification.
    * Activity is not contribution: an agent can work hard and make it worse.
@@ -40,6 +57,20 @@ export interface CrewScalingRecord {
   /** Deterministic evaluator result: the problem's own tests passed */
   success: boolean;
   failureReason?: string;
+  /** Status the crew itself reported: completed, partial or failed */
+  crewStatus?: string;
+  /** The crew's own error, when orchestration failed rather than the task */
+  crewError?: string;
+  /**
+   * Set when the run threw before producing a crew result. Such runs used to
+   * be printed to stderr and dropped, so the artifact silently held fewer
+   * rows than the experiment attempted.
+   *
+   * Their measurements are zeroed, not measured: the outcome is a real
+   * failure, but cost, tokens and runtime on these rows mean "unknown", so an
+   * analysis that averages them will understate the width they belong to.
+   */
+  runError?: string;
 
   workflowJctMs: number;
 

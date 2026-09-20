@@ -11,7 +11,9 @@ import {
   renderRepeatability,
   repeatability,
 } from '../crew-scaling/analyze.js';
+import { contributionOf } from '../crew-scaling/record.js';
 import type { CrewScalingRecord, CrewWidth } from '../crew-scaling/types.js';
+import type { AgentLifecycleEvent, AgentLifecycleState, AgentResult, LifecycleMetrics } from '@joule/shared';
 
 /** A record with sane defaults; every test overrides only what it asserts on. */
 function rec(workloadId: string, crewWidth: CrewWidth, o: Partial<CrewScalingRecord> = {}): CrewScalingRecord {
@@ -244,5 +246,87 @@ describe('crew scaling analysis', () => {
     expect(report).toContain('Crew-scaling characterization');
     expect(report).toContain('Minimum successful width');
     expect(report).toContain('Oracle elastic bound');
+  });
+});
+
+// ── What each agent's row has to be able to explain ──────────────────
+
+describe('agent contribution records', () => {
+  /** An agent result shaped like the ones a crew run produces. */
+  function agentResult(o: {
+    status: string;
+    error?: string;
+    lifecycle?: AgentLifecycleEvent[];
+    metrics?: Partial<LifecycleMetrics>;
+  }): AgentResult {
+    return {
+      agentId: 'reviewer',
+      role: 'Reviewer',
+      taskResult: {
+        id: 'r1', taskId: 't1', traceId: 'tr1',
+        status: o.status,
+        stepResults: [],
+        completedAt: new Date().toISOString(),
+        ...(o.error ? { error: o.error } : {}),
+        ...(o.lifecycle ? { lifecycle: o.lifecycle } : {}),
+        lifecycleMetrics: { modelCalls: 0, toolCalls: 0, ...o.metrics },
+      },
+      budgetUsed: { tokensUsed: 0, costUsd: 0 },
+      blackboardWrites: [],
+    } as unknown as AgentResult;
+  }
+
+  const evt = (
+    from: AgentLifecycleState, to: AgentLifecycleState, timestamp: number,
+    extra: Partial<AgentLifecycleEvent> = {},
+  ): AgentLifecycleEvent => ({
+    taskId: 't1', agentId: 'reviewer', from, to, timestamp, ...extra,
+  });
+
+  it('says why an agent that never ran did not run', () => {
+    const row = contributionOf(agentResult({
+      status: 'failed',
+      error: 'Budget exhausted during direct execution\n    at execute (direct-executor.ts:157)',
+      lifecycle: [evt('ready', 'failed', 3)],
+    }));
+
+    expect(row).toMatchObject({
+      success: false,
+      status: 'failed',
+      // First line only: the reason, not the stack.
+      error: 'Budget exhausted during direct execution',
+      failedFrom: 'ready',
+      modelCalls: 0,
+      toolCalls: 0,
+    });
+  });
+
+  it('distinguishes a specialist that read from one that wrote', () => {
+    const row = contributionOf(agentResult({
+      status: 'completed',
+      metrics: { modelCalls: 2, toolCalls: 2 },
+      lifecycle: [
+        evt('ready', 'tool_wait', 0, { tool: 'file_read' }),
+        evt('tool_wait', 'ready', 10, { tool: 'file_read', metadata: { ok: true } }),
+        evt('ready', 'tool_wait', 20, { tool: 'file_write' }),
+        evt('tool_wait', 'ready', 40, { tool: 'file_write', metadata: { ok: false, rolledBack: true } }),
+        evt('ready', 'completed', 50),
+      ],
+    }));
+
+    expect(row.tools?.map(t => t.tool)).toEqual(['file_read', 'file_write']);
+    expect(row.tools?.[1]).toMatchObject({ ok: false, rolledBack: true });
+  });
+
+  it('leaves the failure fields off a clean run', () => {
+    const row = contributionOf(agentResult({
+      status: 'completed',
+      lifecycle: [evt('ready', 'completed', 1)],
+    }));
+
+    expect(row.error).toBeUndefined();
+    expect(row.failedFrom).toBeUndefined();
+    expect(row.tools).toBeUndefined();
+    expect(row.status).toBe('completed');
   });
 });

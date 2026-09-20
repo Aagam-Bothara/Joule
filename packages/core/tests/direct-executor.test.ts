@@ -470,6 +470,45 @@ describe('DirectExecutor', () => {
       expect(readFileSync(join(dir, 'solution.py'), 'utf8')).toBe('# BROKEN');
       expect(result.verifiedEdits).toBeUndefined();
     });
+
+    it('protects a write that names its path as `filepath`', async () => {
+      // The tool normalizes this alias, so the gate has to recognize it too:
+      // an alias it misses is a write it snapshots nothing for and counts as
+      // no proposal, which reads afterwards as an agent that never wrote.
+      const writeVia = (key: string, content: string) =>
+        JSON.stringify({ tool_calls: [{ toolName: 'file_write', toolArgs: { [key]: solution(), content } }] });
+
+      const { executor, envelope } = buildWriter([
+        writeVia('filepath', '# GOOD v1'),
+        writeVia('filepath', '# BROKEN by a later agent'),
+        '{"answer": "done"}',
+      ]);
+
+      const result = await executor.execute(
+        { ...makeTask(), verifiedEdit: policy() }, envelope, makeAgent({ allowedTools: ['file_write'] }),
+      );
+
+      expect(readFileSync(join(dir, 'solution.py'), 'utf8')).toBe('# GOOD v1');
+      expect(result.verifiedEdits).toMatchObject({ rollbacks: 1, proposed: 2, accepted: 1 });
+    });
+
+    it('reports on the lifecycle event whether a write survived', async () => {
+      const { executor, envelope } = buildWriter([
+        write('# GOOD v1'),
+        write('# BROKEN by a later agent'),
+        '{"answer": "done"}',
+      ]);
+
+      const result = await executor.execute(
+        { ...makeTask(), verifiedEdit: policy() }, envelope, makeAgent({ allowedTools: ['file_write'] }),
+      );
+
+      const closes = (result.lifecycle ?? []).filter(e => e.from === 'tool_wait' && e.tool === 'file_write');
+      expect(closes).toHaveLength(2);
+      expect(closes[0].metadata).toMatchObject({ ok: true });
+      // The reverted write is distinguishable from the one that stood.
+      expect(closes[1].metadata).toMatchObject({ ok: false, rolledBack: true });
+    });
   });
 
   // -------------------------------------------------------------------------
@@ -478,6 +517,29 @@ describe('DirectExecutor', () => {
   // -------------------------------------------------------------------------
 
   describe('lifecycle instrumentation', () => {
+    it('records which tool was called and whether it worked', async () => {
+      const { executor, envelope, tools } = buildExecutor([
+        '{"tool_calls": [{"toolName": "test_tool", "toolArgs": {"query": "ok"}}]}',
+        '{"tool_calls": [{"toolName": "flaky_tool", "toolArgs": {}}]}',
+        '{"answer": "done"}',
+      ]);
+      tools.register({
+        name: 'flaky_tool',
+        description: 'Always fails',
+        inputSchema: z.object({}),
+        outputSchema: z.any(),
+        execute: async () => { throw new Error('upstream refused the call'); },
+      }, 'builtin');
+
+      const result = await executor.execute(makeTask(), envelope, makeAgent());
+
+      const closes = (result.lifecycle ?? []).filter(e => e.from === 'tool_wait');
+      expect(closes.map(e => e.tool)).toEqual(['test_tool', 'flaky_tool']);
+      expect(closes[0].metadata).toMatchObject({ ok: true });
+      // A tool call that failed is not the same as one that never happened.
+      expect(closes[1].metadata).toMatchObject({ ok: false, error: 'upstream refused the call' });
+    });
+
     it('records ready -> model_running -> ready -> completed for a direct answer', async () => {
       const { executor, envelope } = buildExecutor(['{"answer": "The answer is 42"}']);
 

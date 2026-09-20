@@ -1281,4 +1281,72 @@ describe('CrewOrchestrator', () => {
       expect(result.agentResults[1].agentId).toBe('thorough');
     });
   });
+
+  // =========================================================================
+  // Budget allocation modes
+  //
+  // Under the default split, crew width and per-agent budget are the same
+  // variable: an experiment that widens a crew also shrinks every agent in it.
+  // 'fixed_per_agent' separates them, and must not disturb the default.
+  // =========================================================================
+
+  describe('budget modes', () => {
+    /** Ceilings handed to each agent, in allocation order. */
+    async function ceilingsFor(agentCount: number, budgetMode?: 'share' | 'fixed_per_agent'): Promise<number[]> {
+      const orchestrator = buildOrchestrator(
+        Array.from({ length: agentCount }, () => '{"answer": "ok"}'),
+      );
+      const agents = Array.from({ length: agentCount }, (_, i) =>
+        makeAgent(`agent-${i}`, `Role ${i}`, { executionMode: 'direct' }));
+      const crew: CrewDefinition = {
+        name: `crew-${agentCount}`,
+        strategy: 'sequential',
+        agents,
+        budget: 'high',
+        ...(budgetMode ? { budgetMode } : {}),
+      };
+
+      const peers = vi.spyOn(budget, 'createPeerEnvelope');
+      const slices = vi.spyOn(budget, 'createSubEnvelope');
+      const task = makeTask('Do the thing');
+      const envelope = budget.createEnvelope('high');
+      const traceId = generateId('trace');
+      tracer.createTrace(traceId, task.id, envelope.envelope);
+
+      await orchestrator.executeCrew(crew, task, envelope, traceId);
+
+      const made = budgetMode === 'fixed_per_agent' ? peers : slices;
+      const ceilings = made.mock.results.map(r => (r.value as { envelope: { maxTokens: number } }).envelope.maxTokens);
+      peers.mockRestore();
+      slices.mockRestore();
+      return ceilings;
+    }
+
+    it('gives the first agent the same ceiling at every width', async () => {
+      const [alone] = await ceilingsFor(1, 'fixed_per_agent');
+      const wide = await ceilingsFor(4, 'fixed_per_agent');
+
+      expect(wide[0]).toBe(alone);
+      // And nobody is penalised for joining late.
+      expect(new Set(wide).size).toBe(1);
+    });
+
+    it('adds capacity when it adds an agent instead of redividing', async () => {
+      const one = await ceilingsFor(1, 'fixed_per_agent');
+      const four = await ceilingsFor(4, 'fixed_per_agent');
+      const total = (xs: number[]) => xs.reduce((a, b) => a + b, 0);
+
+      expect(total(four)).toBe(total(one) * 4);
+    });
+
+    it('leaves the default split untouched', async () => {
+      const alone = await ceilingsFor(1);
+      const wide = await ceilingsFor(4);
+
+      // Unchanged behaviour: the crew budget is divided, so a member of a
+      // four-agent crew starts with a fraction of what a lone agent gets.
+      expect(wide[0]).toBeLessThan(alone[0]);
+      expect(wide[0]).toBe(Math.floor(alone[0] / 4));
+    });
+  });
 });

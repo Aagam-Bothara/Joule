@@ -296,7 +296,7 @@ export class CrewOrchestrator {
     // Pre-allocate fair budget envelopes for ALL agents up front (same algorithm
     // as parallel strategy).  This prevents later agents from being budget-starved
     // because earlier agents consumed tokens from the shared parent.
-    const envelopes = this.allocateBudgets(orderedAgents, parentEnvelope);
+    const envelopes = this.allocateBudgets(orderedAgents, parentEnvelope, crew.budgetMode);
 
     for (const agent of orderedAgents) {
       const spanId = this.tracer.startSpan(traceId, `agent-${agent.id}`);
@@ -344,7 +344,7 @@ export class CrewOrchestrator {
     onProgress?: ProgressCallback,
   ): Promise<AgentResult[]> {
     // Pre-allocate all budget envelopes before execution starts
-    const envelopes = this.allocateBudgets(crew.agents, parentEnvelope);
+    const envelopes = this.allocateBudgets(crew.agents, parentEnvelope, crew.budgetMode);
 
     // Mark all agents as running
     for (const agent of crew.agents) {
@@ -443,7 +443,7 @@ export class CrewOrchestrator {
     const workerAgents = delegationOrder
       .map(id => workers.find(w => w.id === id))
       .filter((w): w is AgentDefinition => !!w);
-    const workerEnvelopes = this.allocateBudgets(workerAgents, parentEnvelope);
+    const workerEnvelopes = this.allocateBudgets(workerAgents, parentEnvelope, crew.budgetMode);
 
     for (const worker of workerAgents) {
       const workerSpanId = this.tracer.startSpan(traceId, `agent-${worker.id}`);
@@ -527,7 +527,7 @@ export class CrewOrchestrator {
         this.tracer.endSpan(traceId, spanId);
       } else {
         // Multiple agents in layer — run concurrently
-        const envelopes = this.allocateBudgets(eligible, parentEnvelope);
+        const envelopes = this.allocateBudgets(eligible, parentEnvelope, crew.budgetMode);
         const promises = eligible.map(async (agent) => {
           const spanId = this.tracer.startSpan(traceId, `agent-${agent.id}`);
           const envelope = envelopes.get(agent.id)!;
@@ -773,8 +773,20 @@ export class CrewOrchestrator {
   private allocateBudgets(
     agents: AgentDefinition[],
     parentEnvelope: BudgetEnvelopeInstance,
+    mode: 'share' | 'fixed_per_agent' = 'share',
   ): Map<string, BudgetEnvelopeInstance> {
     const envelopes = new Map<string, BudgetEnvelopeInstance>();
+
+    // Fixed mode: every agent is given the crew envelope's own ceiling rather
+    // than a slice of it, so an agent's allowance does not depend on how many
+    // colleagues it has. Spending still mirrors up to the crew envelope, so the
+    // crew total remains observable — it is simply no longer a cap.
+    if (mode === 'fixed_per_agent') {
+      for (const agent of agents) {
+        envelopes.set(agent.id, this.budget.createPeerEnvelope(parentEnvelope));
+      }
+      return envelopes;
+    }
 
     // Normalize shares
     const shares = new Map<string, number>();

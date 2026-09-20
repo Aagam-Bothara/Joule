@@ -49,9 +49,16 @@ export interface EditDecision {
   message: string;
 }
 
-/** Files an argument object might name. */
+/**
+ * Files an argument object might name.
+ *
+ * These keys must cover every alias the write tools accept: a write the gate
+ * cannot see a path in is a write it cannot snapshot, so it would be executed
+ * unprotected and counted as no proposal at all. `filepath` is one the
+ * `file_write` tool normalizes and this list originally missed.
+ */
 function pathsIn(input: Record<string, unknown>): string[] {
-  const keys = ['path', 'filePath', 'file_path', 'filename', 'file'];
+  const keys = ['path', 'filePath', 'filepath', 'file_path', 'filename', 'file'];
   return keys
     .map(k => input[k])
     .filter((v): v is string => typeof v === 'string' && v.length > 0);

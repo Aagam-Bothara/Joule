@@ -13,8 +13,10 @@ import { Joule } from '@joule/core';
 import { OllamaProvider, OpenAIProvider } from '@joule/models';
 import { fileReadTool, fileWriteTool, shellExecTool } from '@joule/tools';
 import { generateId } from '@joule/shared';
-import type { AgentResult, CrewResult, ModelProviderName, Task } from '@joule/shared';
+import type { CrewResult, ModelProviderName, Task } from '@joule/shared';
+import { sanitizeFailure } from '../lifecycle/record.js';
 import { crewForWidth, roleNames } from './crews.js';
+import { contributionOf } from './record.js';
 import { loadScalingTasks, prepareTask, type ScalingTask } from './tasks.js';
 import type { AgentContribution, CrewScalingRecord, CrewWidth } from './types.js';
 
@@ -72,26 +74,6 @@ function registerProvider(joule: Joule, provider: string, model: string): void {
   }));
 }
 
-/** Per-agent work, from the lifecycle metrics each agent's result already carries. */
-function contributionOf(agentResult: AgentResult): AgentContribution {
-  const metrics = agentResult.taskResult.lifecycleMetrics;
-  const edits = agentResult.taskResult.verifiedEdits;
-  return {
-    ...(edits ? {
-      proposedWrites: edits.proposed,
-      acceptedWrites: edits.accepted,
-      rolledBackWrites: edits.rollbacks,
-    } : {}),
-    agentId: agentResult.agentId,
-    role: agentResult.role,
-    success: agentResult.taskResult.status === 'completed',
-    costUsd: agentResult.budgetUsed?.costUsd,
-    tokens: agentResult.budgetUsed?.tokensUsed,
-    modelCalls: metrics?.modelCalls ?? 0,
-    toolCalls: metrics?.toolCalls ?? 0,
-  };
-}
-
 function toRecord(args: {
   runId: string;
   task: ScalingTask;
@@ -116,6 +98,8 @@ function toRecord(args: {
     seed: args.seed,
     success: args.verdict.success,
     ...(args.verdict.success ? {} : { failureReason: args.verdict.output }),
+    crewStatus: args.crew.status,
+    ...(sanitizeFailure(args.crew.error) ? { crewError: sanitizeFailure(args.crew.error) } : {}),
     workflowJctMs: args.jctMs,
     totalCostUsd: args.crew.budgetUsed?.costUsd ?? sum(c => c.costUsd ?? 0),
     totalTokens: args.crew.budgetUsed?.tokensUsed ?? sum(c => c.tokens ?? 0),
@@ -131,6 +115,40 @@ function toRecord(args: {
       rolledBackWrites: sum(c => c.rolledBackWrites ?? 0),
     } : {}),
     agentResults: contributions,
+  };
+}
+
+/** A row for a run that threw before a crew result existed. */
+function failedRun(args: {
+  runId: string;
+  task: ScalingTask;
+  width: CrewWidth;
+  seed: number;
+  gateEnabled: boolean;
+  joulTask: Task;
+  jctMs: number;
+  runError: string;
+}): CrewScalingRecord {
+  return {
+    runId: args.runId,
+    taskId: args.joulTask.id,
+    workloadId: args.task.workloadId,
+    crewWidth: args.width,
+    roles: roleNames(args.width),
+    seed: args.seed,
+    success: false,
+    failureReason: args.runError,
+    runError: args.runError,
+    workflowJctMs: args.jctMs,
+    totalCostUsd: 0,
+    totalTokens: 0,
+    modelCalls: 0,
+    toolCalls: 0,
+    modelRuntimeMs: 0,
+    toolWaitMs: 0,
+    activeAgents: 0,
+    gateEnabled: args.gateEnabled,
+    agentResults: [],
   };
 }
 
@@ -183,7 +201,11 @@ export async function runCrewScaling(opts: RunnerOptions): Promise<CrewScalingRe
             : '';
           process.stderr.write(`${verdict.success ? 'PASS' : 'fail'} ${(jctMs / 1000).toFixed(1)}s $${record.totalCostUsd.toFixed(4)} agents ${record.activeAgents}/${width}${gateNote}\n`);
         } catch (err) {
-          const message = err instanceof Error ? err.message : String(err);
+          // A run that throws still happened. Recording it keeps the artifact
+          // the same shape as the experiment: one row per (task, width, seed),
+          // with the reason this one produced nothing.
+          const message = sanitizeFailure(err) ?? 'unknown error';
+          records.push(failedRun({ runId, task, width, seed, gateEnabled: Boolean(opts.verifiedEdit), joulTask, jctMs: Date.now() - began, runError: message }));
           process.stderr.write(`error: ${message}\n`);
         }
         writeFileSync(join(opts.outDir, 'runs.jsonl'), records.map(r => JSON.stringify(r)).join('\n') + '\n');
@@ -208,6 +230,10 @@ export async function runCrewScaling(opts: RunnerOptions): Promise<CrewScalingRe
     rolesByWidth: Object.fromEntries(opts.widths.map(w => [w, roleNames(w)])),
     strategy: 'sequential',
     executionMode: 'direct (crew default)',
+    // Recorded because it changes what a width comparison means: records made
+    // before this was fixed have the per-agent budget varying with width.
+    budgetMode: crewForWidth(opts.widths[0] ?? 1).budgetMode ?? 'share',
+    perAgentBudget: 'high preset per agent (100k tokens), independent of width',
     verifiedEditGate: Boolean(opts.verifiedEdit),
     tasks: tasks.map(t => t.workloadId),
     taskOffset: opts.offset,

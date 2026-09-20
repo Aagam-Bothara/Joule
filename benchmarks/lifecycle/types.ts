@@ -10,10 +10,28 @@
  * only ever compared with others that share it.
  */
 
-import type { AgentLifecycleEvent } from '@joule/shared';
+import type { AgentLifecycleEvent, AgentLifecycleState } from '@joule/shared';
 
 /** How the agent was executed: the 7-phase pipeline, or the direct loop. */
 export type AgentExecutionMode = 'full' | 'direct';
+
+/**
+ * One tool call, as the lifecycle recorded it.
+ *
+ * Counting tool calls cannot tell a specialist that read the code from one
+ * that rewrote it, and cannot tell a write that landed from one that was
+ * rejected. The name and the outcome can.
+ */
+export interface ToolCallRecord {
+  tool: string;
+  durationMs: number;
+  /** Whether the call succeeded, when the caller reported it */
+  ok?: boolean;
+  /** Set when a verified-edit gate reverted this write */
+  rolledBack?: boolean;
+  /** Failure message, first line only */
+  error?: string;
+}
 
 /** One agent run. The unit of the experiment. */
 export interface AgentLifecycleRecord {
@@ -28,6 +46,17 @@ export interface AgentLifecycleRecord {
   executionMode: AgentExecutionMode;
   status: string;
   success: boolean;
+  /**
+   * Why the run ended this way, when it did not complete. An agent that makes
+   * no model calls is indistinguishable from one that was never asked to
+   * unless the reason is kept.
+   */
+  error?: string;
+  /**
+   * The state the run was in when it failed. `ready` means it failed before
+   * reaching a model or a tool at all.
+   */
+  failedFrom?: AgentLifecycleState;
 
   totalRuntimeMs: number;
   modelRuntimeMs: number;
@@ -44,6 +73,8 @@ export interface AgentLifecycleRecord {
   minToolWaitMs: number;
   /** Every contiguous tool_wait window, in the order they happened */
   toolWaitDurationsMs: number[];
+  /** The same windows with the tool that was called and how it went, in order */
+  tools: ToolCallRecord[];
 
   lifecycleEvents: AgentLifecycleEvent[];
 }

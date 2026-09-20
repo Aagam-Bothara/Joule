@@ -183,12 +183,24 @@ export async function inToolWait<T>(
   tool: string,
   fn: () => Promise<T>,
   metadata?: Record<string, unknown>,
+  /**
+   * Maps the call's result onto extra metadata for the closing event. A record
+   * that only says `file_write` cannot distinguish a write that landed from one
+   * that was rejected, so callers that know the outcome report it here.
+   */
+  outcome?: (result: T) => Record<string, unknown>,
 ): Promise<T> {
   tracker.toolStart(tool, metadata);
+  let closing = metadata;
   try {
-    return await fn();
+    const result = await fn();
+    if (outcome) closing = { ...metadata, ...outcome(result) };
+    return result;
+  } catch (err) {
+    closing = { ...metadata, ok: false, error: err instanceof Error ? err.message : String(err) };
+    throw err;
   } finally {
-    tracker.toolEnd(tool, metadata);
+    tracker.toolEnd(tool, closing);
   }
 }
 

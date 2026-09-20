@@ -292,6 +292,11 @@ export class DirectExecutor {
           // Only real tool work counts as waiting; the circuit-breaker and
           // argument checks above are in-memory and stay out of the timeline.
           lifecycle.toolStart(toolCall.toolName, { iteration });
+          // What the call did, reported on the closing lifecycle event. Without
+          // it a record shows that an agent called `file_write` but not whether
+          // the write landed — the difference between an agent that tried to
+          // contribute and one that succeeded.
+          const outcome: { ok?: boolean; rolledBack?: boolean; error?: string } = {};
           // Opt-in: remember the file this write is about to replace, so a
           // regression can be undone.
           const guarded = gate?.guards(toolCall.toolName, sanitizedArgs) === true;
@@ -308,12 +313,17 @@ export class DirectExecutor {
             if (result.success && before) {
               // The write landed; keep it only if the workspace still verifies.
               const decision = await gate!.review(before, toolCall.toolName, task.agentRole ?? agent.role ?? toolCall.toolName);
+              outcome.ok = decision.kept;
+              outcome.rolledBack = decision.rolledBack;
               toolResults.push(decision.kept
                 ? `[${toolCall.toolName}] Success: ${output}${decision.message ? ` (${decision.message})` : ''}`
                 : `[${toolCall.toolName}] REJECTED: ${decision.message}`);
             } else if (result.success) {
+              outcome.ok = true;
               toolResults.push(`[${toolCall.toolName}] Success: ${output}`);
             } else {
+              outcome.ok = false;
+              outcome.error = result.error ?? 'Unknown error';
               toolResults.push(`[${toolCall.toolName}] Error: ${result.error ?? 'Unknown error'}`);
             }
 
@@ -326,6 +336,8 @@ export class DirectExecutor {
           } catch (err) {
             const toolDuration = monotonicNow() - toolSpanStart;
             const errMsg = err instanceof Error ? err.message : String(err);
+            outcome.ok = false;
+            outcome.error = errMsg;
             toolResults.push(`[${toolCall.toolName}] Error: ${errMsg}`);
             traceSpans.push({
               name: `tool:${toolCall.toolName}`,
@@ -336,7 +348,7 @@ export class DirectExecutor {
           } finally {
             // A throwing tool must not leave the lifecycle stuck in tool_wait;
             // a failed tool call is reported to the agent and the run continues.
-            lifecycle.toolEnd(toolCall.toolName, { iteration });
+            lifecycle.toolEnd(toolCall.toolName, { iteration, ...outcome });
           }
         }
 
