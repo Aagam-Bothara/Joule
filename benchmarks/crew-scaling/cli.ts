@@ -12,7 +12,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { parseJsonl } from '../lifecycle/record.js';
-import { analyzeCrewScaling, renderCrewScalingReport } from './analyze.js';
+import { analyzeCrewScaling, renderCrewScalingReport, renderRepeatability, repeatability } from './analyze.js';
 import { runCrewScaling } from './runner.js';
 import type { CrewScalingRecord, CrewWidth } from './types.js';
 
@@ -29,10 +29,13 @@ async function main(): Promise<void> {
 
   if (command === 'run') {
     const widths = (arg('--widths') ?? '1,2,3,4').split(',').map(Number) as CrewWidth[];
+    const taskIds = arg('--task-ids')?.split(',').filter(Boolean);
     const records = await runCrewScaling({
       widths,
       tasks: Number(arg('--tasks') ?? '10'),
       offset: Number(arg('--offset') ?? '100'),
+      ...(taskIds ? { taskIds } : {}),
+      seeds: Number(arg('--seeds') ?? '1'),
       provider: arg('--provider') ?? process.env.JOULE_LIFECYCLE_PROVIDER ?? 'openrouter',
       model: arg('--model') ?? process.env.JOULE_LIFECYCLE_MODEL ?? 'deepseek/deepseek-v4-flash',
       outDir,
@@ -70,6 +73,11 @@ async function main(): Promise<void> {
     console.log(JSON.stringify(analysis, null, 2));
   } else {
     console.log(renderCrewScalingReport(analysis));
+    const seeds = new Set(records.map(r => r.seed)).size;
+    if (seeds > 1) {
+      console.log('');
+      console.log(renderRepeatability(repeatability(records)));
+    }
     console.log('');
     console.log(`Summary written to ${join(dirname(input), 'summary.json')}`);
   }

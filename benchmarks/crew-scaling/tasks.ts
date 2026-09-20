@@ -84,10 +84,11 @@ export interface PreparedTask {
 }
 
 /**
- * A fresh directory per (task, width) so runs never see each other's files.
+ * A fresh directory per (task, width, repetition) so runs never see each
+ * other's files.
  */
-export function prepareTask(task: ScalingTask, width: CrewWidth): PreparedTask {
-  const dir = join(SANDBOX_ROOT, `w${width}`, task.workloadId);
+export function prepareTask(task: ScalingTask, width: CrewWidth, seed = 0): PreparedTask {
+  const dir = join(SANDBOX_ROOT, `w${width}`, `s${seed}`, task.workloadId);
   rmSync(dir, { recursive: true, force: true });
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, 'run_tests.py'), testScript(task));

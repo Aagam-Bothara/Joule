@@ -24,6 +24,11 @@ export interface CrewScalingRecord {
   workloadId: string;
   crewWidth: CrewWidth;
   roles: string[];
+  /**
+   * Repetition index. There is no model seed to set here: runs differ only
+   * through the provider's own sampling at a fixed temperature.
+   */
+  seed: number;
 
   /** Deterministic evaluator result: the problem's own tests passed */
   success: boolean;

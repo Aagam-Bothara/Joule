@@ -197,6 +197,70 @@ export function oracleSavings(records: readonly CrewScalingRecord[], widest: Cre
   };
 }
 
+// ── Repeatability ────────────────────────────────────────────────────
+
+export interface TaskRepeatability {
+  workloadId: string;
+  seeds: number;
+  /** Successes out of repetitions, per width */
+  successesByWidth: Record<string, { successes: number; runs: number }>;
+  /** Minimum successful width per repetition; null where nothing worked */
+  minimumWidthPerSeed: Array<CrewWidth | null>;
+  /** Every repetition agreed on the minimum successful width */
+  stableMinimumWidth: boolean;
+  /** Every width was all-pass or all-fail across repetitions */
+  deterministicOutcome: boolean;
+}
+
+/**
+ * Whether a task's width behaviour survives repetition. Without this, a
+ * "minimum successful width" is just one sample of a stochastic model.
+ */
+export function repeatability(records: readonly CrewScalingRecord[]): TaskRepeatability[] {
+  const out: TaskRepeatability[] = [];
+  for (const workloadId of [...new Set(records.map(r => r.workloadId))].sort()) {
+    const mine = records.filter(r => r.workloadId === workloadId);
+    const seedIds = [...new Set(mine.map(r => r.seed))].sort((a, b) => a - b);
+
+    const successesByWidth: Record<string, { successes: number; runs: number }> = {};
+    let deterministicOutcome = true;
+    for (const width of WIDTHS) {
+      const runs = mine.filter(r => r.crewWidth === width);
+      if (runs.length === 0) continue;
+      const successes = runs.filter(r => r.success).length;
+      successesByWidth[String(width)] = { successes, runs: runs.length };
+      if (successes !== 0 && successes !== runs.length) deterministicOutcome = false;
+    }
+
+    const minimumWidthPerSeed = seedIds.map(seed =>
+      WIDTHS.find(w => mine.some(r => r.seed === seed && r.crewWidth === w && r.success)) ?? null);
+    const stableMinimumWidth = new Set(minimumWidthPerSeed.map(String)).size <= 1;
+
+    out.push({ workloadId, seeds: seedIds.length, successesByWidth, minimumWidthPerSeed, stableMinimumWidth, deterministicOutcome });
+  }
+  return out;
+}
+
+export function renderRepeatability(rows: readonly TaskRepeatability[]): string {
+  const lines = ['Repeatability (successes / repetitions per width)', ''];
+  lines.push(`${padEnd('task', 12)}${pad('w1', 7)}${pad('w2', 7)}${pad('w3', 7)}${pad('w4', 7)}${pad('minWidth/seed', 18)}${pad('stable', 8)}`);
+  lines.push('-'.repeat(66));
+  for (const r of rows) {
+    const cell = (w: CrewWidth): string => {
+      const c = r.successesByWidth[String(w)];
+      return c ? `${c.successes}/${c.runs}` : '-';
+    };
+    lines.push(
+      padEnd(r.workloadId, 12) + pad(cell(1), 7) + pad(cell(2), 7) + pad(cell(3), 7) + pad(cell(4), 7)
+      + pad(r.minimumWidthPerSeed.map(m => m ?? 'x').join(','), 18)
+      + pad(r.stableMinimumWidth ? 'yes' : 'NO', 8),
+    );
+  }
+  const stable = rows.filter(r => r.stableMinimumWidth).length;
+  lines.push('', `stable minimum width: ${stable}/${rows.length} task(s); fully deterministic outcomes: ${rows.filter(r => r.deterministicOutcome).length}/${rows.length}`);
+  return lines.join('\n');
+}
+
 export function analyzeCrewScaling(records: readonly CrewScalingRecord[], source: string): CrewScalingAnalysis {
   return {
     generatedAt: new Date().toISOString(),

@@ -8,6 +8,8 @@ import {
   minimumWidths,
   oracleSavings,
   renderCrewScalingReport,
+  renderRepeatability,
+  repeatability,
 } from '../crew-scaling/analyze.js';
 import type { CrewScalingRecord, CrewWidth } from '../crew-scaling/types.js';
 
@@ -19,6 +21,7 @@ function rec(workloadId: string, crewWidth: CrewWidth, o: Partial<CrewScalingRec
   return {
     runId: 'run-1',
     taskId: `task-${workloadId}-${crewWidth}`,
+    seed: 0,
     workloadId,
     crewWidth,
     roles: agents.map(a => a.agentId),
@@ -186,6 +189,45 @@ describe('crew scaling analysis', () => {
     const [step] = marginalSteps(records);
     expect(step.deltaJctMs).toBe(5000);
     expect(step.deltaJctPct).toBeCloseTo((5000 / 15_000) * 100, 6);
+  });
+
+  it('16. reports repeatability across repetitions of the same task', () => {
+    const records = [
+      // Stable: width 1 always works.
+      ...[0, 1, 2].flatMap(seed => [rec('easy', 1, { seed }), rec('easy', 2, { seed })]),
+      // Stable beneficiary: width 1 always fails, width 2 always works.
+      ...[0, 1, 2].flatMap(seed => [rec('mid', 1, { seed, success: false }), rec('mid', 2, { seed })]),
+      // Unstable: width 1 works on one repetition only.
+      rec('flaky', 1, { seed: 0 }), rec('flaky', 1, { seed: 1, success: false }), rec('flaky', 1, { seed: 2, success: false }),
+      rec('flaky', 2, { seed: 0 }), rec('flaky', 2, { seed: 1 }), rec('flaky', 2, { seed: 2 }),
+    ];
+    const rows = repeatability(records);
+
+    const easy = rows.find(r => r.workloadId === 'easy')!;
+    expect(easy.successesByWidth['1']).toEqual({ successes: 3, runs: 3 });
+    expect(easy.minimumWidthPerSeed).toEqual([1, 1, 1]);
+    expect(easy.stableMinimumWidth).toBe(true);
+    expect(easy.deterministicOutcome).toBe(true);
+
+    const mid = rows.find(r => r.workloadId === 'mid')!;
+    expect(mid.successesByWidth['1']).toEqual({ successes: 0, runs: 3 });
+    expect(mid.minimumWidthPerSeed).toEqual([2, 2, 2]);
+    expect(mid.stableMinimumWidth).toBe(true);
+
+    const flaky = rows.find(r => r.workloadId === 'flaky')!;
+    expect(flaky.minimumWidthPerSeed).toEqual([1, 2, 2]);
+    expect(flaky.stableMinimumWidth).toBe(false);
+    expect(flaky.deterministicOutcome).toBe(false);
+
+    expect(renderRepeatability(rows)).toContain('stable minimum width: 2/3');
+  });
+
+  it('17. marks a never-solved task as stable with no minimum width', () => {
+    const records = [0, 1].flatMap(seed => [1, 2, 3, 4].map(w => rec('hard', w as CrewWidth, { seed, success: false })));
+    const [row] = repeatability(records);
+    expect(row.minimumWidthPerSeed).toEqual([null, null]);
+    expect(row.stableMinimumWidth).toBe(true);
+    expect(row.deterministicOutcome).toBe(true);
   });
 
   it('15. produces deterministic ordering and a stable report', () => {
