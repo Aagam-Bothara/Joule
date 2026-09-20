@@ -307,7 +307,7 @@ export class DirectExecutor {
 
             if (result.success && before) {
               // The write landed; keep it only if the workspace still verifies.
-              const decision = await gate!.review(before, toolCall.toolName);
+              const decision = await gate!.review(before, toolCall.toolName, task.agentRole ?? agent.role ?? toolCall.toolName);
               toolResults.push(decision.kept
                 ? `[${toolCall.toolName}] Success: ${output}${decision.message ? ` (${decision.message})` : ''}`
                 : `[${toolCall.toolName}] REJECTED: ${decision.message}`);

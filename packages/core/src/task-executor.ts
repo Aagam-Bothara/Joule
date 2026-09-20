@@ -37,6 +37,8 @@ import type { ConstitutionEnforcer } from './constitution.js';
 import { ExecutionPathSelector } from './execution-path/index.js';
 import { AdaptiveController, type ExecutionState } from './adaptive-controller.js';
 import { AdaptiveExecutor, type AdaptiveAttach, type AdaptiveRunResult, buildTrajectoryReport } from './adaptive/index.js';
+import { AgentLifecycleTracker, inModelCall, inToolWait } from './adaptive/lifecycle.js';
+import { VerifiedEditGate } from './verified-edit.js';
 
 const DEFAULT_MAX_REPLAN_DEPTH = 2;
 
@@ -79,6 +81,9 @@ interface StateMachineContext {
   speculativeComplexity?: number;
   /** Execution mode resolved for this run */
   mode: ExecutionMode;
+  /** Static-router instrumentation; the adaptive path carries its own */
+  lifecycle?: AgentLifecycleTracker;
+  gate?: VerifiedEditGate;
   /** Adaptive execution artifacts (all modes except static-router) */
   adaptive?: AdaptiveAttach;
   adaptiveResult?: AdaptiveRunResult;
@@ -106,6 +111,14 @@ export class TaskExecutor {
   private pathSelector?: ExecutionPathSelector;
   private adaptiveController: AdaptiveController;
   private adaptive: AdaptiveExecutor;
+  /**
+   * Instrumentation for the run in flight on the static path. Set for the
+   * duration of one execute() call so the private step and synthesis helpers
+   * can reach it without threading it through every signature; a TaskExecutor
+   * must therefore not run two static tasks concurrently.
+   */
+  private activeLifecycle?: AgentLifecycleTracker;
+  private activeGate?: VerifiedEditGate;
 
   constructor(
     private budget: BudgetManager,
@@ -455,12 +468,31 @@ export class TaskExecutor {
 
     try {
       if (ctx.mode === 'static-router') {
+        // Same abstractions as the other paths: one tracker, one gate.
+        ctx.lifecycle = new AgentLifecycleTracker({
+          taskId: task.id,
+          agentId: task.agentId,
+          agentRole: task.agentRole,
+          parentTaskId: task.parentTaskId,
+          tracer: this.tracer,
+          traceId,
+        });
+        ctx.gate = task.verifiedEdit ? new VerifiedEditGate(task.verifiedEdit, this.tracer, traceId) : undefined;
+        if (ctx.gate) await ctx.gate.establishBaseline();
+        this.activeLifecycle = ctx.lifecycle;
+        this.activeGate = ctx.gate;
+        this.planner.setLifecycle(ctx.lifecycle);
+
         await this.runStateMachine(ctx);
       } else {
         await this.runAdaptive(ctx);
       }
       status = ctx.state === 'done' ? 'completed' : 'failed';
       error = ctx.error;
+      if (ctx.lifecycle && !ctx.lifecycle.isTerminal()) {
+        if (status === 'completed') ctx.lifecycle.complete({ steps: ctx.stepResults.length });
+        else ctx.lifecycle.fail(ctx.error, { steps: ctx.stepResults.length });
+      }
     } catch (err) {
       if (err instanceof ConstitutionViolationError) {
         status = 'failed';
@@ -496,6 +528,12 @@ export class TaskExecutor {
           message: error,
         });
       }
+      if (ctx.lifecycle && !ctx.lifecycle.isTerminal()) ctx.lifecycle.fail(err, { steps: ctx.stepResults.length });
+    } finally {
+      // The run is over: nothing else may attribute work to its tracker.
+      this.planner.setLifecycle(undefined);
+      this.activeLifecycle = undefined;
+      this.activeGate = undefined;
     }
 
     this.tracer.endSpan(traceId, rootSpan);
@@ -525,8 +563,9 @@ export class TaskExecutor {
 
     const trace = this.tracer.getTrace(traceId, budgetUsed);
     // Computed once so the trajectory and the result carry identical numbers.
-    const lifecycleEvents = ctx.adaptive?.lifecycle?.events;
-    const lifecycleMetrics = ctx.adaptive?.lifecycle?.metrics();
+    const runLifecycle = ctx.adaptive?.lifecycle ?? ctx.lifecycle;
+    const lifecycleEvents = runLifecycle?.events;
+    const lifecycleMetrics = runLifecycle?.metrics();
     const trajectory = ctx.adaptive?.state
       ? buildTrajectoryReport(ctx.adaptive.state, trace, status, {
           llmPricePerToken: ctx.adaptive.llmPricePerToken,
@@ -556,6 +595,7 @@ export class TaskExecutor {
       executionState: ctx.adaptive?.state,
       lifecycle: lifecycleEvents,
       lifecycleMetrics,
+      ...(ctx.gate ? { verifiedEdits: ctx.gate.stats } : {}),
     };
   }
 
@@ -1452,7 +1492,9 @@ If on track, drift should be an empty array. If drifting, list specific reasons.
       temperature: 0.1,
     };
 
-    const response = await provider.chat(request);
+    const response = this.activeLifecycle
+      ? await inModelCall(this.activeLifecycle, () => provider.chat(request), decision.model, { phase: 'goal-check' })
+      : await provider.chat(request);
     this.budget.deductTokens(envelope, response.tokenUsage.totalTokens, response.model);
     this.budget.deductCost(envelope, response.costUsd);
 
@@ -1707,8 +1749,31 @@ If on track, drift should be an empty array. If drifting, list specific reasons.
         input: step.toolArgs,
       };
 
-      const toolResult = await this.tools.invoke(invocation);
+      const gate = this.activeGate;
+      const guarded = gate?.guards(step.toolName, step.toolArgs) === true;
+      const before = guarded ? gate!.snapshot(step.toolArgs) : undefined;
+
+      const toolResult = this.activeLifecycle
+        ? await inToolWait(this.activeLifecycle, step.toolName, () => this.tools.invoke(invocation), { step: step.index })
+        : await this.tools.invoke(invocation);
       this.tracer.logToolCall(traceId, invocation, toolResult);
+
+      if (toolResult.success && before) {
+        const decision = await gate!.review(before, step.toolName);
+        if (!decision.kept) {
+          // The write was undone: report it as a failed step so the pipeline
+          // sees it, rather than letting a reverted edit look successful.
+          return {
+            stepIndex: step.index,
+            toolName: step.toolName,
+            toolArgs: step.toolArgs,
+            output: toolResult.output,
+            success: false,
+            durationMs: toolResult.durationMs,
+            error: decision.message,
+          };
+        }
+      }
 
       return {
         stepIndex: step.index,
@@ -1799,7 +1864,9 @@ If on track, drift should be an empty array. If drifting, list specific reasons.
         temperature: 0.3,
       };
 
-      const response = await provider.chat(request);
+      const response = this.activeLifecycle
+        ? await inModelCall(this.activeLifecycle, () => provider.chat(request), decision.model, { phase: 'synthesize' })
+        : await provider.chat(request);
       this.tracer.logModelCall(traceId, request, response);
       this.budget.deductTokens(envelope, response.tokenUsage.totalTokens, response.model);
       this.budget.deductCost(envelope, response.costUsd);

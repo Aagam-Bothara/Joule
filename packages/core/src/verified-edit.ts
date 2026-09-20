@@ -26,6 +26,20 @@ export interface CheckResult {
   output: string;
 }
 
+/** What the gate did during a run. */
+export interface VerifiedEditStats {
+  checks: number;
+  rollbacks: number;
+  /** Writes the gate reviewed */
+  proposed: number;
+  /** Writes that left the workspace verifying */
+  accepted: number;
+  /** accepted / proposed */
+  acceptanceRate: number;
+  verified: boolean | undefined;
+  byAuthor: Record<string, { proposed: number; accepted: number; rolledBack: number }>;
+}
+
 export interface EditDecision {
   /** Whether the write was kept */
   kept: boolean;
@@ -64,6 +78,10 @@ export class VerifiedEditGate {
   private baselinePassed: boolean | undefined;
   private rollbacks = 0;
   private checks = 0;
+  private proposed = 0;
+  private accepted = 0;
+  /** Per author (tool, or agent role when the caller supplies one) */
+  private readonly byAuthor = new Map<string, { proposed: number; accepted: number; rolledBack: number }>();
 
   constructor(
     private readonly policy: VerifiedEditPolicy,
@@ -72,8 +90,21 @@ export class VerifiedEditGate {
     private readonly run: (command: string, cwd: string | undefined, timeoutMs: number) => Promise<CheckResult> = runCommand,
   ) {}
 
-  get stats(): { checks: number; rollbacks: number; verified: boolean | undefined } {
-    return { checks: this.checks, rollbacks: this.rollbacks, verified: this.baselinePassed };
+  /**
+   * Activity is not contribution: Dataset E2 showed agents working hard and
+   * making the result worse. These counts separate a proposed modification
+   * from one that survived verification.
+   */
+  get stats(): VerifiedEditStats {
+    return {
+      checks: this.checks,
+      rollbacks: this.rollbacks,
+      proposed: this.proposed,
+      accepted: this.accepted,
+      acceptanceRate: this.proposed > 0 ? this.accepted / this.proposed : 0,
+      verified: this.baselinePassed,
+      byAuthor: Object.fromEntries([...this.byAuthor.entries()].sort(([a], [b]) => a.localeCompare(b))),
+    };
   }
 
   /** Does this tool call modify files the gate should protect? */
@@ -97,19 +128,26 @@ export class VerifiedEditGate {
    * an agent is still working towards the first success and must be allowed to
    * leave it broken.
    */
-  async review(snapshot: Map<string, string | null>, toolName: string): Promise<EditDecision> {
+  async review(snapshot: Map<string, string | null>, toolName: string, author = toolName): Promise<EditDecision> {
+    this.proposed++;
+    const tally = this.byAuthor.get(author) ?? { proposed: 0, accepted: 0, rolledBack: 0 };
+    tally.proposed++;
+    this.byAuthor.set(author, tally);
     const result = await this.run(this.policy.command, this.policy.cwd, this.policy.timeoutMs ?? DEFAULT_TIMEOUT_MS);
     this.checks++;
 
     if (result.passed) {
       this.baselinePassed = true;
-      this.log('verified_edit_ok', { toolName, checks: this.checks });
+      this.accepted++;
+      tally.accepted++;
+      this.log('verified_edit_ok', { toolName, author, checks: this.checks });
       return { kept: true, rolledBack: false, message: '' };
     }
 
     if (this.baselinePassed !== true) {
       // Nothing verified to protect yet.
-      this.log('verified_edit_failed', { toolName, rolledBack: false, output: result.output.slice(0, 400) });
+      // Kept, but it did not verify: not an accepted contribution.
+      this.log('verified_edit_failed', { toolName, author, rolledBack: false, output: result.output.slice(0, 400) });
       return {
         kept: true,
         rolledBack: false,
@@ -125,7 +163,8 @@ export class VerifiedEditGate {
       }
     }
     this.rollbacks++;
-    this.log('verified_edit_rolled_back', { toolName, rollbacks: this.rollbacks, output: result.output.slice(0, 400) });
+    tally.rolledBack++;
+    this.log('verified_edit_rolled_back', { toolName, author, rollbacks: this.rollbacks, output: result.output.slice(0, 400) });
 
     return {
       kept: false,

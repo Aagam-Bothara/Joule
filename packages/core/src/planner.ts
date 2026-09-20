@@ -18,6 +18,7 @@ import type { BudgetEnvelopeInstance } from './budget-manager.js';
 import type { BudgetManager } from './budget-manager.js';
 import type { TraceLogger } from './trace-logger.js';
 import type { ConstitutionEnforcer } from './constitution.js';
+import { inModelCall, type AgentLifecycleTracker } from './adaptive/lifecycle.js';
 
 export interface PlannerOptions {
   constitution?: ConstitutionEnforcer;
@@ -330,6 +331,8 @@ export class Planner {
   private constitution?: ConstitutionEnforcer;
   private agentRole?: string;
   private agentInstructions?: string;
+  /** Set for the duration of one run; see `setLifecycle`. */
+  private lifecycle?: AgentLifecycleTracker;
 
   constructor(
     private router: ModelRouter,
@@ -1499,7 +1502,18 @@ ${observeContext ? (isSnapshot ? 'Using the indexed elements above, plan the nex
       temperature: 0.1,
     };
 
-    return provider.chat(request);
+    if (!this.lifecycle) return provider.chat(request);
+    return inModelCall(this.lifecycle, () => provider.chat(request), decision.model, { phase: 'plan' });
+  }
+
+  /**
+   * Attach a lifecycle tracker for the duration of one run, so planning calls
+   * on the static path are recorded like every other model call. Set it back to
+   * undefined when the run ends; a Planner must not be shared across runs that
+   * are in flight at the same time.
+   */
+  setLifecycle(tracker: AgentLifecycleTracker | undefined): void {
+    this.lifecycle = tracker;
   }
 
   // ─── Hybrid Automation Strategy ───

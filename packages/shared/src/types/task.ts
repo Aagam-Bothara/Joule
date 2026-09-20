@@ -116,7 +116,17 @@ export interface TaskResult {
   /** Model / tool-wait timing rollup over `lifecycle` */
   lifecycleMetrics?: LifecycleMetrics;
   /** Verified-edit gate activity, when a policy was set on the task */
-  verifiedEdits?: { checks: number; rollbacks: number; verified?: boolean };
+  verifiedEdits?: {
+    checks: number;
+    rollbacks: number;
+    /** Writes the gate reviewed */
+    proposed: number;
+    /** Writes that left the workspace verifying */
+    accepted: number;
+    acceptanceRate: number;
+    verified?: boolean | undefined;
+    byAuthor: Record<string, { proposed: number; accepted: number; rolledBack: number }>;
+  };
 }
 
 // --- Task Specification (structured goal + success criteria) ---
