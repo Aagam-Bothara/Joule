@@ -15,6 +15,13 @@ export interface AgentContribution {
   tokens?: number;
   modelCalls: number;
   toolCalls: number;
+  /**
+   * Writes this agent proposed versus writes that survived verification.
+   * Activity is not contribution: an agent can work hard and make it worse.
+   */
+  proposedWrites?: number;
+  acceptedWrites?: number;
+  rolledBackWrites?: number;
 }
 
 export interface CrewScalingRecord {
@@ -52,6 +59,12 @@ export interface CrewScalingRecord {
 
   /** Agents that made at least one model or tool call */
   activeAgents: number;
+  /** Whether the verified-edit gate was enabled; absent in datasets E and E2 */
+  gateEnabled?: boolean;
+  /** Totals across the crew's agents, when the gate ran */
+  proposedWrites?: number;
+  acceptedWrites?: number;
+  rolledBackWrites?: number;
   agentResults: AgentContribution[];
 }
 

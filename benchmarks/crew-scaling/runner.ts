@@ -26,6 +26,8 @@ export interface RunnerOptions {
   taskIds?: string[];
   /** Repetitions per (task, width); >1 measures run-to-run variance */
   seeds?: number;
+  /** Turn the verified-edit gate on for every run */
+  verifiedEdit?: boolean;
   provider: string;
   model: string;
   outDir: string;
@@ -73,7 +75,13 @@ function registerProvider(joule: Joule, provider: string, model: string): void {
 /** Per-agent work, from the lifecycle metrics each agent's result already carries. */
 function contributionOf(agentResult: AgentResult): AgentContribution {
   const metrics = agentResult.taskResult.lifecycleMetrics;
+  const edits = agentResult.taskResult.verifiedEdits;
   return {
+    ...(edits ? {
+      proposedWrites: edits.proposed,
+      acceptedWrites: edits.accepted,
+      rolledBackWrites: edits.rollbacks,
+    } : {}),
     agentId: agentResult.agentId,
     role: agentResult.role,
     success: agentResult.taskResult.status === 'completed',
@@ -89,6 +97,7 @@ function toRecord(args: {
   task: ScalingTask;
   width: CrewWidth;
   seed: number;
+  gateEnabled: boolean;
   joulTask: Task;
   crew: CrewResult;
   jctMs: number;
@@ -115,6 +124,12 @@ function toRecord(args: {
     modelRuntimeMs: lifecycle.reduce((s, m) => s + (m?.modelRuntimeMs ?? 0), 0),
     toolWaitMs: lifecycle.reduce((s, m) => s + (m?.toolWaitMs ?? 0), 0),
     activeAgents: contributions.filter(c => c.modelCalls > 0 || c.toolCalls > 0).length,
+    gateEnabled: args.gateEnabled,
+    ...(args.gateEnabled ? {
+      proposedWrites: sum(c => c.proposedWrites ?? 0),
+      acceptedWrites: sum(c => c.acceptedWrites ?? 0),
+      rolledBackWrites: sum(c => c.rolledBackWrites ?? 0),
+    } : {}),
     agentResults: contributions,
   };
 }
@@ -151,6 +166,9 @@ export async function runCrewScaling(opts: RunnerOptions): Promise<CrewScalingRe
           id: generateId('scaling-task'),
           description: prepared.description,
           createdAt: new Date().toISOString(),
+          ...(opts.verifiedEdit
+            ? { verifiedEdit: { command: 'python run_tests.py', cwd: prepared.dir, timeoutMs: 30_000 } }
+            : {}),
         };
         process.stderr.write(`${task.workloadId} w${width} s${seed}: `);
         const began = Date.now();
@@ -158,9 +176,12 @@ export async function runCrewScaling(opts: RunnerOptions): Promise<CrewScalingRe
           const crew = await joule.executeCrew(crewForWidth(width), joulTask);
           const jctMs = Date.now() - began;
           const verdict = prepared.verify();
-          const record = toRecord({ runId, task, width, seed, joulTask, crew, jctMs, verdict });
+          const record = toRecord({ runId, task, width, seed, gateEnabled: Boolean(opts.verifiedEdit), joulTask, crew, jctMs, verdict });
           records.push(record);
-          process.stderr.write(`${verdict.success ? 'PASS' : 'fail'} ${(jctMs / 1000).toFixed(1)}s $${record.totalCostUsd.toFixed(4)} agents ${record.activeAgents}/${width}\n`);
+          const gateNote = record.gateEnabled
+            ? ` writes ${record.acceptedWrites}/${record.proposedWrites} kept, ${record.rolledBackWrites} rolled back`
+            : '';
+          process.stderr.write(`${verdict.success ? 'PASS' : 'fail'} ${(jctMs / 1000).toFixed(1)}s $${record.totalCostUsd.toFixed(4)} agents ${record.activeAgents}/${width}${gateNote}\n`);
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
           process.stderr.write(`error: ${message}\n`);
@@ -187,6 +208,7 @@ export async function runCrewScaling(opts: RunnerOptions): Promise<CrewScalingRe
     rolesByWidth: Object.fromEntries(opts.widths.map(w => [w, roleNames(w)])),
     strategy: 'sequential',
     executionMode: 'direct (crew default)',
+    verifiedEditGate: Boolean(opts.verifiedEdit),
     tasks: tasks.map(t => t.workloadId),
     taskOffset: opts.offset,
     runs: records.length,

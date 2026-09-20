@@ -36,6 +36,7 @@ async function main(): Promise<void> {
       offset: Number(arg('--offset') ?? '100'),
       ...(taskIds ? { taskIds } : {}),
       seeds: Number(arg('--seeds') ?? '1'),
+      verifiedEdit: process.argv.includes('--verified-edit'),
       provider: arg('--provider') ?? process.env.JOULE_LIFECYCLE_PROVIDER ?? 'openrouter',
       model: arg('--model') ?? process.env.JOULE_LIFECYCLE_MODEL ?? 'deepseek/deepseek-v4-flash',
       outDir,
