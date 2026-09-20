@@ -121,6 +121,28 @@ export interface HideableWindow {
   hideableFraction: number;
 }
 
+/**
+ * Tool wait that coincides with another agent needing the model.
+ *
+ * The question this answers is not "does an agent wait?" but "while it waits,
+ * is anyone else asking for inference?" — the difference between idle time and
+ * time another agent could actually use.
+ */
+export interface ReclaimableStats {
+  totalToolWaitMs: number;
+  /** Tool wait overlapping at least one other agent in model_running */
+  reclaimableToolWaitMs: number;
+  reclaimableFraction: number;
+  /** Tool wait with nobody else asking for the model */
+  isolatedToolWaitMs: number;
+  /**
+   * The same overlap, counting only what survives a fixed start-up cost paid
+   * when the wait begins: overlap of [waitStart + cost, waitEnd] with other
+   * agents' model demand.
+   */
+  afterCost: Array<{ migrationCostMs: number; reclaimableMs: number; fractionOfToolWait: number }>;
+}
+
 /** Per execution mode, so full and direct agents can be compared. */
 export interface ModeBreakdown {
   executionMode: AgentExecutionMode;
@@ -145,6 +167,8 @@ export interface LifecycleAggregate {
   overThresholds: ThresholdShare[];
   /** Analysis-only: usable time left under hypothetical fixed overheads */
   hideable: HideableWindow[];
+  /** Cross-agent: tool wait that coincides with another agent's model demand */
+  reclaimable: ReclaimableStats;
 
   /** Totals across every record, for a quick where-does-the-time-go view */
   totals: {
@@ -185,6 +209,10 @@ export interface WorkflowLifecycleSummary {
   modelDemandOverlapMs: number;
   /** modelDemandOverlapMs / wallClockRuntimeMs */
   modelDemandOverlapFraction: number;
+
+  /** Tool wait in this workflow that coincides with another agent's model demand */
+  reclaimableToolWaitMs: number;
+  reclaimableFraction: number;
 }
 
 /** What the analyzer writes to summary.json. */

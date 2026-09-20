@@ -16,6 +16,8 @@ import {
   concurrencyProfile,
   hideableWindows,
   percentile,
+  pooledReclaimable,
+  reclaimableToolWait,
   waitsOverThresholds,
   renderAgentBands,
   renderLifecycleReport,
@@ -259,6 +261,90 @@ describe('concurrency sweep', () => {
     const empty = concurrencyProfile([], 100);
     expect(empty).toEqual({ max: 0, avg: 0, overlapMs: 0 });
     expect(concurrencyProfile([{ start: 5, end: 5 }], 100).max).toBe(0);
+  });
+});
+
+// ── Reclaimable tool wait ───────────────────────────────────────────
+
+describe('reclaimable tool wait', () => {
+  /** A waits 100-1100; B runs a model 600-900 inside that wait. */
+  const pair = (): AgentLifecycleRecord[] => [
+    record('agent_a', [
+      { to: 'tool_wait', at: 100, tool: 'shell_exec' },
+      { to: 'ready', at: 1100 },
+      { to: 'completed', at: 1100 },
+    ], { parentTaskId: 'w1', taskId: 'a' }),
+    record('agent_b', [
+      { to: 'model_running', at: 600 },
+      { to: 'ready', at: 900 },
+      { to: 'completed', at: 1000 },
+    ], { parentTaskId: 'w1', taskId: 'b' }),
+  ];
+
+  it('counts only the part of a wait that overlaps another agent needing the model', () => {
+    const r = reclaimableToolWait(pair());
+    expect(r.totalToolWaitMs).toBe(1000);
+    expect(r.reclaimableToolWaitMs).toBe(300);
+    expect(r.reclaimableFraction).toBeCloseTo(0.3, 6);
+    expect(r.isolatedToolWaitMs).toBe(700);
+  });
+
+  it('charges a start-up cost from the beginning of each wait', () => {
+    const r = reclaimableToolWait(pair(), [100, 500, 1000]);
+    // The overlap sits at 600-900, so a 100ms or 500ms cost still leaves all of it.
+    expect(r.afterCost[0]).toMatchObject({ migrationCostMs: 100, reclaimableMs: 300 });
+    expect(r.afterCost[1]).toMatchObject({ migrationCostMs: 500, reclaimableMs: 300 });
+    // A 1000ms cost starts at t=1100, when the wait is already over.
+    expect(r.afterCost[2]).toMatchObject({ migrationCostMs: 1000, reclaimableMs: 0 });
+  });
+
+  it('ignores the waiting agent\'s own model time and non-overlapping demand', () => {
+    const solo = [record('agent_a', [
+      { to: 'model_running', at: 0 },
+      { to: 'ready', at: 100 },
+      { to: 'tool_wait', at: 100, tool: 'shell_exec' },
+      { to: 'ready', at: 900 },
+      { to: 'completed', at: 900 },
+    ], { parentTaskId: 'w1', taskId: 'a' })];
+    expect(reclaimableToolWait(solo).reclaimableToolWaitMs).toBe(0);
+
+    const disjoint = [
+      record('agent_a', [
+        { to: 'tool_wait', at: 0, tool: 'shell_exec' },
+        { to: 'ready', at: 500 },
+        { to: 'completed', at: 500 },
+      ], { parentTaskId: 'w1', taskId: 'a' }),
+      record('agent_b', [
+        { to: 'model_running', at: 600 },
+        { to: 'ready', at: 900 },
+        { to: 'completed', at: 900 },
+      ], { parentTaskId: 'w1', taskId: 'b' }),
+    ];
+    const r = reclaimableToolWait(disjoint);
+    expect(r.reclaimableToolWaitMs).toBe(0);
+    expect(r.isolatedToolWaitMs).toBe(500);
+  });
+
+  it('merges several agents\' demand without double counting', () => {
+    const many = [
+      ...pair(),
+      record('agent_c', [
+        { to: 'model_running', at: 700 },   // overlaps b's window
+        { to: 'ready', at: 1000 },
+        { to: 'completed', at: 1000 },
+      ], { parentTaskId: 'w1', taskId: 'c' }),
+    ];
+    // b covers 600-900, c covers 700-1000 -> union 600-1000 inside a's wait.
+    expect(reclaimableToolWait(many).reclaimableToolWaitMs).toBe(400);
+  });
+
+  it('pools per workflow so unrelated agents never overlap', () => {
+    const w1 = pair();
+    const w2 = pair().map(r => ({ ...r, parentTaskId: 'w2', taskId: `${r.taskId}2` }));
+    const pooled = pooledReclaimable([...w1, ...w2]);
+    expect(pooled.totalToolWaitMs).toBe(2000);
+    expect(pooled.reclaimableToolWaitMs).toBe(600);
+    expect(pooled.reclaimableFraction).toBeCloseTo(0.3, 6);
   });
 });
 

@@ -1,0 +1,45 @@
+{
+  "name": "repo-agents",
+  "description": "Four agents working the same repository concurrently with real searches, reads and test-suite runs (parallel strategy)",
+  "strategy": "parallel",
+  "agents": [
+    {
+      "id": "core-tester",
+      "role": "Core Test Runner",
+      "instructions": "Run the core test suite exactly once with shell_exec: `npx vitest run --project @joule/core`. Then report the number of test files and tests that passed, quoting the summary line. Do not run it a second time.",
+      "allowedTools": ["shell_exec", "file_read"],
+      "budgetShare": 0.25,
+      "maxIterations": 4,
+      "maxRetries": 0
+    },
+    {
+      "id": "suite-tester",
+      "role": "Package Test Runner",
+      "instructions": "Run two suites with shell_exec, one at a time: first `npx vitest run --project benchmarks`, then `npx vitest run --project @joule/shared`. Report the pass counts for both, then answer. Do not repeat a suite.",
+      "allowedTools": ["shell_exec", "file_read"],
+      "budgetShare": 0.25,
+      "maxIterations": 5,
+      "maxRetries": 0
+    },
+    {
+      "id": "searcher",
+      "role": "Code Searcher",
+      "instructions": "Search the adaptive execution sources with shell_exec: `Select-String -Path packages/core/src/adaptive/*.ts -Pattern 'tool_wait' | Select-Object -First 10`. Then list that directory with `Get-ChildItem packages/core/src/adaptive -Name`. Report which files mention tool_wait.",
+      "allowedTools": ["shell_exec", "file_read"],
+      "budgetShare": 0.25,
+      "maxIterations": 5,
+      "maxRetries": 0
+    },
+    {
+      "id": "reviewer",
+      "role": "Source Reviewer",
+      "instructions": "Read packages/core/src/adaptive/lifecycle.ts with file_read, then check it compiles cleanly by running `npx tsc --noEmit --skipLibCheck packages/core/src/adaptive/lifecycle.ts` with shell_exec (errors are expected and fine to report). Summarise what the file does in at most 5 bullet points.",
+      "allowedTools": ["file_read", "shell_exec"],
+      "budgetShare": 0.25,
+      "maxIterations": 5,
+      "maxRetries": 0
+    }
+  ],
+  "budget": "high",
+  "aggregation": "concat"
+}
