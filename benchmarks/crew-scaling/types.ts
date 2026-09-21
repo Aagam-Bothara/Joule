@@ -72,10 +72,17 @@ export interface CrewScalingRecord {
    */
   runError?: string;
 
-  workflowJctMs: number;
+  /**
+   * Resource measurements are absent, not zero, when a run never produced
+   * them. A run that died before execution has no cost, runtime or token
+   * count to report, and writing zeros there would pull every average it is
+   * included in towards zero. Outcome fields above stay present for every
+   * attempt, so a failure still counts against the success rate.
+   */
+  workflowJctMs?: number;
 
-  totalCostUsd: number;
-  totalTokens: number;
+  totalCostUsd?: number;
+  totalTokens?: number;
   /**
    * Prompt/completion split is not tracked per agent on the direct execution
    * path, so these stay undefined rather than being guessed at.
@@ -83,13 +90,13 @@ export interface CrewScalingRecord {
   inputTokens?: number;
   outputTokens?: number;
 
-  modelCalls: number;
-  toolCalls: number;
-  modelRuntimeMs: number;
-  toolWaitMs: number;
+  modelCalls?: number;
+  toolCalls?: number;
+  modelRuntimeMs?: number;
+  toolWaitMs?: number;
 
   /** Agents that made at least one model or tool call */
-  activeAgents: number;
+  activeAgents?: number;
   /** Whether the verified-edit gate was enabled; absent in datasets E and E2 */
   gateEnabled?: boolean;
   /** Totals across the crew's agents, when the gate ran */
@@ -101,11 +108,33 @@ export interface CrewScalingRecord {
 
 // ── Analysis ─────────────────────────────────────────────────────────
 
-export interface WidthAggregate {
+/**
+ * How many runs a number was computed over.
+ *
+ * Outcome and resource statistics have different denominators: every attempt
+ * counts towards the success rate, but only runs that measured something can
+ * contribute to an average. Without these counts the denominator changes
+ * silently whenever a run dies early.
+ */
+export interface AggregateDenominators {
+  /** Every run the experiment attempted at this width */
+  attemptedRuns: number;
+  /** Attempts that produced usable resource measurements */
+  measuredRuns: number;
+  /** Runs behind each resource average */
+  jctRuns: number;
+  costRuns: number;
+  tokenRuns: number;
+}
+
+export interface WidthAggregate extends AggregateDenominators {
   crewWidth: CrewWidth;
+  /** Alias of `attemptedRuns`, kept because the reports read it */
   runs: number;
   successes: number;
+  /** successes / attemptedRuns — a run that died early is still a failure */
   successRate: number;
+  /** Averages over the runs that measured them; 0 when there are none */
   meanJctMs: number;
   medianJctMs: number;
   meanCostUsd: number;
@@ -122,7 +151,10 @@ export interface WidthAggregate {
 export interface MarginalStep {
   from: CrewWidth;
   to: CrewWidth;
+  /** Tasks that ran at both widths — the denominator for the outcome counts */
   pairedTasks: number;
+  /** Of those, pairs where both runs measured resources — the denominator for the deltas */
+  measuredPairs: number;
   /** Tasks the wider crew solved that the narrower one did not */
   newlySolved: number;
   /** Tasks the narrower crew solved that the wider one lost */
@@ -149,7 +181,10 @@ export interface DominanceStep {
   from: CrewWidth;
   to: CrewWidth;
   pairedTasks: number;
+  /** Pairs where both runs measured cost and latency; dominance needs both */
+  comparablePairs: number;
   dominated: number;
+  /** dominated / comparablePairs */
   dominatedFraction: number;
   /** Same outcome, but the narrower crew was cheaper */
   sameOutcomeCheaper: number;
@@ -184,6 +219,9 @@ export interface CrewScalingAnalysis {
   generatedAt: string;
   source: string;
   runs: number;
+  /** Runs attempted (= `runs`) and how many of them measured resources */
+  attemptedRuns: number;
+  measuredRuns: number;
   tasks: number;
   widths: WidthAggregate[];
   marginal: MarginalStep[];

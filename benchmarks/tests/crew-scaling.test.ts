@@ -249,6 +249,104 @@ describe('crew scaling analysis', () => {
   });
 });
 
+// ── Runs that never measured anything ────────────────────────────────
+
+describe('runs that died before measuring', () => {
+  /** A run that threw before producing a crew result: outcome only, no measurements. */
+  function attemptOnly(workloadId: string, crewWidth: CrewWidth): CrewScalingRecord {
+    return {
+      runId: 'run-1',
+      taskId: `task-${workloadId}-${crewWidth}`,
+      seed: 0,
+      workloadId,
+      crewWidth,
+      roles: [],
+      success: false,
+      runError: 'OPENROUTER_API_KEY is not set',
+      failureReason: 'OPENROUTER_API_KEY is not set',
+      agentResults: [],
+    };
+  }
+
+  it('still counts against the success rate', () => {
+    const [w1] = aggregateByWidth([
+      rec('t1', 1), rec('t2', 1), attemptOnly('t3', 1),
+    ]);
+
+    // Three attempts, two of which worked: the failure is not hidden.
+    expect(w1.attemptedRuns).toBe(3);
+    expect(w1.successes).toBe(2);
+    expect(w1.successRate).toBeCloseTo(2 / 3, 6);
+  });
+
+  it('does not drag the JCT mean towards zero', () => {
+    const measured = [rec('t1', 1, { workflowJctMs: 10_000 }), rec('t2', 1, { workflowJctMs: 20_000 })];
+    const withAttempt = [...measured, attemptOnly('t3', 1)];
+
+    expect(aggregateByWidth(measured)[0].meanJctMs).toBe(15_000);
+    expect(aggregateByWidth(withAttempt)[0].meanJctMs).toBe(15_000);
+    expect(aggregateByWidth(withAttempt)[0].jctRuns).toBe(2);
+    expect(aggregateByWidth(withAttempt)[0].medianJctMs).toBe(10_000);
+  });
+
+  it('does not drag the token or cost means towards zero', () => {
+    const withAttempt = [
+      rec('t1', 1, { totalTokens: 1000, totalCostUsd: 0.004 }),
+      rec('t2', 1, { totalTokens: 3000, totalCostUsd: 0.006 }),
+      attemptOnly('t3', 1),
+    ];
+    const [w1] = aggregateByWidth(withAttempt);
+
+    expect(w1.meanTokens).toBe(2000);
+    expect(w1.tokenRuns).toBe(2);
+    expect(w1.meanCostUsd).toBeCloseTo(0.005, 9);
+    expect(w1.costRuns).toBe(2);
+  });
+
+  it('treats a genuinely free run as a measurement, not a gap', () => {
+    // Zero is a value. Only absence means "not measured".
+    const [w1] = aggregateByWidth([
+      rec('t1', 1, { totalCostUsd: 0, totalTokens: 0, workflowJctMs: 0 }),
+      rec('t2', 1, { totalCostUsd: 0.01, totalTokens: 100, workflowJctMs: 1000 }),
+    ]);
+
+    expect(w1.costRuns).toBe(2);
+    expect(w1.measuredRuns).toBe(2);
+    expect(w1.meanCostUsd).toBeCloseTo(0.005, 9);
+  });
+
+  it('exposes every denominator it used', () => {
+    const analysis = analyzeCrewScaling([
+      rec('t1', 1), rec('t2', 1), attemptOnly('t3', 1), rec('t1', 2), rec('t2', 2),
+    ], 'test');
+
+    expect(analysis.attemptedRuns).toBe(5);
+    expect(analysis.measuredRuns).toBe(4);
+    const [w1] = analysis.widths;
+    expect(w1).toMatchObject({ attemptedRuns: 3, measuredRuns: 2, jctRuns: 2, costRuns: 2, tokenRuns: 2 });
+
+    const report = renderCrewScalingReport(analysis);
+    expect(report).toContain('5 run(s) attempted over 3 task(s); 4 with resource measurements');
+    expect(report).toContain('1 run(s) ended before measuring; counted as failures, excluded from averages');
+  });
+
+  it('keeps unmeasured runs out of paired comparisons but not out of outcomes', () => {
+    const records = [
+      rec('t1', 1, { success: false }), rec('t1', 2, { success: true }),
+      rec('t2', 1, { success: false }), attemptOnly('t2', 2),
+    ];
+    const [step] = marginalSteps(records);
+
+    // Both tasks ran at both widths; only one pair can support a cost delta.
+    expect(step.pairedTasks).toBe(2);
+    expect(step.measuredPairs).toBe(1);
+    // The width-2 attempt that died is still a failure, so it cannot count as
+    // newly solved.
+    expect(step.newlySolved).toBe(1);
+    expect(Number.isFinite(step.deltaCostUsd)).toBe(true);
+  });
+});
+
 // ── What each agent's row has to be able to explain ──────────────────
 
 describe('agent contribution records', () => {

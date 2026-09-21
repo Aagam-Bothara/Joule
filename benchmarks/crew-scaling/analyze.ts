@@ -23,6 +23,37 @@ export const WIDTHS: CrewWidth[] = [1, 2, 3, 4];
 const mean = (xs: readonly number[]): number => (xs.length > 0 ? xs.reduce((a, b) => a + b, 0) / xs.length : 0);
 const sum = (xs: readonly number[]): number => xs.reduce((a, b) => a + b, 0);
 
+/**
+ * Values a metric actually has, in run order.
+ *
+ * Validity is presence, never value: a run that genuinely cost nothing reports
+ * 0 and belongs in the average, while a run that never got far enough to cost
+ * anything reports nothing and does not.
+ */
+function values(
+  records: readonly CrewScalingRecord[],
+  pick: (r: CrewScalingRecord) => number | undefined,
+): number[] {
+  const out: number[] = [];
+  for (const r of records) {
+    const v = pick(r);
+    if (v !== undefined) out.push(v);
+  }
+  return out;
+}
+
+/** A run whose resource measurements exist and can be compared or averaged. */
+export type MeasuredRun = CrewScalingRecord & {
+  workflowJctMs: number;
+  totalCostUsd: number;
+  totalTokens: number;
+};
+
+/** Did this run measure the resources it consumed? */
+export function isMeasured(r: CrewScalingRecord): r is MeasuredRun {
+  return r.workflowJctMs !== undefined && r.totalCostUsd !== undefined && r.totalTokens !== undefined;
+}
+
 /** workloadId -> width -> record, with tasks in a stable order. */
 export function byTask(records: readonly CrewScalingRecord[]): Map<string, Map<CrewWidth, CrewScalingRecord>> {
   const out = new Map<string, Map<CrewWidth, CrewScalingRecord>>();
@@ -41,20 +72,33 @@ export function aggregateByWidth(records: readonly CrewScalingRecord[]): WidthAg
   return WIDTHS.flatMap(width => {
     const rs = records.filter(r => r.crewWidth === width);
     if (rs.length === 0) return [];
+
+    // Outcomes are counted over every attempt; resources only over the runs
+    // that measured them, and each metric reports its own denominator.
+    const jct = values(rs, r => r.workflowJctMs);
+    const cost = values(rs, r => r.totalCostUsd);
+    const tokens = values(rs, r => r.totalTokens);
+    const successes = rs.filter(r => r.success).length;
+
     return [{
       crewWidth: width,
       runs: rs.length,
-      successes: rs.filter(r => r.success).length,
-      successRate: rs.filter(r => r.success).length / rs.length,
-      meanJctMs: mean(rs.map(r => r.workflowJctMs)),
-      medianJctMs: percentile(rs.map(r => r.workflowJctMs), 0.5),
-      meanCostUsd: mean(rs.map(r => r.totalCostUsd)),
-      medianCostUsd: percentile(rs.map(r => r.totalCostUsd), 0.5),
-      meanTokens: mean(rs.map(r => r.totalTokens)),
-      meanModelCalls: mean(rs.map(r => r.modelCalls)),
-      meanToolCalls: mean(rs.map(r => r.toolCalls)),
-      meanActiveAgents: mean(rs.map(r => r.activeAgents)),
-      activeAgentFraction: mean(rs.map(r => r.activeAgents / r.crewWidth)),
+      attemptedRuns: rs.length,
+      measuredRuns: rs.filter(isMeasured).length,
+      jctRuns: jct.length,
+      costRuns: cost.length,
+      tokenRuns: tokens.length,
+      successes,
+      successRate: successes / rs.length,
+      meanJctMs: mean(jct),
+      medianJctMs: percentile(jct, 0.5),
+      meanCostUsd: mean(cost),
+      medianCostUsd: percentile(cost, 0.5),
+      meanTokens: mean(tokens),
+      meanModelCalls: mean(values(rs, r => r.modelCalls)),
+      meanToolCalls: mean(values(rs, r => r.toolCalls)),
+      meanActiveAgents: mean(values(rs, r => r.activeAgents)),
+      activeAgentFraction: mean(values(rs, r => (r.activeAgents === undefined ? undefined : r.activeAgents / r.crewWidth))),
     }];
   });
 }
@@ -85,16 +129,22 @@ export function marginalSteps(records: readonly CrewScalingRecord[]): MarginalSt
     const newlySolved = ps.filter(p => p.to.success && !p.from.success).length;
     const regressions = ps.filter(p => !p.to.success && p.from.success).length;
     const netSolved = newlySolved - regressions;
-    const deltaCostUsd = sum(ps.map(p => p.to.totalCostUsd - p.from.totalCostUsd));
-    const fromCost = sum(ps.map(p => p.from.totalCostUsd));
-    const deltaTokens = sum(ps.map(p => p.to.totalTokens - p.from.totalTokens));
-    const deltaJctMs = mean(ps.map(p => p.to.workflowJctMs - p.from.workflowJctMs));
-    const fromJct = mean(ps.map(p => p.from.workflowJctMs));
+
+    // Outcomes come from every pair; a resource delta needs both sides to have
+    // measured the resource, so those use their own, smaller set.
+    const measured = ps.filter((p): p is { from: MeasuredRun; to: MeasuredRun } =>
+      isMeasured(p.from) && isMeasured(p.to));
+    const deltaCostUsd = sum(measured.map(p => p.to.totalCostUsd - p.from.totalCostUsd));
+    const fromCost = sum(measured.map(p => p.from.totalCostUsd));
+    const deltaTokens = sum(measured.map(p => p.to.totalTokens - p.from.totalTokens));
+    const deltaJctMs = mean(measured.map(p => p.to.workflowJctMs - p.from.workflowJctMs));
+    const fromJct = mean(measured.map(p => p.from.workflowJctMs));
 
     steps.push({
       from,
       to,
       pairedTasks: ps.length,
+      measuredPairs: measured.length,
       newlySolved,
       regressions,
       netSolved,
@@ -103,8 +153,8 @@ export function marginalSteps(records: readonly CrewScalingRecord[]): MarginalSt
       deltaJctMs,
       deltaJctPct: fromJct > 0 ? (deltaJctMs / fromJct) * 100 : 0,
       deltaTokens,
-      deltaModelCalls: sum(ps.map(p => p.to.modelCalls - p.from.modelCalls)),
-      deltaToolCalls: sum(ps.map(p => p.to.toolCalls - p.from.toolCalls)),
+      deltaModelCalls: sum(measured.map(p => (p.to.modelCalls ?? 0) - (p.from.modelCalls ?? 0))),
+      deltaToolCalls: sum(measured.map(p => (p.to.toolCalls ?? 0) - (p.from.toolCalls ?? 0))),
       ...(deltaCostUsd > 0 ? { solvedPerDollar: netSolved / deltaCostUsd } : {}),
       ...(deltaTokens > 0 ? { solvedPerMillionTokens: netSolved / (deltaTokens / 1_000_000) } : {}),
     });
@@ -119,13 +169,25 @@ export function dominanceSteps(records: readonly CrewScalingRecord[]): Dominance
     const to = WIDTHS[i + 1];
     const ps = pairs(records, from, to);
     if (ps.length === 0) continue;
+    // Dominance is a claim about money and latency, so it can only be made
+    // about pairs where both runs measured them.
+    const comparable = ps.filter((p): p is { from: MeasuredRun; to: MeasuredRun } =>
+      isMeasured(p.from) && isMeasured(p.to));
     // Dominated: no better outcome, more money, and no better latency.
-    const dominated = ps.filter(p =>
+    const dominated = comparable.filter(p =>
       Number(p.to.success) <= Number(p.from.success)
       && p.to.totalCostUsd > p.from.totalCostUsd
       && p.to.workflowJctMs >= p.from.workflowJctMs).length;
-    const sameOutcomeCheaper = ps.filter(p => p.to.success === p.from.success && p.from.totalCostUsd < p.to.totalCostUsd).length;
-    steps.push({ from, to, pairedTasks: ps.length, dominated, dominatedFraction: dominated / ps.length, sameOutcomeCheaper });
+    const sameOutcomeCheaper = comparable.filter(p => p.to.success === p.from.success && p.from.totalCostUsd < p.to.totalCostUsd).length;
+    steps.push({
+      from,
+      to,
+      pairedTasks: ps.length,
+      comparablePairs: comparable.length,
+      dominated,
+      dominatedFraction: comparable.length > 0 ? dominated / comparable.length : 0,
+      sameOutcomeCheaper,
+    });
   }
   return steps;
 }
@@ -164,15 +226,20 @@ export function oracleSavings(records: readonly CrewScalingRecord[], widest: Cre
 
   for (const perWidth of byTaskMap.values()) {
     const widestRun = perWidth.get(widest);
-    if (!widestRun) continue;
+    // The comparison is about what each strategy would have spent, so a task
+    // whose runs did not measure spending cannot take part in it.
+    if (!widestRun || !isMeasured(widestRun)) continue;
+    const minWidth = WIDTHS.find(w => perWidth.get(w)?.success);
+    const picked = minWidth ? perWidth.get(minWidth)! : widestRun;
+    if (!isMeasured(picked)) continue;
+    const chosen: MeasuredRun = picked;
+
     tasksConsidered++;
     alwaysWidestCostUsd += widestRun.totalCostUsd;
     alwaysWidestTokens += widestRun.totalTokens;
     alwaysWidestJctMs += widestRun.workflowJctMs;
     if (widestRun.success) alwaysWidestSolved++;
 
-    const minWidth = WIDTHS.find(w => perWidth.get(w)?.success);
-    const chosen = minWidth ? perWidth.get(minWidth)! : widestRun;
     oracleCostUsd += chosen.totalCostUsd;
     oracleTokens += chosen.totalTokens;
     oracleJctMs += chosen.workflowJctMs;
@@ -266,6 +333,8 @@ export function analyzeCrewScaling(records: readonly CrewScalingRecord[], source
     generatedAt: new Date().toISOString(),
     source,
     runs: records.length,
+    attemptedRuns: records.length,
+    measuredRuns: records.filter(isMeasured).length,
     tasks: byTask(records).size,
     widths: aggregateByWidth(records),
     marginal: marginalSteps(records),
@@ -287,15 +356,21 @@ const signed = (v: number, unit = '%'): string => `${v > 0 ? '+' : ''}${v.toFixe
 export function renderCrewScalingReport(a: CrewScalingAnalysis): string {
   const lines: string[] = ['Crew-scaling characterization', ''];
   lines.push(`  source ${a.source}`);
-  lines.push(`  ${a.runs} run(s) over ${a.tasks} task(s)`);
+  lines.push(`  ${a.attemptedRuns} run(s) attempted over ${a.tasks} task(s); ${a.measuredRuns} with resource measurements`);
+  if (a.measuredRuns < a.attemptedRuns) {
+    // Stated rather than inferred: success counts every attempt, averages
+    // cannot count a run that never measured anything.
+    lines.push(`  ${a.attemptedRuns - a.measuredRuns} run(s) ended before measuring; counted as failures, excluded from averages`);
+  }
 
-  lines.push('', 'Scaling curve');
-  lines.push(`${padEnd('width', 7)}${pad('runs', 5)}${pad('success', 9)}${pad('meanJCT', 9)}${pad('meanCost', 10)}${pad('tokens', 9)}${pad('modelCalls', 12)}${pad('toolCalls', 11)}${pad('active', 8)}${pad('activeFrac', 12)}`);
-  lines.push('-'.repeat(92));
+  lines.push('', 'Scaling curve  (success over attempts; averages over measured runs)');
+  lines.push(`${padEnd('width', 7)}${pad('runs', 5)}${pad('measured', 10)}${pad('success', 9)}${pad('meanJCT', 9)}${pad('meanCost', 10)}${pad('tokens', 9)}${pad('modelCalls', 12)}${pad('toolCalls', 11)}${pad('active', 8)}${pad('activeFrac', 12)}`);
+  lines.push('-'.repeat(102));
   for (const w of a.widths) {
     lines.push(
-      padEnd(w.crewWidth, 7) + pad(w.runs, 5)
-      + pad(`${w.successes}/${w.runs}`, 9)
+      padEnd(w.crewWidth, 7) + pad(w.attemptedRuns, 5)
+      + pad(w.measuredRuns, 10)
+      + pad(`${w.successes}/${w.attemptedRuns}`, 9)
       + pad(s(w.meanJctMs), 9) + pad(usd(w.meanCostUsd), 10)
       + pad(Math.round(w.meanTokens), 9) + pad(w.meanModelCalls.toFixed(1), 12)
       + pad(w.meanToolCalls.toFixed(1), 11) + pad(w.meanActiveAgents.toFixed(2), 8)
@@ -305,7 +380,7 @@ export function renderCrewScalingReport(a: CrewScalingAnalysis): string {
 
   lines.push('', 'Marginal returns (paired, same tasks)');
   for (const m of a.marginal) {
-    lines.push(`  ${m.from} -> ${m.to}  (${m.pairedTasks} paired tasks)`);
+    lines.push(`  ${m.from} -> ${m.to}  (${m.pairedTasks} paired tasks; deltas over ${m.measuredPairs} measured pair(s))`);
     lines.push(`     outcome   +${m.newlySolved} newly solved, -${m.regressions} regressed, net ${m.netSolved >= 0 ? '+' : ''}${m.netSolved}`);
     lines.push(`     cost      ${signed(m.deltaCostUsd * 1000, ' m$')} total (${signed(m.deltaCostPct)})`);
     lines.push(`     latency   ${signed(m.deltaJctMs / 1000, 's')} mean (${signed(m.deltaJctPct)})`);
@@ -315,7 +390,7 @@ export function renderCrewScalingReport(a: CrewScalingAnalysis): string {
 
   lines.push('', 'Dominance (wider crew buys nothing and costs more)');
   for (const d of a.dominance) {
-    lines.push(`  ${d.from} -> ${d.to}: ${d.dominated}/${d.pairedTasks} dominated (${pctStr(d.dominatedFraction * 100)}), same outcome cheaper at ${d.from}: ${d.sameOutcomeCheaper}`);
+    lines.push(`  ${d.from} -> ${d.to}: ${d.dominated}/${d.comparablePairs} dominated (${pctStr(d.dominatedFraction * 100)}), same outcome cheaper at ${d.from}: ${d.sameOutcomeCheaper}`);
   }
 
   lines.push('', 'Minimum successful width');

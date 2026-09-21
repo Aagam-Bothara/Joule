@@ -42,7 +42,7 @@ async function main(): Promise<void> {
       outDir,
       label: arg('--label') ?? 'crew-scaling',
     });
-    const spend = records.reduce((s, r) => s + r.totalCostUsd, 0);
+    const spend = records.reduce((s, r) => s + (r.totalCostUsd ?? 0), 0);
     process.stderr.write(`\n${records.length} run(s), $${spend.toFixed(4)} spent, written to ${join(outDir, 'runs.jsonl')}\n`);
     return;
   }

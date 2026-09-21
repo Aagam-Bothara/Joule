@@ -139,14 +139,8 @@ function failedRun(args: {
     success: false,
     failureReason: args.runError,
     runError: args.runError,
-    workflowJctMs: args.jctMs,
-    totalCostUsd: 0,
-    totalTokens: 0,
-    modelCalls: 0,
-    toolCalls: 0,
-    modelRuntimeMs: 0,
-    toolWaitMs: 0,
-    activeAgents: 0,
+    // No resource fields: this run measured nothing. Writing zeros here would
+    // make it look like a free, instant run and drag every average down.
     gateEnabled: args.gateEnabled,
     agentResults: [],
   };
@@ -199,7 +193,7 @@ export async function runCrewScaling(opts: RunnerOptions): Promise<CrewScalingRe
           const gateNote = record.gateEnabled
             ? ` writes ${record.acceptedWrites}/${record.proposedWrites} kept, ${record.rolledBackWrites} rolled back`
             : '';
-          process.stderr.write(`${verdict.success ? 'PASS' : 'fail'} ${(jctMs / 1000).toFixed(1)}s $${record.totalCostUsd.toFixed(4)} agents ${record.activeAgents}/${width}${gateNote}\n`);
+          process.stderr.write(`${verdict.success ? 'PASS' : 'fail'} ${(jctMs / 1000).toFixed(1)}s $${(record.totalCostUsd ?? 0).toFixed(4)} agents ${record.activeAgents ?? 0}/${width}${gateNote}\n`);
         } catch (err) {
           // A run that throws still happened. Recording it keeps the artifact
           // the same shape as the experiment: one row per (task, width, seed),
@@ -238,7 +232,7 @@ export async function runCrewScaling(opts: RunnerOptions): Promise<CrewScalingRe
     tasks: tasks.map(t => t.workloadId),
     taskOffset: opts.offset,
     runs: records.length,
-    totalCostUsd: records.reduce((s, r) => s + r.totalCostUsd, 0),
+    totalCostUsd: records.reduce((s, r) => s + (r.totalCostUsd ?? 0), 0),
     seeds,
     notes: seeds > 1
       ? `${seeds} repetitions per (task, width); repetitions differ only through provider sampling.`
