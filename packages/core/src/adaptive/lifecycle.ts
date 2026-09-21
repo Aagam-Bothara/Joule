@@ -334,3 +334,52 @@ export function renderLifecycleTimeline(
   lines.push('-'.repeat(32));
   return lines.join('\n');
 }
+
+/**
+ * One line per agent in a crew run: did it execute, did it fail, why, how far
+ * it got, and what it was allowed to spend.
+ *
+ * This exists because counts alone could not explain a crew: agents that made
+ * zero model calls looked identical to agents that had nothing to do. The
+ * fields here are the ones that separate those cases.
+ */
+export function renderCrewDiagnostic(
+  agents: readonly {
+    agentId: string;
+    role?: string;
+    taskResult: {
+      status: string;
+      error?: string;
+      lifecycle?: readonly AgentLifecycleEvent[];
+      lifecycleMetrics?: LifecycleMetrics;
+    };
+    budgetUsed?: { tokensUsed?: number; tokensRemaining?: number };
+  }[],
+): string {
+  const lines: string[] = [];
+
+  agents.forEach((agent, i) => {
+    const result = agent.taskResult;
+    const metrics = result.lifecycleMetrics;
+    const events = result.lifecycle ?? [];
+    const last = events[events.length - 1];
+    // `ready` here means the run ended without ever reaching a model or a tool.
+    const failedFrom = last !== undefined && (last.to === 'failed' || last.to === 'cancelled')
+      ? last.from
+      : undefined;
+    const used = agent.budgetUsed?.tokensUsed;
+    const ceiling = used !== undefined && agent.budgetUsed?.tokensRemaining !== undefined
+      ? used + agent.budgetUsed.tokensRemaining
+      : undefined;
+
+    lines.push(`Agent ${i + 1} / ${agent.role ?? agent.agentId}`);
+    lines.push(`  status:      ${result.status}`);
+    if (result.error) lines.push(`  error:       ${result.error.split('\n')[0]}`);
+    if (failedFrom) lines.push(`  failedFrom:  ${failedFrom}`);
+    lines.push(`  modelCalls:  ${metrics?.modelCalls ?? 0}`);
+    lines.push(`  toolCalls:   ${metrics?.toolCalls ?? 0}`);
+    lines.push(`  tokens:      ${used ?? 0}${ceiling !== undefined ? ` / ${ceiling}` : ''}`);
+  });
+
+  return lines.join('\n');
+}

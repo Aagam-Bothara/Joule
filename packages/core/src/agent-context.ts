@@ -98,9 +98,14 @@ function buildBlackboardContext(blackboard: Blackboard, currentAgentId: string):
     if (entry.status === 'running') {
       return `[${entry.agentId}${statusLabel}]: (in progress)`;
     }
-    const valueStr = typeof entry.value === 'string'
-      ? entry.value.slice(0, 500)
-      : JSON.stringify(entry.value).slice(0, 500);
+    // An agent that failed has no result to hand on, and `JSON.stringify`
+    // returns undefined — not a string — for undefined. Calling .slice on that
+    // threw here, inside the context builder, so the exception landed on the
+    // *next* agent and removed it from the run; with the entry still on the
+    // blackboard, it removed every agent after that one too. The failure is
+    // still reported, through the status label, rather than hidden.
+    const serialized = typeof entry.value === 'string' ? entry.value : JSON.stringify(entry.value);
+    const valueStr = serialized === undefined ? '(no result)' : serialized.slice(0, 500);
     return `[${entry.agentId}${statusLabel}]: ${valueStr}`;
   });
 
