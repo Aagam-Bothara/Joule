@@ -2,18 +2,18 @@
 
 # Joule
 
-### Run your agent on a small model. Escalate only the step that needs a big one.
+### The agent says it is done. The tests still fail. Joule checks before it believes.
 
-Joule is an agent runtime that makes a small language model the executor, verifies every step
-deterministically, and asks a large model for help only when the evidence says the small model
-is stuck: one focused question first, a full handoff only if that fails. Every escalation is
-gated by a hard budget.
+Joule is a verification-driven agent runtime. It never treats an agent's own report of success as
+evidence: after a stage finishes, Joule runs the task's real check — your test command, an exit
+code, a compile — and continues only when that check disagrees with the agent. When it escalates,
+it hands the next agent the actual failure output, and it stops the moment the check passes.
 
-[Quickstart](#quickstart) · [How it works](#how-it-works) · [Results](#results) · [Examples](#examples) · [Docs](#documentation)
+[Quickstart](#quickstart) · [How it works](#how-it-works) · [Results](#results) · [Limitations](#limitations) · [Benchmarks](benchmarks/README.md)
 
 ![CI](https://github.com/Aagam-Bothara/Joule/actions/workflows/test.yml/badge.svg)
 ![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)
-![Tests](https://img.shields.io/badge/tests-1205%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-1405%20passing-brightgreen)
 ![TypeScript](https://img.shields.io/badge/TypeScript-100%25-blue)
 ![Node.js](https://img.shields.io/badge/node-%3E%3D22-brightgreen)
 
@@ -60,7 +60,198 @@ tests failed twice, one question to the large model unblocked it, and the small 
 
 ---
 
+## Why Joule
+
+An agent reports that the task is complete. The tests still fail.
+
+Most runtimes respond in one of three ways: trust the report, retry blindly, or run a whole crew
+of specialists on every task whether or not the first agent already succeeded. The first is wrong
+whenever the agent is wrong. The second throws away what the failure actually said. The third pays
+for reviewers and testers on the majority of tasks that never needed them.
+
+Joule checks the work against reality and escalates only when that check disagrees with the agent.
+This is not a hypothetical failure mode. On our authored debugging benchmark, **eight of ten
+lone-agent failures stopped voluntarily** — believing they were finished, with most of their turn
+budget unused and no write attempted. An agent's own account of its work is not evidence.
+
+---
+
 ## How it works
+
+Two escalations, both triggered by evidence rather than by a model's self-assessment.
+
+**Across agents — staged recovery** (`strategy: 'staged_recovery'`). The next specialist runs only
+if the external check says the previous one did not actually succeed:
+
+```
+Task
+ ↓
+Implementer ──► external check ──► PASS ──► finish          (1 stage)
+                     │
+                    FAIL
+                     ▼
+             Reviewer + failure evidence ──► check ──► PASS ──► finish   (2 stages)
+                     │
+                    FAIL
+                     ▼
+             Tester + failure evidence ──► check ──► finish              (3 stages)
+```
+
+Two distinct mechanisms are at work, and we measured them separately:
+
+| mechanism | what it does | what it buys |
+|---|---|---|
+| **failure evidence** | the recovery agent receives the check's command and real output, not a summary | recovery quality |
+| **conditional admission** | a stage that is not needed is never started — no context built, no model called | efficiency |
+
+**Inside one task — the escalation ladder.** A small model executes, every step is verified, and a
+larger model is consulted or handed off only when the evidence says the small model is stuck. That
+mechanism and its benchmarks are [further down](#escalating-inside-one-task).
+
+---
+
+## Results
+
+**Authored repository-debugging benchmark: 10 repositories with one planted defect each, 3
+repetitions, 30 cells per arm, `deepseek-v4-flash`, verified-edit gate on.** Each task gives the
+agent a failing suite and nothing about where the defect is. All four arms share the same agents,
+prompts, tools, budgets and verifier — only the execution policy differs.
+
+| arm | success | mean cost | mean tokens | mean JCT | mean stages |
+|---|---:|---:|---:|---:|---:|
+| `PRIMARY` — implementer alone | 15/30 | $0.0021 | 16,282 | 36s | 1.00 |
+| `FULL` — all three, every time | 27/30 | $0.0053 | 40,290 | 96s | 3.00 |
+| `FULL_VERIFY` — all three, verified between stages | 30/30 | $0.0046 | 34,478 | 81s | 3.00 |
+| `STAGED` — escalate only on failure | 30/30 | $0.0027 | 20,348 | 46s | 1.53 |
+
+The two middle rows are the ablation that separates the mechanisms:
+
+```
+FULL → FULL_VERIFY      same 3 stages; difference is verifier evidence
+                        27/30 → 30/30
+
+FULL_VERIFY → STAGED    same verifier-informed specialists; difference is stopping on PASS
+                        30/30 → 30/30,  cost −41%,  tokens −41%,  JCT −43%
+```
+
+Read carefully:
+
+- `FULL_VERIFY` and `STAGED` **matched on all 30 paired cells** — 30 both-pass, 0 either-only. The
+  efficiency was not bought with quality on this benchmark.
+- `30/30` against `FULL`'s `27/30` rests on 3 discordant pairs, McNemar exact **p = 0.25**. That is
+  directional, not statistically significant, and it is not proof of general reliability.
+- `STAGED` does not "beat" `FULL_VERIFY`. It matches it for less work.
+
+Scoped claim: *on a 30-cell authored repository-debugging benchmark with DeepSeek V4 Flash, STAGED
+matched FULL_VERIFY's 30/30 outcomes while reducing mean cost and tokens by 41% and wall-clock by
+43%.* It is not a claim about your repository, your model, or agents in general.
+
+---
+
+## Why not just run another agent?
+
+The gain is not "a second attempt". We ran the control that separates those, on a 15-cell authored
+benchmark — same model, same tools, same ceilings, same position in the pipeline, **only the second
+agent's instructions differ**:
+
+| second seat | success | write attempts |
+|---|---:|---:|
+| none (implementer alone) | 5/15 | — |
+| **reviewer** — told to assume a defect exists and fix it | **9/15** | 4 proposed, 3 accepted |
+| **a second implementer** — same prompt as the first | 4/15 | **0 in 15 runs** |
+
+A copy of the primary inherits the primary's belief that the work is finished. It reads the code,
+sees something that looks complete, and never edits anything. The measured benefit came from a
+differently framed recovery role explicitly tasked with finding and fixing a defect — not from
+handing the task to another fresh context, and not from more compute.
+
+Tested on one model and one authored workload; we have not shown this holds for other models or
+for real repositories.
+
+---
+
+## Recovery funnel
+
+Across the 30 `STAGED` cells:
+
+```
+30 runs
+├── 19  solved by the implementer            → 63% stop after one agent
+└── 11  failed verification
+     ├──  6  recovered by the reviewer       → 37% reach the reviewer
+     └──  5  still failing
+          └── 5  recovered by the tester     → 17% reach the tester
+
+final: 30/30
+```
+
+This is the resource mechanism made concrete: the majority of tasks never pay for a specialist, and
+the ones that do pay only for as many as the evidence demands. In 10 of the 11 recoveries the
+agent that fixed the repository also named the planted cause in its own report.
+
+---
+
+## What happens after the check already passes
+
+`FULL_VERIFY` exists partly to answer this. It deliberately runs specialists on repositories that
+have **already passed** verification:
+
+```
+41  specialist stages entered after a passing check
+41  made no edit at all
+ 0  accepted improvements
+ 0  rollbacks
+ 0  regressions
+```
+
+On this workload and model, once external verification passed, continuing to run specialists
+produced no measured benefit — and no measured harm either. It was simply cost. That is the direct
+empirical justification for conditional admission, and the reason `STAGED` can skip 44 of
+`FULL_VERIFY`'s 60 specialist stages without losing a single outcome.
+
+We do not generalize this to all agents, models or tasks. A more eager specialist would turn that
+pure cost into real regression risk — which is what the gate below is for.
+
+---
+
+## Safety: verified edits
+
+`VerifiedEditGate` protects work that is already known to be good:
+
+```
+No passing state yet   →  agents edit freely (they are still working toward the first success)
+A passing state exists →  a later edit is checked
+                          PASS → keep it
+                          FAIL → restore the previously verified state
+```
+
+It was added after wider crews were observed destroying solutions that earlier agents had already
+gotten working. It is a narrow safety net — a check-and-restore around writes, not a general
+transactional store. It does no patch merging, no conflict resolution and no branching. Across the
+runs above it recorded zero rollbacks, which is consistent with specialists that abstain rather
+than meddle.
+
+---
+
+## Observability
+
+Every run records, per agent:
+
+```
+lifecycle states and timings      model calls          tool calls and tool identities
+write attempts                    accepted writes      rolled-back writes
+verification result after stage   cost and tokens      failure reason and stage reached
+which stage solved the task       stages skipped, and why
+```
+
+The point of recording tool *identity* and *accepted* writes, rather than counts alone, is to tell
+"the agent was busy" apart from "the agent made a verified contribution". Two of this project's
+conclusions had to be thrown out because the earlier instrumentation could not make that
+distinction — see [benchmarks/README.md](benchmarks/README.md).
+
+---
+
+## Escalating inside one task
 
 ```
 Task
@@ -84,7 +275,7 @@ Escalation policy
 
 ---
 
-## Results
+## Results: the escalation ladder
 
 **MBPP, 200 unseen problems, Llama 3.1 8B as the small model, Gemini 2.5 Flash as the large one.**
 The small-model-only baseline ran three times per problem to label which problems actually need
@@ -343,13 +534,18 @@ Set up teams of agents with different roles:
 joule crew run research-team "Analyze the competitive landscape"
 ```
 
-Four strategies:
+Strategies:
+- **`staged_recovery`** — verify after each agent; run the next one only if the check fails
+- **`verified_full`** — run every agent, but still verify between stages and hand the result on
+  (the control arm used in [Results](#results))
 - **Sequential** — agents run in order, each builds on previous output
 - **Parallel** — everyone runs at once, results get merged
 - **Hierarchical** — manager delegates subtasks to workers
-- **Debate** — agents argue, best response wins
+- **Graph** — a DAG with conditional edges
 
-Every agent in the crew gets its own budget slice. The whole crew stays within cost limits.
+Every agent in the crew gets its own budget slice. With `budgetMode: 'fixed_per_agent'` each agent
+instead receives the full per-agent ceiling, so adding a recovery stage does not shrink the budget
+of the agent doing the primary work — the configuration used for every benchmark above.
 
 ### Model Routing
 
@@ -393,22 +589,85 @@ console.log(`Tokens: ${result.budgetUsed.tokensUsed}`);
 console.log(`Energy: ${result.budgetUsed.energyWh.toFixed(4)} Wh`);
 ```
 
-### Multi-agent crew
+### Staged recovery
+
+The verification command lives on the **task**, not the crew — it is a property of the work, and
+the same crew can be pointed at any repository that knows how to check itself. Its exit code is
+the only thing that decides whether the next agent runs.
 
 ```typescript
 import { Joule } from '@joule/core';
+import type { AgentDefinition, CrewDefinition, Task } from '@joule/shared';
 
 const joule = new Joule();
 await joule.initialize();
 
-// Run a pre-built crew template
-const result = await joule.executeCrew('CODE_REVIEW_CREW', {
+const tools = ['file_read', 'file_write', 'shell_exec'];
+
+const implementer: AgentDefinition = {
+  id: 'implementer', role: 'Implementer', allowedTools: tools, maxIterations: 16,
+  instructions: 'Fix the repository so its tests pass. Read what you need, correct the source, then run the tests.',
+};
+const reviewer: AgentDefinition = {
+  id: 'reviewer', role: 'Reviewer', allowedTools: tools, maxIterations: 10,
+  instructions:
+    'The previous agent believes the task is complete, but verification shows the repository is still failing. '
+    + 'Assume a concrete defect exists: find the specific cause and fix it rather than describing it.',
+};
+const tester: AgentDefinition = {
+  id: 'tester', role: 'Tester', allowedTools: tools, maxIterations: 10,
+  instructions: 'Both earlier attempts failed verification. Use the failing evidence to isolate and repair the remaining defect.',
+};
+
+const crew: CrewDefinition = {
+  name: 'staged-debug',
+  strategy: 'staged_recovery',   // 'verified_full' runs every stage but still verifies between them
+  agents: [implementer, reviewer, tester],
+  budget: 'high',
+  budgetMode: 'fixed_per_agent', // a recovery stage does not shrink the primary's budget
+};
+
+const task: Task = {
+  id: 'fix-failing-suite',
+  description: 'The test suite in this repository fails. Find the cause and fix it.',
+  createdAt: new Date().toISOString(),
+  // The external check. Exit code 0 means done; anything else escalates.
+  verifiedEdit: { command: 'npm test', cwd: '/path/to/repo', timeoutMs: 120_000 },
+};
+
+const result = await joule.executeCrew(crew, task);
+
+console.log(result.staged?.stagesExecuted); // 1 when the implementer's work already passes
+console.log(result.staged?.solvedAtStage);  // which stage the check first accepted
+console.log(result.staged?.solvedByRole);   // e.g. 'Implementer'
+console.log(result.status);                 // decided by the verifier, not by the agents
+```
+
+If the implementer's work passes the check, the reviewer and tester are **never instantiated** — no
+context is built, no envelope is drawn, no model is called. They appear in `result.staged.stages`
+marked `executed: false` with `skipReason: 'verification_already_passed'`, so a skipped stage is
+never confused with an agent that ran and did nothing.
+
+`staged_recovery` and `verified_full` require `task.verifiedEdit`. Without it the run fails with an
+explicit error rather than guessing — escalation has to be decided by something outside the agent.
+
+### Multi-agent crew (template)
+
+```typescript
+import { Joule, CODE_REVIEW_CREW } from '@joule/core';
+
+const joule = new Joule();
+await joule.initialize();
+
+const result = await joule.executeCrew(CODE_REVIEW_CREW, {
+  id: 'review-auth',
   description: 'Review the authentication module for security issues',
+  createdAt: new Date().toISOString(),
   budget: 'high',
 });
 
-for (const step of result.stepResults) {
-  console.log(`[${step.agentRole}] ${step.description}`);
+for (const agent of result.agentResults) {
+  console.log(`[${agent.role}] ${agent.taskResult.status}`);
 }
 ```
 
@@ -462,7 +721,7 @@ See [`examples/`](examples/) for more runnable scripts.
 
 ---
 
-## Observability
+## Tracing and metrics
 
 Joule includes a React dashboard and built-in tracing:
 
@@ -501,6 +760,26 @@ Joule is a TypeScript monorepo with 9 packages:
 @joule/channels   — Slack, Discord, Telegram, WhatsApp, Signal, Teams, Email + more
 @joule/dashboard  — React + Vite monitoring UI
 ```
+
+The staged-recovery path runs entirely inside `@joule/core`:
+
+```
+Joule runtime
+├── crew orchestrator      stage loop; one strategy decides whether a passing check ends the run
+├── external verifier      runs the task's check command; its exit code is the only signal
+├── recovery handoff       previous agent's prose + the check's command and real output
+├── VerifiedEditGate       check-and-restore around writes once a passing state exists
+├── budget manager         per-agent envelopes (shared slice, or fixed per agent)
+├── lifecycle + tracing    per-agent states, tool identities, writes, cost
+├── tools                  what agents may call, filtered per agent
+└── model/provider adapters
+```
+
+Execution is `agent → tools → workspace → verifier → stage policy`. The policy is the only
+difference between `staged_recovery` and `verified_full`; everything else on that path is shared,
+which is what made the ablation in [Results](#results) a single-variable comparison. The code is in
+[`crew-orchestrator.ts`](packages/core/src/crew-orchestrator.ts) (stage loop and handoff) and
+[`verified-edit.ts`](packages/core/src/verified-edit.ts) (verifier and gate).
 
 For detailed architecture diagrams and data flow, see [`docs/architecture.md`](docs/architecture.md).
 
@@ -603,9 +882,51 @@ system_insights:
 
 ---
 
+## Limitations
+
+What the staged-recovery evidence does **not** cover:
+
+- **Real repositories are not validated.** Every staged-recovery number above comes from
+  repositories we authored with planted defects. We built a SWE-bench Lite harness to test external
+  validity and it works — real images, real issues, hidden tests, the official pass criterion — but
+  the runs are blocked short of a measurement. Under the frozen configuration, agents navigate a
+  large unfamiliar repository and **never attempt an edit**: zero `repo_write`/`repo_edit` calls
+  across 12 agent runs with DeepSeek V4 Flash, and zero again in a single probe with a stronger
+  coding model, which exhausted its token budget still reading. With the primary never passing,
+  `STAGED` degenerates into `FULL_VERIFY` and the comparison is null by construction, so the paid
+  benchmark was stopped rather than run to a meaningless 0-vs-0 result. **This is a current model
+  and navigation capability floor, not evidence that staged recovery fails on real repositories.**
+- **One model, one provider.** Everything is DeepSeek V4 Flash on OpenRouter. No multi-model
+  generalization has been shown.
+- **Small samples.** 30 cells per arm on 10 authored fixtures; the earlier control is 15 cells. The
+  quality effect (`FULL` → `FULL_VERIFY`) is directional at p = 0.25, not significant.
+- **The verifier is as good as your check.** Joule's guarantee is only ever "this command exited
+  0". A weak test suite gives a weak signal, and the gate inherits that.
+- **The gate is narrow.** Check-and-restore around writes — no patch merging, no conflict
+  resolution, no branching.
+- **Not production-hardened.** This is a research prototype.
+
+For the full experimental history — including invalidated datasets, the harness bugs that
+invalidated them, the controls, and the negative results — see
+[benchmarks/README.md](benchmarks/README.md). Two earlier conclusions in this project were wrong
+and are documented as wrong rather than deleted.
+
+---
+
 ## Current Status
 
-**1140 tests passing across 91 files.** Active development — expect API refinements.
+**Research prototype / experimental runtime.** 1405 tests passing across 106 files. Active
+development — expect API refinements.
+
+Supported by authored-fixture evidence:
+- verifier-informed recovery handoff improves specialist recovery
+- verification-triggered staging avoids specialist work that measurably contributes nothing
+- the benefit comes from the recovery role's framing, not from a second attempt
+
+Not established:
+- broad real-repository generalization
+- multi-model generalization
+- production reliability
 
 What's solid:
 - Core runtime (task execution, budget, routing, crews, governance)
@@ -652,7 +973,7 @@ Known limitations:
 ```bash
 pnpm install       # install dependencies
 pnpm build         # build all 9 packages
-pnpm test          # 1140 tests across 91 files
+pnpm test          # 1405 tests across 106 files
 pnpm dev           # watch mode
 ```
 
