@@ -21,20 +21,14 @@ async function main() {
     },
     approval: {
       mode: 'automatic',
-      policies: [
-        {
-          name: 'dangerous-tools',
-          type: 'tool',
-          match: ['delete_files', 'shell_exec'],
-          action: 'deny', // Block these tools entirely in this demo
-        },
-        {
-          name: 'cost-gate',
-          type: 'cost',
-          threshold: 0.10,
-          action: 'require_approval',
-        },
-      ],
+      // Approval gates the risky actions; the constitution below is what
+      // actually forbids a tool outright.
+      requireApprovalFor: {
+        toolNames: ['delete_files', 'shell_exec'],
+        riskLevels: ['high', 'critical'],
+        costThresholdUsd: 0.10,
+      },
+      autoApproveFor: { riskLevels: ['low'] },
     },
   });
   await joule.initialize();

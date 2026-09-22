@@ -7,12 +7,13 @@
  */
 
 import { Joule } from '@joule/core';
+import type { JouleConfig } from '@joule/shared';
 import { z } from 'zod';
 
 async function main() {
   const joule = new Joule({
-    // Use whatever provider is available
-    routing: { preferLocal: true },
+    // Use whatever provider is available; the rest keep their defaults.
+    routing: { preferLocal: true } as JouleConfig['routing'],
   });
   await joule.initialize();
 
@@ -58,14 +59,16 @@ async function main() {
   console.log(`  Time:        ${b.elapsedMs}ms`);
   console.log(`  Tool calls:  ${b.toolCallsUsed}`);
   console.log(`  Escalations: ${b.escalationsUsed}`);
-  console.log(`  Energy:      ${b.energyWh.toFixed(6)} Wh`);
-  console.log(`  Carbon:      ${b.carbonGrams.toFixed(6)} g CO₂`);
+  console.log(`  Energy:      ${(b.energyWh ?? 0).toFixed(6)} Wh`);
+  console.log(`  Carbon:      ${(b.carbonGrams ?? 0).toFixed(6)} g CO₂`);
 
   if (result.efficiencyReport) {
     console.log('');
     console.log('--- Efficiency ---');
-    console.log(`  Energy/token: ${result.efficiencyReport.energyPerToken.toFixed(8)} Wh`);
-    console.log(`  Rating:       ${result.efficiencyReport.efficiencyRating}`);
+    const eff = result.efficiencyReport;
+    console.log(`  Energy:       ${eff.actualEnergyWh.toFixed(6)} Wh`);
+    console.log(`  Baseline:     ${eff.baselineEnergyWh.toFixed(6)} Wh (${eff.baselineModel})`);
+    console.log(`  Saved:        ${eff.savedEnergyWh.toFixed(6)} Wh (${eff.savingsPercent.toFixed(1)}%)`);
   }
 
   await joule.shutdown();

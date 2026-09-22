@@ -22,6 +22,7 @@
     "build": "pnpm -r build",
     "test": "vitest",
     "test:run": "vitest run",
+    "joule": "node packages/cli/dist/bin/joule.js",
     "lint": "eslint packages/",
     "clean": "pnpm -r clean",
     "dev": "pnpm -r --parallel dev",
