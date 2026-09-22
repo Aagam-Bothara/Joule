@@ -182,7 +182,7 @@ export function evaluateInstance(item: SweItem, container: string, hostDir: stri
 
 // ── tools ───────────────────────────────────────────────────────────
 
-function repoTools(container: () => string, shadowDir: string): ToolDefinition[] {
+export function repoTools(container: () => string, shadowDir: string): ToolDefinition[] {
   const repoShell: ToolDefinition = {
     name: 'repo_shell',
     description: 'Run a shell command inside the repository (working directory is the repository root, Python environment active). Arguments: command (string, required). Returns stdout, stderr and exitCode. Use it to search (grep -rn), run scripts (python -c "..."), and run tests (pytest path/to/test.py -x -q).',

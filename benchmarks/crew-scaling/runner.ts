@@ -13,7 +13,7 @@ import { Joule } from '@joule/core';
 import { OllamaProvider, OpenAIProvider } from '@joule/models';
 import { fileReadTool, fileWriteTool, shellExecTool } from '@joule/tools';
 import { generateId } from '@joule/shared';
-import type { CrewDefinition, CrewResult, ModelProviderName, Task } from '@joule/shared';
+import type { CrewDefinition, CrewResult, ModelProviderName, Task, ToolDefinition } from '@joule/shared';
 import { sanitizeFailure } from '../lifecycle/record.js';
 import { crewForWidth, roleNames } from './crews.js';
 import { contributionOf } from './record.js';
@@ -55,6 +55,8 @@ export interface RunnerOptions {
   seeds?: number;
   /** Turn the verified-edit gate on for every run */
   verifiedEdit?: boolean;
+  /** Tools the agents get; defaults to the local file and shell trio */
+  tools?: ToolDefinition[];
   provider: string;
   model: string;
   outDir: string;
@@ -208,7 +210,7 @@ export async function runCrewScaling(opts: RunnerOptions): Promise<CrewScalingRe
     await joule.shutdown();
     throw err;
   }
-  for (const tool of [fileReadTool, fileWriteTool, shellExecTool]) joule.registerTool(tool);
+  for (const tool of opts.tools ?? [fileReadTool, fileWriteTool, shellExecTool]) joule.registerTool(tool);
 
   const records: CrewScalingRecord[] = [];
   const startedAt = new Date().toISOString();
@@ -223,7 +225,11 @@ export async function runCrewScaling(opts: RunnerOptions): Promise<CrewScalingRe
           description: prepared.description,
           createdAt: new Date().toISOString(),
           ...(opts.verifiedEdit
-            ? { verifiedEdit: { command: 'python run_tests.py', cwd: prepared.dir, timeoutMs: 30_000 } }
+            ? {
+              verifiedEdit: prepared.verifyCommand !== undefined
+                ? { command: prepared.verifyCommand, timeoutMs: 900_000 }
+                : { command: 'python run_tests.py', cwd: prepared.dir, timeoutMs: 30_000 },
+            }
             : {}),
         };
         process.stderr.write(`${task.workloadId} w${width} s${seed}: `);

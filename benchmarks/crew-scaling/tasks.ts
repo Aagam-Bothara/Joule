@@ -79,6 +79,12 @@ function testScript(task: ScalingTask): string {
 export interface PreparedTask {
   dir: string;
   description: string;
+  /**
+   * Host command whose exit code decides whether the workspace passes. When a
+   * workload supplies one it replaces the default; a real repository's check
+   * runs inside its container rather than in this directory.
+   */
+  verifyCommand?: string;
   /** Rewrites the tests, runs them, and reports whether they all passed. */
   verify(): { success: boolean; output: string };
 }
