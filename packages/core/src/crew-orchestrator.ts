@@ -50,19 +50,39 @@ interface StagedRun {
 }
 
 /**
- * An agent's answer with any tool-call JSON removed.
+ * An agent's answer with any tool-call protocol removed.
  *
  * A run that ends without a clean answer stores whatever the model last said,
- * which is often a raw `{"tool_calls": ...}` blob. Pasting that into the next
- * agent's prompt shows it the response format inside its own input, and it
- * imitates the shape: measured on the staged comparison, every recovery agent
- * that was handed such a blob ended by emitting nested tool calls the parser
- * could not execute, so it stopped before writing anything. Only the prose is
- * useful to a successor, so only the prose is passed on.
+ * which is often a raw tool call. Pasting that into the next agent's prompt
+ * shows it the response format inside its own input, and it imitates the shape:
+ * measured on the staged comparison, every recovery agent handed such a blob
+ * ended by emitting tool calls the parser could not execute, so it stopped
+ * before writing anything.
+ *
+ * The protocol arrives in more than one shape. Beyond the JSON this runtime
+ * asks for, agents emit it as markup (`<tool_calls><toolName>…`), as a model's
+ * own special tokens (`<｜DSML｜…>`), and inside fenced blocks — each of which
+ * reached a tester in the staged run. Everything from the first such marker on
+ * is dropped; only the prose before it is useful to a successor.
  */
+const PROTOCOL_MARKERS: RegExp[] = [
+  // The JSON protocol this runtime asks for.
+  /\{\s*"(tool_calls|toolName|tool_cmd)"/,
+  // The same protocol written as markup, which models emit unprompted.
+  /<\/?\s*(tool_calls|toolName|tool_call)\s*>/i,
+  // Native special-token markup, e.g. DeepSeek's <｜DSML｜…>.
+  /<｜/,
+  // A fenced block introducing protocol, including one left unterminated.
+  /```\s*json/i,
+];
+
 export function proseOnly(text: string): string {
-  const blob = text.search(/\{\s*"(tool_calls|toolName|tool_cmd)"/);
-  const prose = (blob >= 0 ? text.slice(0, blob) : text).trim();
+  let cut = text.length;
+  for (const marker of PROTOCOL_MARKERS) {
+    const match = marker.exec(text);
+    if (match !== null && match.index < cut) cut = match.index;
+  }
+  const prose = text.slice(0, cut).trim();
   return prose.length > 0 ? prose : '(the previous agent left no usable summary)';
 }
 

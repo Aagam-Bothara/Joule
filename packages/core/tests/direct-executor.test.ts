@@ -265,8 +265,10 @@ describe('DirectExecutor', () => {
     });
   });
 
-  describe('circuit breaker', () => {
-    it('should break circuit after repeated same-tool calls', async () => {
+  describe('loop detection', () => {
+    it('keeps a tool available when the same tool is called with new arguments', async () => {
+      // The Dataset F pattern: read one file, then another, then another.
+      // Counting tool identity called this a loop and confiscated the tool.
       const { executor, envelope } = buildExecutor([
         '{"tool_calls": [{"toolName": "test_tool", "toolArgs": {"query": "a"}}]}',
         '{"tool_calls": [{"toolName": "test_tool", "toolArgs": {"query": "b"}}]}',
@@ -278,7 +280,54 @@ describe('DirectExecutor', () => {
       const result = await executor.execute(makeTask(), envelope, makeAgent());
 
       expect(result.status).toBe('completed');
-      // The circuit breaker should have kicked in after 3 consecutive calls
+      // Every one of the four calls did real work.
+      expect(result.lifecycleMetrics?.toolCalls).toBe(4);
+    });
+
+    it('refuses a call identical to the one just made', async () => {
+      const { executor, envelope, provider } = buildExecutor([
+        '{"tool_calls": [{"toolName": "test_tool", "toolArgs": {"query": "same"}}]}',
+        '{"tool_calls": [{"toolName": "test_tool", "toolArgs": {"query": "same"}}]}',
+        '{"tool_calls": [{"toolName": "test_tool", "toolArgs": {"query": "same"}}]}',
+        '{"answer": "stopped repeating"}',
+      ]);
+
+      const result = await executor.execute(makeTask(), envelope, makeAgent());
+
+      // Two executions, then the third identical call is refused rather than run.
+      expect(result.lifecycleMetrics?.toolCalls).toBe(2);
+      const history = provider.chat.mock.calls[3][0].messages
+        .map((m: { content: string }) => m.content).join('\n');
+      expect(history).toContain('REPEATED CALL');
+    });
+
+    it('lets an agent carry on with the same tool after a refused repeat', async () => {
+      const { executor, envelope } = buildExecutor([
+        '{"tool_calls": [{"toolName": "test_tool", "toolArgs": {"query": "same"}}]}',
+        '{"tool_calls": [{"toolName": "test_tool", "toolArgs": {"query": "same"}}]}',
+        '{"tool_calls": [{"toolName": "test_tool", "toolArgs": {"query": "same"}}]}',
+        // A different argument is different work: the tool was never taken away.
+        '{"tool_calls": [{"toolName": "test_tool", "toolArgs": {"query": "moved on"}}]}',
+        '{"answer": "done"}',
+      ]);
+
+      const result = await executor.execute(makeTask(), envelope, makeAgent());
+
+      expect(result.status).toBe('completed');
+      expect(result.lifecycleMetrics?.toolCalls).toBe(3);
+    });
+
+    it('treats argument order as the same call', async () => {
+      const { executor, envelope } = buildExecutor([
+        '{"tool_calls": [{"toolName": "test_tool", "toolArgs": {"query": "x", "extra": 1}}]}',
+        '{"tool_calls": [{"toolName": "test_tool", "toolArgs": {"extra": 1, "query": "x"}}]}',
+        '{"tool_calls": [{"toolName": "test_tool", "toolArgs": {"extra": 1, "query": "x"}}]}',
+        '{"answer": "done"}',
+      ]);
+
+      const result = await executor.execute(makeTask(), envelope, makeAgent());
+
+      expect(result.lifecycleMetrics?.toolCalls).toBe(2);
     });
   });
 

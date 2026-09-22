@@ -316,6 +316,39 @@ describe('staged recovery', { timeout: 60_000 }, () => {
     expect(handover).not.toContain('"toolName"');
   });
 
+  it('8c. strips tool-call protocol in every shape it arrives in', async () => {
+    // All three reached a tester in the staged run: markup, a model's own
+    // special tokens, and a fence left open at the end of an answer.
+    const shapes = [
+      'Prose first.\n<tool_calls>\n  <toolName>shell_exec</toolName>\n</tool_calls>',
+      'Prose first.\n<｜DSML｜ll_func:shell_exec>\n  <command>cat pkg/report.py</command>',
+      'Prose first.\n```json\n{"command": "python run_tests.py"}',
+    ];
+
+    for (const shape of shapes) {
+      // Each shape starts from a failing workspace, or the previous iteration's
+      // repair would make stage 1 pass and no reviewer would run.
+      rmSync(join(dir, 'work.txt'), { force: true });
+      const { orchestrator, crew, provider } = build({
+        Implementer: [JSON.stringify({ answer: shape })],
+        Reviewer: [write('GOOD'), '{"answer": "fixed"}'],
+      });
+
+      await run(orchestrator, crew);
+
+      const reviewerCall = provider.chat.mock.calls.find(
+        (c: [{ system?: string }]) => (c[0].system ?? '').includes('You are: Reviewer'),
+      );
+      const handover = (reviewerCall![0] as { messages: Array<{ content: string }> }).messages[0].content;
+
+      expect(handover).toContain('Prose first.');
+      expect(handover).not.toContain('<tool_calls>');
+      expect(handover).not.toContain('｜DSML');
+      expect(handover).not.toContain('```json');
+      expect(handover).not.toContain('toolName');
+    }
+  });
+
   it('9. never hands an agent a coerced object', async () => {
     const { orchestrator, crew, provider } = build({
       Implementer: [

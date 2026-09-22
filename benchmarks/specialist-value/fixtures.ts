@@ -22,7 +22,14 @@ export type DefectType =
   | 'edge-case'
   | 'cross-module-state'
   | 'wrong-algorithm'
-  | 'numeric-precision';
+  | 'numeric-precision'
+  // Classes added for the replication set; the five above are Dataset F's.
+  | 'cross-file-state'
+  | 'import-interaction'
+  | 'stale-cache'
+  | 'boundary'
+  | 'data-transformation'
+  | 'error-behavior';
 
 export interface PlantedDefect {
   type: DefectType;

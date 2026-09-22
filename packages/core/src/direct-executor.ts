@@ -46,14 +46,34 @@ interface TraceSpan {
   metadata?: Record<string, unknown>;
 }
 
+/** A call's identity: the tool plus its arguments, with key order normalized. */
+function callSignature(toolName: string, args: Record<string, unknown>): string {
+  const stable = Object.keys(args)
+    .sort()
+    .map(key => `${key}=${JSON.stringify(args[key])}`)
+    .join('&');
+  return `${toolName}(${stable})`;
+}
+
 /** Default wall-clock timeout for the entire execution loop (5 minutes). */
 const DEFAULT_WALL_TIMEOUT_MS = 5 * 60 * 1000;
 
 /** Maximum number of messages before sliding window kicks in. */
 const MAX_MESSAGE_HISTORY = 20;
 
-/** Maximum consecutive calls to the same tool before circuit-breaking. */
-const MAX_SAME_TOOL_CONSECUTIVE = 3;
+/**
+ * Maximum consecutive times the *same call* may be repeated before it is
+ * refused.
+ *
+ * The signal for a stuck agent is an identical call — same tool, same
+ * arguments — returning the same result over and over. Reaching for one tool
+ * repeatedly is not that: reading three files in a row, or running a command
+ * and then re-running it after an edit, is ordinary work on a repository.
+ * Counting tool identity instead of call identity misread that as a loop and
+ * took the tool away: in Dataset F it disabled `file_read` and `shell_exec` for
+ * four testers, which then had nothing left to work with.
+ */
+const MAX_IDENTICAL_TOOL_CALLS = 3;
 
 /** Maximum size for a single tool argument value in characters. */
 const MAX_TOOL_ARG_SIZE = 50_000;
@@ -129,10 +149,11 @@ export class DirectExecutor {
     let lastError: string | undefined;
     const traceSpans: TraceSpan[] = [];
 
-    // Circuit breaker state: track consecutive calls to same tool
-    let lastToolName: string | undefined;
-    let sameToolCount = 0;
-    const circuitBrokenTools = new Set<string>();
+    // Loop detection: the last call made, and how many times in a row it has
+    // been repeated. No tool is ever taken away — only an identical repeat is
+    // refused, so the agent keeps every tool it was given.
+    let lastCallSignature: string | undefined;
+    let identicalCallCount = 0;
 
     // Report initial progress
     onProgress?.({
@@ -263,31 +284,26 @@ export class DirectExecutor {
         const toolResults: string[] = [];
 
         for (const toolCall of parsed.toolCalls) {
-          // Circuit breaker: skip tools that have been broken
-          if (circuitBrokenTools.has(toolCall.toolName)) {
-            toolResults.push(
-              `[${toolCall.toolName}] CIRCUIT BROKEN: This tool has been called too many times consecutively. Try a different approach.`,
-            );
-            continue;
-          }
+          // Sanitize tool argument sizes
+          const sanitizedArgs = this.sanitizeToolArgs(toolCall.toolArgs);
 
-          // Track consecutive same-tool calls
-          if (toolCall.toolName === lastToolName) {
-            sameToolCount++;
-            if (sameToolCount >= MAX_SAME_TOOL_CONSECUTIVE) {
-              circuitBrokenTools.add(toolCall.toolName);
+          // Refuse a call that is identical to the one just made: it would
+          // return the same result again. A different argument is different
+          // work, and the tool stays available either way.
+          const signature = callSignature(toolCall.toolName, sanitizedArgs);
+          if (signature === lastCallSignature) {
+            identicalCallCount++;
+            if (identicalCallCount >= MAX_IDENTICAL_TOOL_CALLS) {
               toolResults.push(
-                `[${toolCall.toolName}] CIRCUIT BROKEN: Called ${sameToolCount} times consecutively without progress. Try a different tool or approach.`,
+                `[${toolCall.toolName}] REPEATED CALL: this exact call has already been made ${identicalCallCount - 1} time(s) `
+                + 'and returned the same result. Change the arguments, or try something else.',
               );
               continue;
             }
           } else {
-            lastToolName = toolCall.toolName;
-            sameToolCount = 1;
+            lastCallSignature = signature;
+            identicalCallCount = 1;
           }
-
-          // Sanitize tool argument sizes
-          const sanitizedArgs = this.sanitizeToolArgs(toolCall.toolArgs);
 
           const toolSpanStart = monotonicNow();
           // Only real tool work counts as waiting; the circuit-breaker and

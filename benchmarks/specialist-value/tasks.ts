@@ -83,9 +83,15 @@ function runTests(dir: string): { success: boolean; output: string } {
   }
 }
 
-/** A fresh repository per (fixture, arm, repetition), so runs never share state. */
-export function prepareFixture(fixture: Fixture, arm: Arm, seed = 0): PreparedFixture {
-  const dir = join(SANDBOX_ROOT, arm, `s${seed}`, fixture.id);
+/**
+ * A fresh repository per (fixture, slot, repetition), so runs never share state.
+ *
+ * `slot` separates one arm's workspaces from another's. The directory is also
+ * removed and rebuilt on every call, so a run cannot inherit an earlier run's
+ * edits even when two arms share a slot.
+ */
+export function prepareFixture(fixture: Fixture, slot: Arm | string = 'A', seed = 0): PreparedFixture {
+  const dir = join(SANDBOX_ROOT, slot, `s${seed}`, fixture.id);
   rmSync(dir, { recursive: true, force: true });
   mkdirSync(dir, { recursive: true });
   writeFiles(dir, fixture.files);

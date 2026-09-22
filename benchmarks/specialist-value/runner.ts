@@ -24,14 +24,19 @@ import { join } from 'node:path';
 import type { CrewScalingRecord, CrewWidth } from '../crew-scaling/types.js';
 
 /** Fixtures, as workloads the crew-scaling runner can execute. */
-export function fixtureWorkloads(fixtures: readonly Fixture[] = FIXTURES): ScalingWorkload[] {
+export function fixtureWorkloads(
+  fixtures: readonly Fixture[] = FIXTURES,
+  slot?: string,
+): ScalingWorkload[] {
   return fixtures.map(fixture => ({
     workloadId: fixture.id,
-    prepare: (width: CrewWidth, seed: number) => prepareFixture(fixture, armOfWidth(width) ?? 'A', seed),
+    prepare: (width: CrewWidth, seed: number) => prepareFixture(fixture, slot ?? armOfWidth(width) ?? 'A', seed),
   }));
 }
 
 export interface ComparisonOptions {
+  /** Fixtures to run; defaults to Dataset F's set */
+  fixtures?: readonly Fixture[];
   fixtureIds?: string[];
   /** Repetitions per (fixture, arm) */
   seeds?: number;
@@ -55,19 +60,20 @@ export interface ComparisonOptions {
 export async function runStagedComparison(
   opts: ComparisonOptions,
 ): Promise<Array<{ arm: ComparisonArm; records: CrewScalingRecord[] }>> {
+  const available = opts.fixtures ?? FIXTURES;
   const fixtures = opts.fixtureIds && opts.fixtureIds.length > 0
     ? opts.fixtureIds.map(id => {
-      const found = fixtureById(id);
+      const found = available.find(f => f.id === id) ?? fixtureById(id);
       if (!found) throw new Error(`Unknown fixture: ${id}`);
       return found;
     })
-    : FIXTURES;
+    : available;
 
   const out: Array<{ arm: ComparisonArm; records: CrewScalingRecord[] }> = [];
   for (const arm of opts.arms && opts.arms.length > 0 ? opts.arms : COMPARISON_ARMS) {
     process.stderr.write(`\n--- arm ${arm} ---\n`);
     const records = await runCrewScaling({
-      workloads: fixtureWorkloads(fixtures),
+      workloads: fixtureWorkloads(fixtures, arm),
       crewFactory: () => comparisonCrew(arm),
       // One crew per arm, so the width loop runs once.
       widths: [1],
