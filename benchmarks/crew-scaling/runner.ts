@@ -13,17 +13,42 @@ import { Joule } from '@joule/core';
 import { OllamaProvider, OpenAIProvider } from '@joule/models';
 import { fileReadTool, fileWriteTool, shellExecTool } from '@joule/tools';
 import { generateId } from '@joule/shared';
-import type { CrewResult, ModelProviderName, Task } from '@joule/shared';
+import type { CrewDefinition, CrewResult, ModelProviderName, Task } from '@joule/shared';
 import { sanitizeFailure } from '../lifecycle/record.js';
 import { crewForWidth, roleNames } from './crews.js';
 import { contributionOf } from './record.js';
-import { loadScalingTasks, prepareTask, type ScalingTask } from './tasks.js';
+import { loadScalingTasks, prepareTask, type PreparedTask, type ScalingTask } from './tasks.js';
 import type { AgentContribution, CrewScalingRecord, CrewWidth } from './types.js';
+
+/**
+ * One unit of work the runner can give a crew, at any width.
+ *
+ * The loop below cares about three things only: what to call the workload,
+ * how to lay it out for a run, and how to judge the result. Keeping that as an
+ * interface is what lets a different experiment supply repositories with
+ * planted defects instead of MBPP problems, without a second copy of the
+ * runner and its bookkeeping.
+ */
+export interface ScalingWorkload {
+  workloadId: string;
+  prepare(width: CrewWidth, seed: number): PreparedTask;
+}
 
 export interface RunnerOptions {
   widths: CrewWidth[];
   tasks: number;
   offset: number;
+  /**
+   * Workloads to run. Defaults to the MBPP set picked out by `tasks`/`offset`,
+   * which is what datasets E and E2 used.
+   */
+  workloads?: ScalingWorkload[];
+  /**
+   * Builds the crew for a width. Defaults to the crew-scaling composition;
+   * an experiment that needs different iteration or time limits supplies its
+   * own rather than changing the definitions another dataset was run with.
+   */
+  crewFactory?: (width: CrewWidth) => CrewDefinition;
   /** Explicit workload ids; when given, `tasks`/`offset` only bound the search */
   taskIds?: string[];
   /** Repetitions per (task, width); >1 measures run-to-run variance */
@@ -76,7 +101,7 @@ function registerProvider(joule: Joule, provider: string, model: string): void {
 
 function toRecord(args: {
   runId: string;
-  task: ScalingTask;
+  task: ScalingWorkload;
   width: CrewWidth;
   seed: number;
   gateEnabled: boolean;
@@ -94,7 +119,9 @@ function toRecord(args: {
     taskId: args.joulTask.id,
     workloadId: args.task.workloadId,
     crewWidth: args.width,
-    roles: roleNames(args.width),
+    // The agents that actually ran: a custom crew factory may not match the
+    // composition the width implies.
+    roles: args.crew.agentResults.map(a => a.agentId),
     seed: args.seed,
     success: args.verdict.success,
     ...(args.verdict.success ? {} : { failureReason: args.verdict.output }),
@@ -109,6 +136,7 @@ function toRecord(args: {
     toolWaitMs: lifecycle.reduce((s, m) => s + (m?.toolWaitMs ?? 0), 0),
     activeAgents: contributions.filter(c => c.modelCalls > 0 || c.toolCalls > 0).length,
     gateEnabled: args.gateEnabled,
+    ...(args.crew.staged ? { staged: args.crew.staged } : {}),
     ...(args.gateEnabled ? {
       proposedWrites: sum(c => c.proposedWrites ?? 0),
       acceptedWrites: sum(c => c.acceptedWrites ?? 0),
@@ -121,7 +149,7 @@ function toRecord(args: {
 /** A row for a run that threw before a crew result existed. */
 function failedRun(args: {
   runId: string;
-  task: ScalingTask;
+  task: ScalingWorkload;
   width: CrewWidth;
   seed: number;
   gateEnabled: boolean;
@@ -146,24 +174,40 @@ function failedRun(args: {
   };
 }
 
+/** MBPP problems, wrapped as workloads. The default source. */
+function mbppWorkloads(count: number, offset: number): ScalingWorkload[] {
+  return loadScalingTasks(count, offset).map((task: ScalingTask) => ({
+    workloadId: task.workloadId,
+    prepare: (width: CrewWidth, seed: number) => prepareTask(task, width, seed),
+  }));
+}
+
 export async function runCrewScaling(opts: RunnerOptions): Promise<CrewScalingRecord[]> {
-  const all = loadScalingTasks(opts.tasks, opts.offset);
+  const all = opts.workloads ?? mbppWorkloads(opts.tasks, opts.offset);
   const tasks = opts.taskIds && opts.taskIds.length > 0
     ? opts.taskIds
       .map(id => all.find(t => t.workloadId === id))
-      .filter((t): t is ScalingTask => t !== undefined)
+      .filter((t): t is ScalingWorkload => t !== undefined)
     : all;
   if (opts.taskIds && tasks.length !== opts.taskIds.length) {
     const missing = opts.taskIds.filter(id => !tasks.some(t => t.workloadId === id));
     throw new Error(`Task id(s) not in the selected range: ${missing.join(', ')}`);
   }
+  const buildCrew = opts.crewFactory ?? crewForWidth;
   const seeds = Math.max(1, opts.seeds ?? 1);
   const runId = `${opts.label}-${new Date().toISOString().replace(/[:.]/g, '-')}`;
   mkdirSync(opts.outDir, { recursive: true });
 
   const joule = buildJoule(opts.provider, opts.model);
   await joule.initialize();
-  registerProvider(joule, opts.provider, opts.model);
+  try {
+    registerProvider(joule, opts.provider, opts.model);
+  } catch (err) {
+    // Shut down before giving up: an initialized runtime left running keeps
+    // the process alive, so a misconfiguration would hang instead of failing.
+    await joule.shutdown();
+    throw err;
+  }
   for (const tool of [fileReadTool, fileWriteTool, shellExecTool]) joule.registerTool(tool);
 
   const records: CrewScalingRecord[] = [];
@@ -173,7 +217,7 @@ export async function runCrewScaling(opts: RunnerOptions): Promise<CrewScalingRe
   for (const task of tasks) {
     for (const seed of Array.from({ length: seeds }, (_, i) => i)) {
       for (const width of opts.widths) {
-        const prepared = prepareTask(task, width, seed);
+        const prepared = task.prepare(width, seed);
         const joulTask: Task = {
           id: generateId('scaling-task'),
           description: prepared.description,
@@ -185,7 +229,7 @@ export async function runCrewScaling(opts: RunnerOptions): Promise<CrewScalingRe
         process.stderr.write(`${task.workloadId} w${width} s${seed}: `);
         const began = Date.now();
         try {
-          const crew = await joule.executeCrew(crewForWidth(width), joulTask);
+          const crew = await joule.executeCrew(buildCrew(width), joulTask);
           const jctMs = Date.now() - began;
           const verdict = prepared.verify();
           const record = toRecord({ runId, task, width, seed, gateEnabled: Boolean(opts.verifiedEdit), joulTask, crew, jctMs, verdict });

@@ -11,6 +11,15 @@ import type { AgentExecutionMode, AgentLifecycleRecord, LifecycleInterval, ToolC
 
 /** Longest failure message kept in an experiment artifact. */
 const MAX_ERROR_CHARS = 300;
+/** Longest agent answer kept in an experiment artifact. */
+const MAX_ANSWER_CHARS = 800;
+
+/** Strip anything shaped like a credential, in case a provider echoed a request back. */
+function redactSecrets(text: string): string {
+  return text
+    .replace(/\b(sk|pk|key|token|secret)-[A-Za-z0-9_-]{8,}/gi, '$1-[redacted]')
+    .replace(/\b(Bearer|api[-_]?key["'\s:=]+)\s*[A-Za-z0-9_.-]{12,}/gi, '$1 [redacted]');
+}
 
 /**
  * A failure message, reduced to what an audit needs.
@@ -24,10 +33,23 @@ export function sanitizeFailure(error: unknown): string | undefined {
   const text = error instanceof Error ? error.message : String(error);
   const firstLine = text.split('\n')[0].trim();
   if (firstLine.length === 0) return undefined;
-  const redacted = firstLine
-    .replace(/\b(sk|pk|key|token|secret)-[A-Za-z0-9_-]{8,}/gi, '$1-[redacted]')
-    .replace(/\b(Bearer|api[-_]?key["'\s:=]+)\s*[A-Za-z0-9_.-]{12,}/gi, '$1 [redacted]');
+  const redacted = redactSecrets(firstLine);
   return redacted.length > MAX_ERROR_CHARS ? `${redacted.slice(0, MAX_ERROR_CHARS)}…` : redacted;
+}
+
+/**
+ * What an agent said it did, kept for scoring.
+ *
+ * Counts cannot tell an agent that diagnosed a defect and did nothing about it
+ * from one that read some files and shrugged; only its answer can. Line breaks
+ * are kept because a diagnosis is usually a list, and the text is capped so a
+ * verbose agent cannot bloat the artifact.
+ */
+export function sanitizeAnswer(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const trimmed = redactSecrets(value.trim());
+  if (trimmed.length === 0) return undefined;
+  return trimmed.length > MAX_ANSWER_CHARS ? `${trimmed.slice(0, MAX_ANSWER_CHARS)}…` : trimmed;
 }
 
 /**

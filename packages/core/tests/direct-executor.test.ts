@@ -167,6 +167,104 @@ describe('DirectExecutor', () => {
     });
   });
 
+  describe('wall-clock limit', () => {
+    it('honours an agent that asks for longer than the default', async () => {
+      const agent = makeAgent({ wallTimeoutMs: 900_000 });
+      expect(agent.wallTimeoutMs).toBe(900_000);
+
+      // The limit is read per agent; a benchmark whose agents read several
+      // files before acting sets its own rather than ending for an unrelated
+      // reason. Behaviour with no value set is unchanged.
+      const { executor, envelope } = buildExecutor(['{"answer": "done"}']);
+      const result = await executor.execute(makeTask(), envelope, agent);
+      expect(result.status).toBe('completed');
+      expect(makeAgent().wallTimeoutMs).toBeUndefined();
+    });
+  });
+
+  describe('tolerant response parsing', () => {
+    it('still runs the tools when the model closes the object early', async () => {
+      // Observed from a real run: three good tool calls followed by a stray
+      // "]}". A strict parse called that a finished answer and ended the run.
+      const { executor, envelope, provider } = buildExecutor([
+        '{"tool_calls": [{"toolName": "test_tool", "toolArgs": {"query": "x"}}]}]}',
+        '{"answer": "done"}',
+      ]);
+
+      const result = await executor.execute(makeTask(), envelope, makeAgent({ allowedTools: ['test_tool'] }));
+
+      expect(result.lifecycleMetrics?.toolCalls).toBe(1);
+      expect(provider.chat).toHaveBeenCalledTimes(2);
+      expect(result.result).toBe('done');
+    });
+
+    it('finds the tool call when the model writes prose around it', async () => {
+      const { executor, envelope } = buildExecutor([
+        'Let me look at the file first.\n{"tool_calls": [{"toolName": "test_tool", "toolArgs": {}}]}',
+        '{"answer": "done"}',
+      ]);
+
+      const result = await executor.execute(makeTask(), envelope, makeAgent({ allowedTools: ['test_tool'] }));
+
+      expect(result.lifecycleMetrics?.toolCalls).toBe(1);
+    });
+
+    it('still treats a plain reply as the answer', async () => {
+      const { executor, envelope } = buildExecutor(['The chunk function drops the last partial batch.']);
+
+      const result = await executor.execute(makeTask(), envelope, makeAgent());
+
+      expect(result.status).toBe('completed');
+      expect(result.result).toBe('The chunk function drops the last partial batch.');
+      expect(result.lifecycleMetrics?.toolCalls).toBe(0);
+    });
+  });
+
+  describe('tool result rendering', () => {
+    it('shows the model what a tool actually returned', async () => {
+      const { executor, envelope, tools, provider } = buildExecutor([
+        '{"tool_calls": [{"toolName": "reader", "toolArgs": {}}]}',
+        '{"answer": "done"}',
+      ]);
+      tools.register({
+        name: 'reader',
+        description: 'Returns structured output, as the real file and shell tools do',
+        inputSchema: z.object({}),
+        outputSchema: z.any(),
+        execute: async () => ({ content: 'def chunk(items, size):', sizeBytes: 23, truncated: false }),
+      }, 'builtin');
+
+      await executor.execute(makeTask(), envelope, makeAgent({ allowedTools: ['reader'] }));
+
+      // An agent asked to review code has to be able to see the code: the
+      // second call's history is where the tool result reaches the model.
+      const secondCall = provider.chat.mock.calls[1][0];
+      const history = secondCall.messages.map((m: { content: string }) => m.content).join('\n');
+      expect(history).toContain('def chunk(items, size):');
+      expect(history).not.toContain('[object Object]');
+    });
+
+    it('passes a string result through unchanged', async () => {
+      const { executor, envelope, tools, provider } = buildExecutor([
+        '{"tool_calls": [{"toolName": "plain", "toolArgs": {}}]}',
+        '{"answer": "done"}',
+      ]);
+      tools.register({
+        name: 'plain',
+        description: 'Returns text',
+        inputSchema: z.object({}),
+        outputSchema: z.any(),
+        execute: async () => 'ALL TESTS PASSED',
+      }, 'builtin');
+
+      await executor.execute(makeTask(), envelope, makeAgent({ allowedTools: ['plain'] }));
+
+      const history = provider.chat.mock.calls[1][0].messages.map((m: { content: string }) => m.content).join('\n');
+      expect(history).toContain('ALL TESTS PASSED');
+      expect(history).not.toContain('"ALL TESTS PASSED"');
+    });
+  });
+
   describe('circuit breaker', () => {
     it('should break circuit after repeated same-tool calls', async () => {
       const { executor, envelope } = buildExecutor([
@@ -382,7 +480,9 @@ describe('DirectExecutor', () => {
   // undone. Opt-in, so a task without a policy behaves exactly as before.
   // -------------------------------------------------------------------------
 
-  describe('verified-edit gate', () => {
+  // Each check runs as a real subprocess, which needs more than the default
+  // per-test budget when the whole suite is competing for the CPU.
+  describe('verified-edit gate', { timeout: 60_000 }, () => {
     let dir: string;
 
     beforeEach(() => {

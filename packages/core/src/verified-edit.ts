@@ -80,6 +80,21 @@ function runCommand(command: string, cwd: string | undefined, timeoutMs: number)
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 
+/**
+ * Run a policy's check against the workspace as it stands.
+ *
+ * This is the same command, shell and timeout handling the gate uses, exported
+ * so a caller can ask "is the workspace passing right now?" without owning a
+ * gate. Staged recovery needs exactly that between agents: whether to escalate
+ * has to be decided by the check, not by an agent reporting that it finished.
+ */
+export function runVerification(
+  policy: VerifiedEditPolicy,
+  run: (command: string, cwd: string | undefined, timeoutMs: number) => Promise<CheckResult> = runCommand,
+): Promise<CheckResult> {
+  return run(policy.command, policy.cwd, policy.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+}
+
 export class VerifiedEditGate {
   /** Whether the check has ever passed; undefined means "not established yet" */
   private baselinePassed: boolean | undefined;

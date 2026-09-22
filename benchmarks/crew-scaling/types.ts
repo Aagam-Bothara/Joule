@@ -5,6 +5,7 @@
  * a crew, and no policy in Joule reads these records.
  */
 
+import type { StagedRecoveryReport } from '@joule/shared';
 import type { ToolCallRecord } from '../lifecycle/types.js';
 
 export type { ToolCallRecord };
@@ -32,6 +33,20 @@ export interface AgentContribution {
   toolCalls: number;
   /** Every tool call in order, with its outcome */
   tools?: ToolCallRecord[];
+  /**
+   * What the agent reported when it finished, truncated.
+   *
+   * Without it, an agent that diagnosed the defect and then failed to act is
+   * indistinguishable from one that inspected the code and found nothing —
+   * the two cases a crew experiment most needs to separate.
+   */
+  answer?: string;
+  /**
+   * The verified-edit gate's view when this agent stopped: whether the check
+   * was passing. For an agent that proposed no writes this is the state it
+   * inherited, which is how "there was nothing to fix" becomes observable.
+   */
+  verified?: boolean;
   /**
    * Writes this agent proposed versus writes that survived verification.
    * Activity is not contribution: an agent can work hard and make it worse.
@@ -99,6 +114,11 @@ export interface CrewScalingRecord {
   activeAgents?: number;
   /** Whether the verified-edit gate was enabled; absent in datasets E and E2 */
   gateEnabled?: boolean;
+  /**
+   * Stage-by-stage account, present when the crew ran with `staged_recovery`.
+   * It is what says which stage settled the task and which never had to run.
+   */
+  staged?: StagedRecoveryReport;
   /** Totals across the crew's agents, when the gate ran */
   proposedWrites?: number;
   acceptedWrites?: number;

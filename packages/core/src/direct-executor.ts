@@ -18,6 +18,7 @@ import { ModelRouter } from './model-router.js';
 import { ToolRegistry } from './tool-registry.js';
 import type { ProgressCallback } from './task-executor.js';
 import { AgentLifecycleTracker } from './adaptive/lifecycle.js';
+import { extractJson } from './adaptive/step-agent.js';
 import { VerifiedEditGate } from './verified-edit.js';
 
 /**
@@ -97,7 +98,7 @@ export class DirectExecutor {
     const taskId = task.id;
     const traceId = generateId('direct-trace');
     const maxIterations = agent.maxIterations ?? 10;
-    const wallTimeoutMs = DEFAULT_WALL_TIMEOUT_MS;
+    const wallTimeoutMs = agent.wallTimeoutMs ?? DEFAULT_WALL_TIMEOUT_MS;
 
     // Opt-in verified-edit gate: without a policy on the task this stays
     // undefined and every write behaves exactly as it did before.
@@ -308,7 +309,7 @@ export class DirectExecutor {
             });
 
             const toolDuration = monotonicNow() - toolSpanStart;
-            const output = this.truncate(String(result.output ?? 'OK'), 1000);
+            const output = this.truncate(this.renderToolOutput(result.output), 1000);
 
             if (result.success && before) {
               // The write landed; keep it only if the workspace still verifies.
@@ -535,16 +536,14 @@ Respond with:
    * Handles various response formats gracefully.
    */
   private parseResponse(content: string): ParsedResponse {
-    // Try to extract JSON from the response
-    const cleaned = content.trim()
-      .replace(/^```json\s*/i, '')
-      .replace(/^```\s*/i, '')
-      .replace(/\s*```$/i, '')
-      .trim();
+    // `extractJson` is the same tolerant reader the adaptive path uses: it
+    // copes with code fences, prose around the object, raw newlines inside
+    // strings, and an object closed early with text still trailing it. A strict
+    // parse treats all of those as "the agent is finished", which silently ends
+    // a run that was in the middle of calling three tools.
+    const parsed = extractJson(content) as Record<string, any> | undefined;
 
-    try {
-      const parsed = JSON.parse(cleaned);
-
+    if (parsed !== undefined && parsed !== null && typeof parsed === 'object') {
       // Check for final answer
       if (parsed.answer !== undefined) {
         return {
@@ -581,12 +580,10 @@ Respond with:
         }
       }
 
-      // Unknown structure — treat as final answer
-      return { type: 'final_answer', answer: content };
-    } catch {
-      // Not valid JSON — treat entire response as final answer
-      return { type: 'final_answer', answer: content };
     }
+
+    // No object, or one that asks for nothing: the reply is the answer.
+    return { type: 'final_answer', answer: content };
   }
 
   /**
@@ -625,6 +622,22 @@ Respond with:
       }
     }
     return sanitized;
+  }
+
+  /**
+   * A tool result as text the model can read.
+   *
+   * Tools return objects — `file_read` gives `{content, sizeBytes, truncated}`,
+   * `shell_exec` gives `{stdout, stderr, exitCode}` — and `String(anObject)` is
+   * "[object Object]". That is what every direct-mode agent was shown for every
+   * file it read and every command it ran, so an agent asked to review code
+   * received nothing to review. The other execution paths have always used JSON
+   * here; this makes the direct loop agree with them.
+   */
+  private renderToolOutput(output: unknown): string {
+    if (output === undefined || output === null) return 'OK';
+    if (typeof output === 'string') return output;
+    return JSON.stringify(output) ?? 'OK';
   }
 
   private truncate(str: string, maxLen: number): string {

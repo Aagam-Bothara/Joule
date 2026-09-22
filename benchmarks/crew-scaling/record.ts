@@ -11,7 +11,7 @@
  */
 
 import type { AgentResult } from '@joule/shared';
-import { failureStage, sanitizeFailure, toolCallSequence } from '../lifecycle/record.js';
+import { failureStage, sanitizeAnswer, sanitizeFailure, toolCallSequence } from '../lifecycle/record.js';
 import type { AgentContribution } from './types.js';
 
 /** Per-agent work, from the lifecycle instrumentation the result already carries. */
@@ -24,11 +24,14 @@ export function contributionOf(agentResult: AgentResult): AgentContribution {
   const stage = failureStage(events);
   const tools = toolCallSequence(events);
 
+  const answer = sanitizeAnswer(result.result);
+
   return {
     ...(edits ? {
       proposedWrites: edits.proposed,
       acceptedWrites: edits.accepted,
       rolledBackWrites: edits.rollbacks,
+      ...(edits.verified !== undefined ? { verified: edits.verified } : {}),
     } : {}),
     agentId: agentResult.agentId,
     role: agentResult.role,
@@ -41,5 +44,6 @@ export function contributionOf(agentResult: AgentResult): AgentContribution {
     modelCalls: metrics?.modelCalls ?? 0,
     toolCalls: metrics?.toolCalls ?? 0,
     ...(tools.length > 0 ? { tools } : {}),
+    ...(answer ? { answer } : {}),
   };
 }

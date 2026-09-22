@@ -62,13 +62,66 @@ export interface AgentDefinition {
 
   /** Max iterations for direct execution mode (default: 10). Prevents infinite loops. */
   maxIterations?: number;
+
+  /**
+   * Wall-clock limit for one direct-mode run, in ms (default: 5 minutes).
+   *
+   * The default suits an interactive agent. A benchmark whose agents read
+   * several files before acting may need longer, and needs to say so rather
+   * than have runs end for a reason unrelated to what it is measuring.
+   */
+  wallTimeoutMs?: number;
 }
 
 // ============================================================================
 // Orchestration Strategy
 // ============================================================================
 
-export type OrchestrationStrategy = 'sequential' | 'parallel' | 'hierarchical' | 'graph';
+/**
+ * `staged_recovery` runs the first agent, checks the task's external verifier,
+ * and only starts the next agent if that check fails. Crew width becomes a
+ * consequence of failing verification rather than something chosen up front.
+ * It requires `task.verifiedEdit`, since the decision to escalate must come
+ * from outside the agent's own belief that it finished.
+ */
+export type OrchestrationStrategy = 'sequential' | 'parallel' | 'hierarchical' | 'graph' | 'staged_recovery';
+
+/** Why a staged-recovery stage did not run. */
+export type StageSkipReason = 'verification_already_passed';
+
+/** One stage of a staged-recovery crew, run or skipped. */
+export interface StageReport {
+  /** 1-based position in the escalation order */
+  stage: number;
+  agentId: string;
+  role: string;
+  executed: boolean;
+  /** Set only when `executed` is false */
+  skipReason?: StageSkipReason;
+  status?: string;
+  error?: string;
+  modelCalls?: number;
+  toolCalls?: number;
+  proposedWrites?: number;
+  acceptedWrites?: number;
+  rolledBackWrites?: number;
+  tokensUsed?: number;
+  costUsd?: number;
+  /** The external check after this stage ran */
+  verification?: { passed: boolean; output: string };
+}
+
+/** What a staged-recovery crew did, and which stage settled it. */
+export interface StagedRecoveryReport {
+  stagesExecuted: number;
+  /** 1-based stage whose verification passed; absent if none did */
+  solvedAtStage?: number;
+  solvedByRole?: string;
+  /** Final state of the external verifier */
+  verified: boolean;
+  /** Every stage in escalation order, including the ones never started */
+  stages: StageReport[];
+}
 
 // ============================================================================
 // Crew Definition
@@ -244,6 +297,13 @@ export interface CrewResult {
 
   /** Error message if crew failed */
   error?: string;
+
+  /**
+   * Present only for `staged_recovery`. `agentResults` still holds just the
+   * agents that ran, so a stage that was never needed is recorded here rather
+   * than faked as a completed agent that did no work.
+   */
+  staged?: StagedRecoveryReport;
 }
 
 // ============================================================================

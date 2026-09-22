@@ -73,8 +73,11 @@ export interface AgentLifecycleRecord {
   minToolWaitMs: number;
   /** Every contiguous tool_wait window, in the order they happened */
   toolWaitDurationsMs: number[];
-  /** The same windows with the tool that was called and how it went, in order */
-  tools: ToolCallRecord[];
+  /**
+   * The same windows with the tool that was called and how it went, in order.
+   * Absent on records written before tool identity was recorded.
+   */
+  tools?: ToolCallRecord[];
 
   lifecycleEvents: AgentLifecycleEvent[];
 }

@@ -13,6 +13,9 @@ import {
   type BudgetEnvelope,
   type EnergyConfig,
   type RoutingConfig,
+  type StagedRecoveryReport,
+  type StageReport,
+  type VerifiedEditPolicy,
   type ModelRequest,
   type ChatMessage,
   ModelTier,
@@ -31,6 +34,47 @@ import type { AgentMemory } from './agent-memory.js';
 import type { ConstitutionEnforcer } from './constitution.js';
 import type { Governor } from './governance/governor.js';
 import { createAgentContext } from './agent-context.js';
+import { runVerification } from './verified-edit.js';
+
+/** Longest excerpt of an answer or a verifier's output handed to a recovery agent. */
+const MAX_EVIDENCE_CHARS = 1200;
+
+function truncate(text: string, max: number): string {
+  return text.length > max ? `${text.slice(0, max)}…` : text;
+}
+
+/** What a staged run produced: the agents that ran, and the stage-by-stage account. */
+interface StagedRun {
+  results: AgentResult[];
+  report: StagedRecoveryReport;
+}
+
+/**
+ * An agent's answer with any tool-call JSON removed.
+ *
+ * A run that ends without a clean answer stores whatever the model last said,
+ * which is often a raw `{"tool_calls": ...}` blob. Pasting that into the next
+ * agent's prompt shows it the response format inside its own input, and it
+ * imitates the shape: measured on the staged comparison, every recovery agent
+ * that was handed such a blob ended by emitting nested tool calls the parser
+ * could not execute, so it stopped before writing anything. Only the prose is
+ * useful to a successor, so only the prose is passed on.
+ */
+export function proseOnly(text: string): string {
+  const blob = text.search(/\{\s*"(tool_calls|toolName|tool_cmd)"/);
+  const prose = (blob >= 0 ? text.slice(0, blob) : text).trim();
+  return prose.length > 0 ? prose : '(the previous agent left no usable summary)';
+}
+
+/**
+ * A value as text an agent can read. Never `String(anObject)`, which produces
+ * "[object Object]" and tells the agent nothing.
+ */
+function asText(value: unknown, max: number): string {
+  if (value === undefined || value === null) return '(nothing reported)';
+  const text = typeof value === 'string' ? value : JSON.stringify(value) ?? String(value);
+  return truncate(text, max);
+}
 
 const MANAGER_DELEGATION_PROMPT = `You are the manager agent. Analyze the task and delegate to your workers.
 
@@ -104,6 +148,7 @@ export class CrewOrchestrator {
     const blackboard: Blackboard = { entries: {} };
     let agentResults: AgentResult[] = [];
     let error: string | undefined;
+    let staged: StagedRecoveryReport | undefined;
 
     try {
       // Validate (inside try so errors produce a 'failed' result)
@@ -121,6 +166,12 @@ export class CrewOrchestrator {
         case 'graph':
           agentResults = await this.executeGraph(crew, task, parentEnvelope, traceId, blackboard, onProgress);
           break;
+        case 'staged_recovery': {
+          const outcome = await this.executeStagedRecovery(crew, task, parentEnvelope, traceId, blackboard, onProgress);
+          agentResults = outcome.results;
+          staged = outcome.report;
+          break;
+        }
       }
     } catch (err) {
       error = err instanceof Error ? err.message : String(err);
@@ -128,15 +179,19 @@ export class CrewOrchestrator {
 
     this.tracer.endSpan(traceId, spanId);
 
-    // Determine status
+    // Determine status. A staged crew is judged by its external verifier: every
+    // agent can report success while the repository still fails the check, and
+    // that is the case the strategy exists to catch.
     const completedCount = agentResults.filter(r => r.taskResult.status === 'completed').length;
     const status: CrewResult['status'] = error
       ? 'failed'
-      : completedCount === agentResults.length
-        ? 'completed'
-        : completedCount > 0
-          ? 'partial'
-          : 'failed';
+      : staged
+        ? (staged.verified ? 'completed' : 'failed')
+        : completedCount === agentResults.length
+          ? 'completed'
+          : completedCount > 0
+            ? 'partial'
+            : 'failed';
 
     // Aggregate final result
     let result: string | undefined;
@@ -160,6 +215,7 @@ export class CrewOrchestrator {
       blackboard,
       completedAt: isoNow(),
       error,
+      ...(staged ? { staged } : {}),
     };
   }
 
@@ -329,6 +385,171 @@ export class CrewOrchestrator {
     }
 
     return results;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Strategy: Staged recovery — escalate only when verification says to
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Run the first agent, check the task's external verifier, and start the next
+   * agent only if that check failed.
+   *
+   * Measured on five repositories with planted defects: a lone agent stopped
+   * believing it was finished in eight of ten failures, having used one to five
+   * of sixteen available model calls. The agent's own account of its work is
+   * therefore not evidence, so every escalation here is decided by running the
+   * task's check against the workspace.
+   *
+   * A stage that is never needed is not executed at all: no context is built,
+   * no envelope is drawn, no model is called. It is reported as skipped rather
+   * than as an agent that completed without doing anything.
+   */
+  private async executeStagedRecovery(
+    crew: CrewDefinition,
+    task: Task,
+    parentEnvelope: BudgetEnvelopeInstance,
+    traceId: string,
+    blackboard: Blackboard,
+    onProgress?: ProgressCallback,
+  ): Promise<StagedRun> {
+    const policy = task.verifiedEdit;
+    if (!policy) {
+      throw new Error(
+        'staged_recovery requires task.verifiedEdit: whether to escalate must be decided by an external check, not by the agent reporting that it finished',
+      );
+    }
+
+    const ordered = this.resolveAgentOrder(crew);
+    const stages: StageReport[] = ordered.map((agent, i) => ({
+      stage: i + 1,
+      agentId: agent.id,
+      role: agent.role,
+      executed: false,
+    }));
+    const results: AgentResult[] = [];
+
+    let verification: { passed: boolean; output: string } | undefined;
+    let solvedAtStage: number | undefined;
+    let solvedByRole: string | undefined;
+
+    for (let i = 0; i < ordered.length; i++) {
+      const agent = ordered[i];
+      const stage = stages[i];
+
+      if (verification?.passed) {
+        stage.skipReason = 'verification_already_passed';
+        continue;
+      }
+
+      // Each stage draws the crew's full per-agent ceiling, and draws it only
+      // when it actually runs: a stage that never starts must not have taken
+      // budget from the one that did.
+      const envelope = this.budget.createPeerEnvelope(parentEnvelope);
+      const spanId = this.tracer.startSpan(traceId, `stage-${stage.stage}-${agent.id}`);
+      this.writeToBlackboard(blackboard, agent.id, null, 'running');
+
+      // The first stage sees the task as given; later stages also see why the
+      // check is still failing.
+      const stageTask = i === 0 ? task : this.withRecoveryContext(task, policy, results, verification);
+
+      let agentResult: AgentResult;
+      try {
+        agentResult = await this.executeAgentWithRetry(agent, stageTask, envelope, traceId, blackboard, onProgress);
+      } catch (err) {
+        // A stage that throws is still a stage that happened, and the next one
+        // still gets its turn.
+        agentResult = this.failedAgentResult(agent, err);
+      }
+      results.push(agentResult);
+      // Strip tool-call JSON here too: the blackboard is the other route into
+      // the next agent's prompt, and a blob reaching it undoes the same care
+      // taken over the recovery context below. Only this strategy's own writes
+      // are touched; what the other strategies put on a blackboard is unchanged.
+      const answer = agentResult.taskResult.result;
+      this.writeToBlackboard(
+        blackboard,
+        agent.id,
+        typeof answer === 'string' ? proseOnly(answer) : answer,
+        agentResult.taskResult.status === 'completed' ? 'completed' : 'failed',
+      );
+      this.tracer.endSpan(traceId, spanId);
+
+      // The decision to stop belongs to the check, not to the agent.
+      const checked = await runVerification(policy);
+      verification = { passed: checked.passed, output: truncate(checked.output, MAX_EVIDENCE_CHARS) };
+
+      const metrics = agentResult.taskResult.lifecycleMetrics;
+      const edits = agentResult.taskResult.verifiedEdits;
+      stage.executed = true;
+      stage.status = agentResult.taskResult.status;
+      if (agentResult.taskResult.error) stage.error = agentResult.taskResult.error;
+      stage.modelCalls = metrics?.modelCalls ?? 0;
+      stage.toolCalls = metrics?.toolCalls ?? 0;
+      if (edits) {
+        stage.proposedWrites = edits.proposed;
+        stage.acceptedWrites = edits.accepted;
+        stage.rolledBackWrites = edits.rollbacks;
+      }
+      stage.tokensUsed = agentResult.budgetUsed?.tokensUsed;
+      stage.costUsd = agentResult.budgetUsed?.costUsd;
+      stage.verification = verification;
+
+      if (verification.passed && solvedAtStage === undefined) {
+        solvedAtStage = stage.stage;
+        solvedByRole = agent.role;
+      }
+    }
+
+    return {
+      results,
+      report: {
+        stagesExecuted: stages.filter(s => s.executed).length,
+        ...(solvedAtStage !== undefined ? { solvedAtStage } : {}),
+        ...(solvedByRole !== undefined ? { solvedByRole } : {}),
+        verified: verification?.passed ?? false,
+        stages,
+      },
+    };
+  }
+
+  /**
+   * The task, plus what the earlier stages did and why the check still fails.
+   *
+   * The blackboard already carries a short excerpt of each agent's answer, but
+   * a recovery agent needs the verifier's own output — the command that ran and
+   * what it printed — which is the part that says where to look. Everything is
+   * serialized explicitly, so a structured value never reaches an agent as
+   * "[object Object]".
+   */
+  private withRecoveryContext(
+    task: Task,
+    policy: VerifiedEditPolicy,
+    previous: readonly AgentResult[],
+    verification: { passed: boolean; output: string } | undefined,
+  ): Task {
+    const sections: string[] = [task.description, ''];
+
+    for (const result of previous) {
+      sections.push(`[Previous agent: ${result.role}]`);
+      sections.push(proseOnly(asText(result.taskResult.result, MAX_EVIDENCE_CHARS)));
+      if (result.taskResult.error) sections.push(`(this agent ended with an error: ${result.taskResult.error})`);
+      sections.push('');
+    }
+
+    sections.push('[Verification failure]');
+    sections.push(`Command: ${policy.command}${policy.cwd ? ` (in ${policy.cwd})` : ''}`);
+    sections.push('Result: FAILED');
+    sections.push(verification ? asText(verification.output, MAX_EVIDENCE_CHARS) : '(no output captured)');
+    sections.push('');
+
+    sections.push('[Current recovery objective]');
+    sections.push(
+      'The previous agent stopped, but the check above still fails, so the work is not done. '
+      + 'Treat the repository as still defective, find the specific cause, correct it, and run the check again.',
+    );
+
+    return { ...task, description: sections.join('\n') };
   }
 
   // ---------------------------------------------------------------------------

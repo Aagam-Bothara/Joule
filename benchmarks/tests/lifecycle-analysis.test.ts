@@ -177,11 +177,12 @@ describe('experiment records', () => {
     ]);
 
     // The question the counts could not answer: did this agent read, or write?
-    expect(r.tools.map(t => t.tool)).toEqual(['file_read', 'file_write', 'shell_exec']);
-    expect(r.tools[0]).toMatchObject({ ok: true, durationMs: 50 });
-    expect(r.tools[1]).toMatchObject({ ok: false, rolledBack: true });
+    const tools = r.tools ?? [];
+    expect(tools.map(t => t.tool)).toEqual(['file_read', 'file_write', 'shell_exec']);
+    expect(tools[0]).toMatchObject({ ok: true, durationMs: 50 });
+    expect(tools[1]).toMatchObject({ ok: false, rolledBack: true });
     // The stack is dropped; the reason is kept.
-    expect(r.tools[2].error).toBe('exit 1');
+    expect(tools[2].error).toBe('exit 1');
   });
 
   it('records a tool call the run died inside', () => {
