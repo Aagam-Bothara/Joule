@@ -849,3 +849,140 @@ ladder 149 s.
 The open question is no longer whether a 9B model can lead on repositories (with this pair it
 cannot) but whether escalation beats the best cheap model on its own. The next run is Flash → Pro
 with a fresh step allowance after a handoff (`joule-rung-local`) on the same 95 instances.
+
+## Staged recovery
+
+A crew that runs a reviewer and a tester after every implementer spends three agents on work one
+agent often finished. Staged recovery runs the next agent only when an external check says the
+previous one did not actually succeed. This section is the evidence for that design, including the
+two measurement errors that had to be corrected before any of it meant anything.
+
+### The earlier crew datasets are not evidence
+
+Datasets E and E2 (crew widths 1–4 on MBPP) are kept for provenance only. Three defects make them
+unusable for any claim about crew width:
+
+- **Budget was confounded with width.** The crew budget was divided by `budgetShare`, so the
+  implementer ran on ~100k tokens at width 1, ~50k at width 2 and ~33k at width 3 and 4. Five
+  implementer failures sit at 34–37k tokens, right at that line. Width changed how many agents
+  there were *and* how much the one writing the code could spend.
+- **One agent failing removed every agent after it.** A failed agent wrote `undefined` to the
+  blackboard, and the next agent's context builder called `JSON.stringify(undefined).slice(...)`.
+  The `TypeError` was thrown while building the *next* agent's prompt, so it died before reaching a
+  model — 15 downstream agents out of 15, which in the traces looked exactly like budget
+  starvation.
+- **Agents could not read any tool output.** Direct mode rendered tool results with `String(...)`,
+  and every tool returns an object, so every file an agent read and every command it ran came back
+  as the literal string `[object Object]`. A reviewer told to inspect the implementer's code was
+  reading nothing. The finding that "specialists read a lot and never write" was a symptom of this,
+  not a result about specialists.
+
+All three are fixed (`budgetMode: 'fixed_per_agent'`, `proseOnly`, JSON tool-result rendering) and
+covered by tests. Measurements taken before those fixes are not comparable with measurements taken
+after.
+
+### Does a specialist add verified value? (`benchmarks/specialist-value`)
+
+Five authored repositories, one planted defect each, three repetitions, `deepseek-v4-flash`,
+verified-edit gate on. The task says only that the suite fails; locating the defect is the work.
+
+| arm | success | reviewer writes | notes |
+| --- | --- | --- | --- |
+| implementer alone | 5/15 | — | |
+| + reviewer | 9/15 | 4 proposed, 3 accepted | |
+| + reviewer + tester | 12/15 | | |
+| + second implementer (control) | 4/15 | **0 proposed in 15 runs** | |
+
+When the implementer left the repository failing, a specialist recovered it 11 times out of 20, and
+in 9 of those the fixer also named the planted cause. When the implementer left it passing, all 10
+runs stayed passing, with no rollbacks.
+
+The control is the important row. Replacing the reviewer with a *second implementer* — same model,
+same tools, same ceilings, same position, only the instructions differ — scores 4/15, at the level
+of the implementer alone, and never attempts a single write. A copy of the primary inherits the
+primary's belief that the work is finished. The uplift is the adversarial framing, not a fresh
+context and not more compute: eight of ten lone-implementer failures stopped voluntarily after one
+to five of sixteen allowed model calls without trying to write anything.
+
+### Replication on fresh fixtures (`benchmarks/staged-replication`)
+
+Ten new repositories, one per defect class (API contract, cross-file state, edge case, wrong
+algorithm, numeric precision, import interaction, stale cache, boundary, data transformation, error
+behaviour), three repetitions, 90 runs, $0.30. Each fixture is self-tested first: it must fail as
+planted, leave at least one assertion passing, and pass with its reference fix.
+
+| arm | success | cost | tokens | JCT | stages |
+| --- | --- | --- | --- | --- | --- |
+| implementer alone | 15/30 | $0.0021 | 16,282 | 36s | 1.00 |
+| always-on crew | 27/30 | $0.0053 | 40,290 | 96s | 3.00 |
+| staged recovery | 30/30 | $0.0027 | 20,348 | 46s | 1.53 |
+
+Paired on all 30 cells: both pass 27, always-on only 0, staged only 3. Staged skipped 44 of the
+always-on arm's 60 specialist stages — 19 runs where the primary passed (saving two stages each),
+6 where the reviewer recovered (saving one), 5 where the tester was genuinely needed.
+
+### Which half does the work? (`verified_full`)
+
+Staged recovery changes two things at once: it gives recovery agents the verifier's evidence, and
+it declines to run them when the check already passes. `verified_full` holds the first and drops
+the second — every stage runs, every stage is still checked, every result is still handed on — so
+the two effects can be attributed separately. The strategies share the whole path and differ in one
+expression, whether a passing check ends the run.
+
+| comparison | what differs | result |
+| --- | --- | --- |
+| always-on → `verified_full` | verifier evidence only | 27/30 → 30/30, and 14% cheaper |
+| `verified_full` → staged | early stopping only | 30/30 → 30/30, 41% cheaper, 43% faster, 3.00 → 1.53 stages |
+
+**Verifier evidence buys quality; conditional admission buys efficiency.** The decisive detail is
+what always-on specialists did after a state that already verified PASS: 41 such stages ran, and
+**41 of 41 wrote nothing** — no accepted edits, no rollbacks, no regressions. Always-on specialists
+after a pass are pure cost and zero risk. That is exactly the work staged recovery declines.
+
+Caveats: the quality effect rests on 3 discordant pairs (McNemar p = 0.25), so it is directional,
+not significant; only the *equivalence* of `verified_full` and staged is firmly established (30/30
+identical, p = 1.0). One model, one provider, fixtures we authored, n = 30 cells per arm.
+
+### Real repositories: blocked by a capability floor (`benchmarks/real-repo`)
+
+The harness works. SWE-bench Lite instances run through the same comparison runner; the verifier is
+the SWE-bench criterion as a container-side exit code (hidden test patch applied over the agent's
+work, `FAIL_TO_PASS` and `PASS_TO_PASS` required, test files restored afterwards so a check never
+leaves them where an agent could read them). The task pool is fixed by a self-test before any run —
+image present locally, pytest-driven repo, fails at base commit and passes with the upstream fix —
+which admitted 13 of 15 candidates.
+
+The agents do not get far enough to measure anything:
+
+| model | model calls | tool calls | write attempts | termination |
+| --- | --- | --- | --- | --- |
+| `deepseek-v4-flash` | 2–10 | up to 17 | **0** across 12 agent runs | iteration cap / empty response |
+| `qwen/qwen3-coder` | 15 | 15 (9 shell, 6 read) | **0** | budget exhausted at 103k tokens |
+
+Both burn the entire per-agent envelope navigating a large unfamiliar repository and never call
+`repo_write` or `repo_edit`. Because the primary never passes verification, staged recovery never
+skips a stage and becomes behaviourally identical to `verified_full`: the paired comparison is null
+by construction, so it was not run. The authored-fixture conclusions are unaffected; what remains
+untested is external validity.
+
+The binding constraint looks like repository orientation rather than coding ability — a hypothesis,
+not a result. Raising ceilings or adding a navigation affordance is the obvious lever, and it is a
+deliberate design change to make before a run and measure, not a knob to turn until a benchmark
+turns positive.
+
+### Reproducing
+
+```bash
+npx tsx benchmarks/staged-replication/cli.ts selftest        # fixtures must fail as planted and pass with the reference fix
+npx tsx benchmarks/staged-replication/cli.ts run --seeds 3   # primary / full / staged, 10 tasks x 3 reps
+npx tsx benchmarks/staged-replication/cli.ts analyze
+
+npx tsx benchmarks/real-repo/selftest.ts <instanceId ...>    # decides the pool; calls no model
+npx tsx benchmarks/real-repo/cli.ts pool
+npx tsx benchmarks/real-repo/cli.ts run --arms primary --instances <id> --model <id>
+```
+
+Datasets land in `benchmarks/experiments/` and are gitignored; the code that produces them is not.
+Every manifest records the runtime commit, whether the tree was dirty, the model, the selection
+rule, the verification policy and the tool-loop semantics, because each of those has already
+changed a result at least once in this project.
