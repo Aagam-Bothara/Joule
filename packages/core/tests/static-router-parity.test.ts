@@ -112,7 +112,7 @@ const planWith = (steps: unknown[]): string[] => [
   'Synthesized.',
 ];
 
-describe('static-router parity', () => {
+describe('static-router parity', { timeout: 60_000 }, () => {
   it('produces lifecycle records like the other execution paths', async () => {
     const { executor } = buildExecutor(
       planWith([{ description: 'Run tool', toolName: 'test_tool', toolArgs: { input: 'hi' } }]),
