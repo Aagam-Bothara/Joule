@@ -186,8 +186,14 @@ export class CrewOrchestrator {
         case 'graph':
           agentResults = await this.executeGraph(crew, task, parentEnvelope, traceId, blackboard, onProgress);
           break;
-        case 'staged_recovery': {
-          const outcome = await this.executeStagedRecovery(crew, task, parentEnvelope, traceId, blackboard, onProgress);
+        case 'staged_recovery':
+        case 'verified_full': {
+          // Same execution, same checks, same handoff. The strategy decides one
+          // thing: whether a passing check ends the run.
+          const outcome = await this.executeVerifiedStages(
+            crew, task, parentEnvelope, traceId, blackboard,
+            { stopOnPass: crew.strategy === 'staged_recovery' }, onProgress,
+          );
           agentResults = outcome.results;
           staged = outcome.report;
           break;
@@ -425,18 +431,19 @@ export class CrewOrchestrator {
    * no envelope is drawn, no model is called. It is reported as skipped rather
    * than as an agent that completed without doing anything.
    */
-  private async executeStagedRecovery(
+  private async executeVerifiedStages(
     crew: CrewDefinition,
     task: Task,
     parentEnvelope: BudgetEnvelopeInstance,
     traceId: string,
     blackboard: Blackboard,
+    opts: { stopOnPass: boolean },
     onProgress?: ProgressCallback,
   ): Promise<StagedRun> {
     const policy = task.verifiedEdit;
     if (!policy) {
       throw new Error(
-        'staged_recovery requires task.verifiedEdit: whether to escalate must be decided by an external check, not by the agent reporting that it finished',
+        `${crew.strategy} requires task.verifiedEdit: whether to escalate must be decided by an external check, not by the agent reporting that it finished`,
       );
     }
 
@@ -457,7 +464,9 @@ export class CrewOrchestrator {
       const agent = ordered[i];
       const stage = stages[i];
 
-      if (verification?.passed) {
+      // The only difference between the two strategies: staged recovery stops
+      // here, the always-on control records the pass and carries on.
+      if (opts.stopOnPass && verification?.passed) {
         stage.skipReason = 'verification_already_passed';
         continue;
       }
@@ -557,17 +566,22 @@ export class CrewOrchestrator {
       sections.push('');
     }
 
-    sections.push('[Verification failure]');
+    // A passing check is reported as passing. An agent that is running only
+    // because this configuration runs every stage is told exactly that, rather
+    // than being handed an invented failure to chase.
+    const passed = verification?.passed === true;
+    sections.push(passed ? '[Verification result]' : '[Verification failure]');
     sections.push(`Command: ${policy.command}${policy.cwd ? ` (in ${policy.cwd})` : ''}`);
-    sections.push('Result: FAILED');
+    sections.push(passed ? 'Result: PASSED' : 'Result: FAILED');
     sections.push(verification ? asText(verification.output, MAX_EVIDENCE_CHARS) : '(no output captured)');
     sections.push('');
 
-    sections.push('[Current recovery objective]');
-    sections.push(
-      'The previous agent stopped, but the check above still fails, so the work is not done. '
-      + 'Treat the repository as still defective, find the specific cause, correct it, and run the check again.',
-    );
+    sections.push(passed ? '[Current objective]' : '[Current recovery objective]');
+    sections.push(passed
+      ? 'External verification currently passes. You are running because this configuration executes every '
+        + 'stage. Inspect the repository as your role describes, and change it only if you identify a concrete defect.'
+      : 'The previous agent stopped, but the check above still fails, so the work is not done. '
+        + 'Treat the repository as still defective, find the specific cause, correct it, and run the check again.');
 
     return { ...task, description: sections.join('\n') };
   }

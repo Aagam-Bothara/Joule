@@ -414,6 +414,158 @@ describe('staged recovery', { timeout: 60_000 }, () => {
     expect(calls).toHaveLength(0);
   });
 
+  // ---------------------------------------------------------------------------
+  // verified_full: the control that keeps the checks and the handoff but drops
+  // the early stop, so the two things staged recovery changes can be told apart.
+  // ---------------------------------------------------------------------------
+
+  describe('verified_full', () => {
+    const verifiedFull = (crew: CrewDefinition): CrewDefinition => ({ ...crew, strategy: 'verified_full' });
+
+    it('V1. runs every stage even when the primary already passed', async () => {
+      const { orchestrator, crew, calls } = build({
+        Implementer: [write('GOOD'), '{"answer": "done"}'],
+      });
+
+      const result = await run(orchestrator, verifiedFull(crew));
+
+      expect(result.staged?.stagesExecuted).toBe(3);
+      expect(calls).toContain('Reviewer');
+      expect(calls).toContain('Tester');
+      expect(result.staged?.stages.every(s => s.executed)).toBe(true);
+      expect(result.staged?.solvedAtStage).toBe(1);
+    });
+
+    it('V2. tells the reviewer the truth when verification passed', async () => {
+      const { orchestrator, crew, provider } = build({
+        Implementer: [write('GOOD'), '{"answer": "all good"}'],
+      });
+
+      await run(orchestrator, verifiedFull(crew));
+
+      const reviewerCall = provider.chat.mock.calls.find(
+        (c: [{ system?: string }]) => (c[0].system ?? '').includes('You are: Reviewer'),
+      );
+      const handover = (reviewerCall![0] as { messages: Array<{ content: string }> }).messages[0].content;
+
+      // No invented failure to chase.
+      expect(handover).toContain('Result: PASSED');
+      expect(handover).not.toContain('Result: FAILED');
+      expect(handover).toContain('External verification currently passes');
+      expect(handover).toContain('only if you identify a concrete defect');
+    });
+
+    it('V3. hands the reviewer the real failure when the primary failed', async () => {
+      const { orchestrator, crew, provider } = build({
+        Implementer: [write('still broken'), '{"answer": "done"}'],
+      });
+
+      await run(orchestrator, verifiedFull(crew));
+
+      const reviewerCall = provider.chat.mock.calls.find(
+        (c: [{ system?: string }]) => (c[0].system ?? '').includes('You are: Reviewer'),
+      );
+      const handover = (reviewerCall![0] as { messages: Array<{ content: string }> }).messages[0].content;
+
+      expect(handover).toContain('[Verification failure]');
+      expect(handover).toContain('Result: FAILED');
+      expect(handover).toContain('node check.js');
+    });
+
+    it('V4. still runs the tester after the reviewer repairs the workspace', async () => {
+      const { orchestrator, crew, calls } = build({
+        Implementer: [write('still broken'), '{"answer": "done"}'],
+        Reviewer: [write('GOOD'), '{"answer": "fixed"}'],
+      });
+
+      const result = await run(orchestrator, verifiedFull(crew));
+
+      expect(calls).toContain('Tester');
+      expect(result.staged?.stagesExecuted).toBe(3);
+      expect(result.staged?.solvedAtStage).toBe(2);
+    });
+
+    it('V5. gives the tester the verification from the reviewer stage', async () => {
+      const { orchestrator, crew, provider } = build({
+        Implementer: [write('still broken'), '{"answer": "done"}'],
+        Reviewer: [write('GOOD'), '{"answer": "I fixed the file"}'],
+      });
+
+      await run(orchestrator, verifiedFull(crew));
+
+      const testerCall = provider.chat.mock.calls.find(
+        (c: [{ system?: string }]) => (c[0].system ?? '').includes('You are: Tester'),
+      );
+      const handover = (testerCall![0] as { messages: Array<{ content: string }> }).messages[0].content;
+
+      // The reviewer's stage passed, so that is what the tester is told.
+      expect(handover).toContain('Result: PASSED');
+      expect(handover).toContain('[Previous agent: Reviewer]');
+      expect(handover).toContain('I fixed the file');
+    });
+
+    it('V6. reports the final verifier, not what the agents claimed', async () => {
+      const { orchestrator, crew } = build({
+        Implementer: ['{"answer": "done"}'],
+        Reviewer: ['{"answer": "looks right"}'],
+        Tester: ['{"answer": "all green"}'],
+      });
+
+      const result = await run(orchestrator, verifiedFull(crew));
+
+      expect(result.agentResults.every(r => r.taskResult.status === 'completed')).toBe(true);
+      expect(result.staged?.verified).toBe(false);
+      expect(result.status).toBe('failed');
+    });
+
+    it('V7. gives every stage the same envelope', async () => {
+      const peers = vi.spyOn(budget, 'createPeerEnvelope');
+      const { orchestrator, crew } = build({ Implementer: [write('GOOD'), '{"answer": "done"}'] });
+
+      await run(orchestrator, verifiedFull(crew));
+
+      const ceilings = peers.mock.results.map(r => (r.value as { envelope: { maxTokens: number } }).envelope.maxTokens);
+      expect(ceilings).toHaveLength(3);
+      expect(new Set(ceilings).size).toBe(1);
+      peers.mockRestore();
+    });
+
+    it('V8/V9. leaves sequential and staged behaving exactly as before', async () => {
+      // Sequential: everyone runs, no staged account at all.
+      const seq = build({
+        Implementer: [write('GOOD'), '{"answer": "done"}'],
+        Reviewer: ['{"answer": "reviewed"}'],
+        Tester: ['{"answer": "tested"}'],
+      });
+      const sequential = await run(seq.orchestrator, { ...seq.crew, strategy: 'sequential' });
+      expect(sequential.agentResults).toHaveLength(3);
+      expect(sequential.staged).toBeUndefined();
+
+      rmSync(join(dir, 'work.txt'), { force: true });
+
+      // Staged: a passing primary still stops the run.
+      const stg = build({ Implementer: [write('GOOD'), '{"answer": "done"}'] });
+      const staged = await run(stg.orchestrator, stg.crew);
+      expect(staged.staged?.stagesExecuted).toBe(1);
+      expect(stg.calls).not.toContain('Reviewer');
+    });
+
+    it('V10. rolls back a specialist edit that breaks an already-passing workspace', async () => {
+      const { orchestrator, crew } = build({
+        Implementer: [write('GOOD'), '{"answer": "done"}'],
+        // Runs only because this arm always runs, and makes things worse.
+        Reviewer: [write('BROKEN'), '{"answer": "changed it"}'],
+      });
+
+      const result = await run(orchestrator, verifiedFull(crew));
+
+      expect(readFileSync(join(dir, 'work.txt'), 'utf8')).toBe('GOOD');
+      const reviewer = result.agentResults[1];
+      expect(reviewer.taskResult.verifiedEdits).toMatchObject({ rollbacks: 1 });
+      expect(result.staged?.verified).toBe(true);
+    });
+  });
+
   it('13. leaves the other strategies exactly as they were', async () => {
     const { orchestrator, crew, calls } = build({
       Implementer: [write('GOOD'), '{"answer": "done"}'],

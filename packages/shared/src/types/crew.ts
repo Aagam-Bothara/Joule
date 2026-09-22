@@ -84,7 +84,15 @@ export interface AgentDefinition {
  * It requires `task.verifiedEdit`, since the decision to escalate must come
  * from outside the agent's own belief that it finished.
  */
-export type OrchestrationStrategy = 'sequential' | 'parallel' | 'hierarchical' | 'graph' | 'staged_recovery';
+/**
+ * `verified_full` is `staged_recovery` with early stopping switched off: every
+ * stage runs, and every stage is still followed by the check whose result is
+ * handed to the next agent. It exists to separate the two things staged
+ * recovery changes at once — giving specialists the verifier's evidence, and
+ * declining to run them at all — by holding the first and dropping the second.
+ */
+export type OrchestrationStrategy =
+  | 'sequential' | 'parallel' | 'hierarchical' | 'graph' | 'staged_recovery' | 'verified_full';
 
 /** Why a staged-recovery stage did not run. */
 export type StageSkipReason = 'verification_already_passed';

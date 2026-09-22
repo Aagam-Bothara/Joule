@@ -72,8 +72,15 @@ const RECOVERY_TESTER: AgentDefinition = {
   maxRetries: 0,
 };
 
-/** The three arms of the staged comparison. Same agents; only the strategy differs. */
-export type ComparisonArm = 'primary' | 'full' | 'staged';
+/**
+ * The arms of the staged comparison. Same agents throughout; only the strategy
+ * differs.
+ *
+ * `full_verify` is the control that separates the two things staged recovery
+ * changes together: it runs every stage like `full`, but checks after each one
+ * and hands the result to the next agent like `staged`.
+ */
+export type ComparisonArm = 'primary' | 'full' | 'staged' | 'full_verify';
 
 export const COMPARISON_ARMS: ComparisonArm[] = ['primary', 'full', 'staged'];
 
@@ -92,6 +99,15 @@ export function comparisonCrew(arm: ComparisonArm): CrewDefinition {
       name: 'arm-full',
       description: 'Implementer, then reviewer, then tester — every time',
       strategy: 'sequential',
+      agents: [PRIMARY, RECOVERY_REVIEWER, RECOVERY_TESTER],
+    };
+  }
+  if (arm === 'full_verify') {
+    return {
+      ...base,
+      name: 'arm-full-verify',
+      description: 'Every stage runs, and every stage is verified and handed on',
+      strategy: 'verified_full',
       agents: [PRIMARY, RECOVERY_REVIEWER, RECOVERY_TESTER],
     };
   }
