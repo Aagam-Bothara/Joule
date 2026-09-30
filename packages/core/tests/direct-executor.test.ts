@@ -102,6 +102,28 @@ function buildExecutor(responses: string[]) {
   return { executor, budget, tools, envelope, provider };
 }
 
+/** Read the model's exact final reply from the committed, old-parser run. */
+function realRepoReply(arm: 'staged' | 'full_verify', workloadId: string, role: string): string {
+  const file = new URL(`../../../benchmarks/experiments/real-repo-smoke/${arm}/runs.jsonl`, import.meta.url);
+  const records = readFileSync(file, 'utf8').trim().split('\n').map(line => JSON.parse(line));
+  const reply = records.find(record => record.workloadId === workloadId)
+    ?.agentResults.find((agent: { role: string }) => agent.role === role)?.answer;
+  if (typeof reply !== 'string') throw new Error(`Missing real-repo reply: ${arm}/${workloadId}/${role}`);
+  return reply;
+}
+
+function registerRepoTool(tools: ToolRegistry, name: 'repo_read' | 'repo_shell') {
+  const execute = vi.fn().mockResolvedValue({ ok: true });
+  tools.register({
+    name,
+    description: `Recorded ${name} call`,
+    inputSchema: z.object({ path: z.string().optional(), command: z.string().optional() }),
+    outputSchema: z.any(),
+    execute,
+  }, 'builtin');
+  return execute;
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -183,6 +205,72 @@ describe('DirectExecutor', () => {
   });
 
   describe('tolerant response parsing', () => {
+    it('executes the verbatim tagged JSON array from the staged pylint run', async () => {
+      const reply = realRepoReply('staged', 'pylint-dev__pylint-7114', 'Implementer');
+      const { executor, envelope, tools, provider } = buildExecutor([reply, '{"answer":"done"}']);
+      const shell = registerRepoTool(tools, 'repo_shell');
+
+      const result = await executor.execute(makeTask(), envelope, makeAgent({ allowedTools: ['repo_shell'] }));
+
+      expect(result.result).toBe('done');
+      expect(result.lifecycleMetrics?.toolCalls).toBe(1);
+      expect(shell).toHaveBeenCalledOnce();
+      expect(provider.chat).toHaveBeenCalledTimes(2);
+    });
+
+    it('executes the verbatim XML tool call from the full-verify pytest run', async () => {
+      const reply = realRepoReply('full_verify', 'pytest-dev__pytest-9359', 'Implementer');
+      const { executor, envelope, tools } = buildExecutor([reply, '{"answer":"done"}']);
+      const shell = registerRepoTool(tools, 'repo_shell');
+
+      const result = await executor.execute(makeTask(), envelope, makeAgent({ allowedTools: ['repo_shell'] }));
+
+      expect(result.result).toBe('done');
+      expect(result.lifecycleMetrics?.toolCalls).toBe(1);
+      expect(shell).toHaveBeenCalledWith({ command: "cd /testbed && grep -rn 'getstatement' --include='*.py' _pytest/" });
+    });
+
+    it('executes both calls in the verbatim nested wrapper from the full-verify pylint run', async () => {
+      const reply = realRepoReply('full_verify', 'pylint-dev__pylint-7114', 'Reviewer');
+      const { executor, envelope, tools } = buildExecutor([reply, '{"answer":"done"}']);
+      const read = registerRepoTool(tools, 'repo_read');
+
+      const result = await executor.execute(makeTask(), envelope, makeAgent({ allowedTools: ['repo_read'] }));
+
+      expect(result.result).toBe('done');
+      expect(result.lifecycleMetrics?.toolCalls).toBe(2);
+      expect(read).toHaveBeenCalledTimes(2);
+    });
+
+    it('executes a verbatim bare call object sliced from the staged pytest array', async () => {
+      const reply = realRepoReply('staged', 'pytest-dev__pytest-9359', 'Implementer');
+      const bareCall = reply.slice(reply.indexOf('{'), reply.lastIndexOf('}') + 1);
+      const { executor, envelope, tools } = buildExecutor([bareCall, '{"answer":"done"}']);
+      const read = registerRepoTool(tools, 'repo_read');
+
+      const result = await executor.execute(makeTask(), envelope, makeAgent({ allowedTools: ['repo_read'] }));
+
+      expect(result.result).toBe('done');
+      expect(result.lifecycleMetrics?.toolCalls).toBe(1);
+      expect(read).toHaveBeenCalledWith({ path: 'src/_pytest/assertion/util.py' });
+    });
+
+    it.each(['tool', 'name'])('accepts a %s key on a bare call (synthetic alias)', async key => {
+      // The committed real-repo replies contain toolName only; exercise aliases
+      // with the same recorded arguments and an explicitly synthetic key swap.
+      const reply = realRepoReply('staged', 'pytest-dev__pytest-9359', 'Implementer');
+      const bareCall = reply.slice(reply.indexOf('{'), reply.lastIndexOf('}') + 1);
+      const aliased = bareCall.replace('"toolName"', `"${key}"`);
+      const { executor, envelope, tools } = buildExecutor([aliased, '{"answer":"done"}']);
+      const read = registerRepoTool(tools, 'repo_read');
+
+      const result = await executor.execute(makeTask(), envelope, makeAgent({ allowedTools: ['repo_read'] }));
+
+      expect(result.result).toBe('done');
+      expect(result.lifecycleMetrics?.toolCalls).toBe(1);
+      expect(read).toHaveBeenCalledWith({ path: 'src/_pytest/assertion/util.py' });
+    });
+
     it('still runs the tools when the model closes the object early', async () => {
       // Observed from a real run: three good tool calls followed by a stray
       // "]}". A strict parse called that a finished answer and ended the run.
@@ -221,6 +309,47 @@ describe('DirectExecutor', () => {
   });
 
   describe('tool result rendering', () => {
+    it('shows the full bounded repo_read result to the next model call', async () => {
+      const marker = 'def expand_modules(files_or_modules):';
+      const source = `${'x'.repeat(2_000)}\n${marker}`;
+      const { executor, envelope, tools, provider } = buildExecutor([
+        '{"tool_calls":[{"toolName":"repo_read","toolArgs":{"path":"pylint/lint/expand_modules.py"}}]}',
+        '{"answer":"done"}',
+      ]);
+      tools.register({
+        name: 'repo_read',
+        description: 'Read source from the real repository',
+        inputSchema: z.object({ path: z.string() }),
+        outputSchema: z.any(),
+        execute: async () => ({ content: source, path: 'pylint/lint/expand_modules.py', totalLines: 144, truncated: false }),
+      }, 'builtin');
+
+      await executor.execute(makeTask(), envelope, makeAgent({ allowedTools: ['repo_read'] }));
+
+      const history = provider.chat.mock.calls[1][0].messages.map((m: { content: string }) => m.content).join('\n');
+      expect(history).toContain(marker);
+    });
+
+    it('shows a bounded repo_shell error beyond the first 1,000 characters', async () => {
+      const marker = 'SyntaxError: invalid syntax at line 47';
+      const { executor, envelope, tools, provider } = buildExecutor([
+        '{"tool_calls":[{"toolName":"repo_shell","toolArgs":{"command":"pytest -q"}}]}',
+        '{"answer":"done"}',
+      ]);
+      tools.register({
+        name: 'repo_shell',
+        description: 'Run a check in the real repository',
+        inputSchema: z.object({ command: z.string() }),
+        outputSchema: z.any(),
+        execute: async () => ({ stdout: `${'x'.repeat(2_000)}\n${marker}`, stderr: '', exitCode: 1 }),
+      }, 'builtin');
+
+      await executor.execute(makeTask(), envelope, makeAgent({ allowedTools: ['repo_shell'] }));
+
+      const history = provider.chat.mock.calls[1][0].messages.map((m: { content: string }) => m.content).join('\n');
+      expect(history).toContain(marker);
+    });
+
     it('shows the model what a tool actually returned', async () => {
       const { executor, envelope, tools, provider } = buildExecutor([
         '{"tool_calls": [{"toolName": "reader", "toolArgs": {}}]}',

@@ -193,7 +193,9 @@ Rules:
     if (!json || typeof json !== 'object') {
       return { type: 'malformed', raw };
     }
-    const obj = json as Record<string, unknown>;
+    // The shared JSON reader preserves a top-level call array. Adaptive mode
+    // executes one call per step, so use its first entry as with tool_calls.
+    const obj = (Array.isArray(json) ? { tool_calls: json } : json) as Record<string, unknown>;
     const action = typeof obj.action === 'string' ? obj.action : undefined;
 
     if (action === 'final_answer' || (action === undefined && obj.answer !== undefined)) {
@@ -233,15 +235,19 @@ Rules:
   }
 }
 
-/** Parse a JSON object out of a model reply (tolerates fences, prose around it, raw newlines in strings). */
+/** Parse JSON out of a model reply (tolerates fences, prose, and raw newlines in strings). */
 export function extractJson(raw: string): unknown {
   const cleaned = raw.replace(/```(?:json)?\s*\n?/gi, '').replace(/```/g, '').trim();
   const candidates = [cleaned];
+  // A tagged reply can contain a bare array of calls. Take the first complete
+  // JSON container before considering an object nested inside that array.
+  const container = balancedJsonPrefix(cleaned);
+  if (container && !candidates.includes(container)) candidates.push(container);
   const match = cleaned.match(/\{[\s\S]*\}/);
   if (match && match[0] !== cleaned) candidates.push(match[0]);
   // Small models sometimes close the object early and keep writing
   // ('...}},"plan":[...]'). The first balanced object is usually a complete action.
-  const prefix = balancedObjectPrefix(match ? match[0] : cleaned);
+  const prefix = match ? balancedJsonPrefix(match[0]) : undefined;
   if (prefix && !candidates.includes(prefix)) candidates.push(prefix);
   for (const c of candidates) {
     try { return JSON.parse(c); } catch { /* try repaired */ }
@@ -250,11 +256,11 @@ export function extractJson(raw: string): unknown {
   return undefined;
 }
 
-/** The shortest prefix of `text` (starting at its first '{') whose braces balance, string-aware. */
-function balancedObjectPrefix(text: string): string | undefined {
-  const start = text.indexOf('{');
+/** The first complete JSON object or array in text, with string-aware nesting. */
+function balancedJsonPrefix(text: string): string | undefined {
+  const start = text.search(/[\[{]/);
   if (start < 0) return undefined;
-  let depth = 0;
+  const closers: string[] = [];
   let inString = false;
   let escaped = false;
   for (let i = start; i < text.length; i++) {
@@ -266,10 +272,10 @@ function balancedObjectPrefix(text: string): string | undefined {
       continue;
     }
     if (ch === '"') inString = true;
-    else if (ch === '{') depth++;
-    else if (ch === '}') {
-      depth--;
-      if (depth === 0) return text.slice(start, i + 1);
+    else if (ch === '{' || ch === '[') closers.push(ch === '{' ? '}' : ']');
+    else if (ch === '}' || ch === ']') {
+      if (closers.pop() !== ch) return undefined;
+      if (closers.length === 0) return text.slice(start, i + 1);
     }
   }
   return undefined;

@@ -38,6 +38,23 @@ interface ParsedResponse {
   answer?: string;
 }
 
+/** Normalize the call shapes seen in model replies, including nested wrappers. */
+function toolCallsFrom(value: unknown): ParsedToolCall[] {
+  if (Array.isArray(value)) return value.flatMap(toolCallsFrom);
+  if (value === null || typeof value !== 'object') return [];
+  const obj = value as Record<string, unknown>;
+  const toolName = [obj.toolName, obj.tool, obj.name]
+    .find((name): name is string => typeof name === 'string' && name.length > 0);
+  if (toolName) {
+    const args = obj.toolArgs ?? obj.tool_args ?? obj.args ?? obj.input ?? {};
+    return [{ toolName, toolArgs: args !== null && typeof args === 'object' && !Array.isArray(args)
+      ? args as Record<string, unknown> : {} }];
+  }
+  if (Array.isArray(obj.tool_calls)) return toolCallsFrom(obj.tool_calls);
+  if (Array.isArray(obj.steps)) return toolCallsFrom(obj.steps);
+  return [];
+}
+
 /** A recorded trace span for tool execution or LLM call. */
 interface TraceSpan {
   name: string;
@@ -77,6 +94,11 @@ const MAX_IDENTICAL_TOOL_CALLS = 3;
 
 /** Maximum size for a single tool argument value in characters. */
 const MAX_TOOL_ARG_SIZE = 50_000;
+
+/** Repository tools already cap their payloads; preserve enough to show a file or test failure. */
+const REPO_READ_RESULT_CHARS = 16_000;
+const REPO_SHELL_RESULT_CHARS = 10_000;
+const DEFAULT_TOOL_RESULT_CHARS = 1_000;
 
 /**
  * DirectExecutor — OpenClaw-style reactive agent loop.
@@ -325,7 +347,9 @@ export class DirectExecutor {
             });
 
             const toolDuration = monotonicNow() - toolSpanStart;
-            const output = this.truncate(this.renderToolOutput(result.output), 1000);
+            const outputLimit = toolCall.toolName === 'repo_read' ? REPO_READ_RESULT_CHARS
+              : toolCall.toolName === 'repo_shell' ? REPO_SHELL_RESULT_CHARS : DEFAULT_TOOL_RESULT_CHARS;
+            const output = this.truncate(this.renderToolOutput(result.output), outputLimit);
 
             if (result.success && before) {
               // The write landed; keep it only if the workspace still verifies.
@@ -552,53 +576,36 @@ Respond with:
    * Handles various response formats gracefully.
    */
   private parseResponse(content: string): ParsedResponse {
+    // Some model replies use XML tags for the call name and JSON arguments.
+    // Parse the paired tags, including replies whose outer closing tag is bad.
+    if (/<tool_calls>/i.test(content)) {
+      const xmlCalls = [...content.matchAll(/<tool_name>\s*([^<>]+?)\s*<\/tool_name>\s*<tool_args>\s*([\s\S]*?)\s*<\/tool_args>/gi)]
+        .flatMap(match => toolCallsFrom({ toolName: match[1].trim(), toolArgs: extractJson(match[2]) }));
+      if (xmlCalls.length > 0) return { type: 'tool_calls', toolCalls: xmlCalls };
+    }
+
     // `extractJson` is the same tolerant reader the adaptive path uses: it
-    // copes with code fences, prose around the object, raw newlines inside
-    // strings, and an object closed early with text still trailing it. A strict
+    // copes with code fences, prose around JSON, raw newlines inside
+    // strings, and a container closed early with text still trailing it. A strict
     // parse treats all of those as "the agent is finished", which silently ends
     // a run that was in the middle of calling three tools.
-    const parsed = extractJson(content) as Record<string, any> | undefined;
+    const parsed = extractJson(content);
 
     if (parsed !== undefined && parsed !== null && typeof parsed === 'object') {
       // Check for final answer
-      if (parsed.answer !== undefined) {
+      if (!Array.isArray(parsed) && (parsed as Record<string, unknown>).answer !== undefined) {
+        const answer = (parsed as Record<string, unknown>).answer;
         return {
           type: 'final_answer',
-          answer: typeof parsed.answer === 'string' ? parsed.answer : JSON.stringify(parsed.answer),
+          answer: typeof answer === 'string' ? answer : JSON.stringify(answer),
         };
       }
 
-      // Check for tool calls
-      if (parsed.tool_calls && Array.isArray(parsed.tool_calls)) {
-        const toolCalls: ParsedToolCall[] = parsed.tool_calls
-          .filter((tc: any) => tc.toolName && typeof tc.toolName === 'string')
-          .map((tc: any) => ({
-            toolName: tc.toolName,
-            toolArgs: tc.toolArgs ?? {},
-          }));
-
-        if (toolCalls.length > 0) {
-          return { type: 'tool_calls', toolCalls };
-        }
-      }
-
-      // If it has steps (old format), treat first step as tool call
-      if (parsed.steps && Array.isArray(parsed.steps) && parsed.steps.length > 0) {
-        const toolCalls: ParsedToolCall[] = parsed.steps
-          .filter((s: any) => s.toolName)
-          .map((s: any) => ({
-            toolName: s.toolName,
-            toolArgs: s.toolArgs ?? {},
-          }));
-
-        if (toolCalls.length > 0) {
-          return { type: 'tool_calls', toolCalls };
-        }
-      }
-
+      const toolCalls = toolCallsFrom(parsed);
+      if (toolCalls.length > 0) return { type: 'tool_calls', toolCalls };
     }
 
-    // No object, or one that asks for nothing: the reply is the answer.
+    // No recognizable call or answer: preserve the reply as the answer.
     return { type: 'final_answer', answer: content };
   }
 

@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { readFileSync } from 'node:fs';
 import { ModelTier, type BudgetUsage, type ExecutionMode, type StepResult } from '@joule/shared';
 import { RuleBasedEscalationPolicy, type PolicyInput } from '../src/adaptive/escalation-policy.js';
 import { ConfidenceEngine } from '../src/adaptive/confidence-engine.js';
@@ -332,6 +333,17 @@ describe('StepAgent.parseAction', () => {
     expect(StepAgent.parseAction('```json\n{"tool_calls":[{"toolName":"y","toolArgs":{}}]}\n```').type).toBe('tool_call');
     expect(StepAgent.parseAction('{"answer":"42"}')).toEqual({ type: 'final_answer', answer: '42', plan: undefined });
     expect(StepAgent.parseAction('{"action":"give_up","reason":"no tool"}').type).toBe('give_up');
+  });
+
+  it('keeps accepting a bare tool array when the shared JSON reader returns the array', () => {
+    const path = new URL('../../../benchmarks/experiments/real-repo-smoke/staged/runs.jsonl', import.meta.url);
+    const record = readFileSync(path, 'utf8').trim().split('\n').map(line => JSON.parse(line))
+      .find(row => row.workloadId === 'pytest-dev__pytest-9359');
+    const reply = record.agentResults.find((agent: { role: string }) => agent.role === 'Implementer').answer as string;
+    const array = reply.slice(reply.indexOf('['));
+    const action = StepAgent.parseAction(array);
+    expect(action.type).toBe('tool_call');
+    if (action.type === 'tool_call') expect(action.toolName).toBe('repo_read');
   });
 
   it('repairs raw newlines inside JSON string values (common with small models writing code)', () => {

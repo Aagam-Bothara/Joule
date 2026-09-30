@@ -5,8 +5,9 @@
  * on the host. A SWE-bench instance lives inside its own container, so the
  * tools are `repo_read`, `repo_write`, `repo_edit` and `repo_shell` instead.
  * The roles are otherwise carried over word for word: same responsibility, same
- * adversarial framing for the recovery stages, same iteration and wall-clock
- * ceilings, same budget mode.
+ * adversarial framing for the recovery stages, same wall-clock ceilings and
+ * budget mode. Recovery has 16 iterations because the 10-iteration authored
+ * fixture limit ended real-repository inspection mid-task.
  *
  * This is a port, not a rewrite, and it is worth being explicit that it is not
  * a null change: the prompts name different tools than the authored-fixture
@@ -20,7 +21,10 @@ import type { ComparisonArm } from '../specialist-value/crews.js';
 
 const TOOLS = ['repo_read', 'repo_write', 'repo_edit', 'repo_shell'];
 const PRIMARY_ITERATIONS = 16;
-const RECOVERY_ITERATIONS = 10;
+// The smoke runs hit 10 while still inspecting pytest/pylint. Match the
+// primary's 16 turns; the existing 100k-token and 10-minute caps still bound
+// each recovery attempt.
+const RECOVERY_ITERATIONS = 16;
 const STAGE_WALL_TIMEOUT_MS = 600_000;
 
 const PRIMARY: AgentDefinition = {

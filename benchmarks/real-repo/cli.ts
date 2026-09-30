@@ -17,6 +17,7 @@ import type { CrewScalingRecord } from '../crew-scaling/types.js';
 import { runCrewScaling } from '../crew-scaling/runner.js';
 import { comparisonCrew, type ComparisonArm } from '../specialist-value/crews.js';
 import { sweCrew } from './crews.js';
+import { observedRepoTools } from './record.js';
 import { compareStaged, renderStagedComparison } from '../specialist-value/staged-analyze.js';
 import { repoTools } from '../harness/workloads/swebench.js';
 import { ARTIFACT_ROOT, currentContainer, loadInstances, sweWorkloads, type SweItem } from './workload.js';
@@ -101,11 +102,16 @@ async function main(): Promise<void> {
     }
 
     mkdirSync(outDir, { recursive: true });
+    const observedTools = observedRepoTools(results.flatMap(r => r.records));
     writeFileSync(join(outDir, 'manifest.json'), JSON.stringify({
       startedAt: started,
       finishedAt: new Date().toISOString(),
       runtimeCommit: gitCommit(),
       runtimeDirty: treeDirty(),
+      responseParser: 'array-xml-bare-alias-v1',
+      toolOutputPolicy: 'repo_read 16000 chars, repo_shell 10000 chars, other tools 1000 chars',
+      containerPythonEditGuard: 'repo_write/repo_edit compile .py and .pyi after writing; restore previous content or remove a new file on failure',
+      costAccounting: 'Joule budget estimate from total tokens and the local model price table; provider billed amount is not captured',
       benchmark: 'SWE-bench Lite (princeton-nlp/SWE-bench_Lite, test split)',
       selectionRule: 'image present locally AND repo is pytest-driven (pytest/pylint/flask) AND self-test passes (fails at base commit, passes with the upstream fix)',
       model, provider, arms,
@@ -116,13 +122,14 @@ async function main(): Promise<void> {
       verificationPolicy: 'SWE-bench criterion in-container: hidden test patch applied over the agent\'s work, FAIL_TO_PASS and PASS_TO_PASS must all pass, test files restored afterwards',
       verifiedEditGate: 'enabled, but inert for container-side edits (it snapshots host paths)',
       tools: TOOLS_NOTE,
+      observedTools,
       toolLoopSemantics: 'identical-call repeat blocked (tool + arguments); no tool is ever disabled',
       runs: results.reduce((n, r) => n + r.records.length, 0),
       totalCostUsd: results.reduce((s, r) => s + r.records.reduce((x, y) => x + (y.totalCostUsd ?? 0), 0), 0),
     }, null, 2));
 
     const spend = results.reduce((s, r) => s + r.records.reduce((x, y) => x + (y.totalCostUsd ?? 0), 0), 0);
-    process.stderr.write(`\n${results.reduce((n, r) => n + r.records.length, 0)} run(s), $${spend.toFixed(4)} spent, written under ${outDir}\n`);
+    process.stderr.write(`\n${results.reduce((n, r) => n + r.records.length, 0)} run(s), $${spend.toFixed(4)} estimated, ${observedTools.writeAttempts} observed write attempt(s), ${observedTools.unidentifiedCalls} unidentified call(s), written under ${outDir}\n`);
     return;
   }
 
