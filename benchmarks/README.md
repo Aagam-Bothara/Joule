@@ -906,6 +906,11 @@ to five of sixteen allowed model calls without trying to write anything.
 
 ### Replication on fresh fixtures (`benchmarks/staged-replication`)
 
+The first two tables below (this one and the `verified_full` ablation) were measured under the
+response parser before the array/XML/bare-call fix. All four arms were then rerun under the
+corrected parser; that rerun is the current measurement and is reported
+[at the end of this section](#rerun-under-the-corrected-parser-staged-replication-v2).
+
 Ten new repositories, one per defect class (API contract, cross-file state, edge case, wrong
 algorithm, numeric precision, import interaction, stale cache, boundary, data transformation, error
 behaviour), three repetitions, 90 runs, $0.30. Each fixture is self-tested first: it must fail as
@@ -943,39 +948,84 @@ Caveats: the quality effect rests on 3 discordant pairs (McNemar p = 0.25), so i
 not significant; only the *equivalence* of `verified_full` and staged is firmly established (30/30
 identical, p = 1.0). One model, one provider, fixtures we authored, n = 30 cells per arm.
 
-### Real repositories: blocked by a capability floor (`benchmarks/real-repo`)
+### Rerun under the corrected parser (`staged-replication-v2`)
 
-The harness works. SWE-bench Lite instances run through the same comparison runner; the verifier is
-the SWE-bench criterion as a container-side exit code (hidden test patch applied over the agent's
-work, `FAIL_TO_PASS` and `PASS_TO_PASS` required, test files restored afterwards so a check never
-leaves them where an agent could read them). The task pool is fixed by a self-test before any run —
-image present locally, pytest-driven repo, fails at base commit and passes with the upstream fix —
-which admitted 13 of 15 candidates.
+The same ten fixtures, the same three repetitions and the same model (`deepseek/deepseek-v4-flash`
+on OpenRouter), run on 2026-09-30 with the corrected response parser, all four arms in one
+invocation: 120 runs, $0.33 estimated. Data in `benchmarks/experiments/staged-replication-v2`.
 
-The agents do not get far enough to measure anything:
+| arm | success | cost | tokens | JCT | stages |
+| --- | --- | --- | --- | --- | --- |
+| implementer alone | 19/30 | $0.0014 | 10,482 | 52s | 1.00 |
+| always-on crew | 27/30 | $0.0039 | 29,575 | 158s | 3.00 |
+| `verified_full` | 30/30 | $0.0036 | 27,154 | 49s | 3.00 |
+| staged recovery | 30/30 | $0.0020 | 15,235 | 27s | 1.30 |
 
-| model | model calls | tool calls | write attempts | termination |
-| --- | --- | --- | --- | --- |
-| `deepseek-v4-flash` | 2–10 | up to 17 | **0** across 12 agent runs | iteration cap / empty response |
-| `qwen/qwen3-coder` | 15 | 15 (9 shell, 6 read) | **0** | budget exhausted at 103k tokens |
+| comparison | what differs | old parser | corrected parser |
+| --- | --- | --- | --- |
+| always-on → `verified_full` | verifier evidence only | 27/30 → 30/30, 14% cheaper | 27/30 → 30/30, 8% cheaper |
+| `verified_full` → staged | early stopping only | 30/30 → 30/30, 41% cheaper | 30/30 → 30/30, 44% cheaper |
 
-Both burn the entire per-agent envelope navigating a large unfamiliar repository and never call
-`repo_write` or `repo_edit`. Because the primary never passes verification, staged recovery never
-skips a stage and becomes behaviourally identical to `verified_full`: the paired comparison is null
-by construction, so it was not run. The authored-fixture conclusions are unaffected; what remains
-untested is external validity.
+- Paired cells reproduce exactly. Always-on against `verified_full`: 27 both pass, 3 `verified_full`
+  only (McNemar p = 0.25). `verified_full` against staged: 30 both pass, 0 discordant (p = 1.0).
+- The implementer alone rose from 15/30 to 19/30. The arms are not paired across runs, so this
+  is consistent with the parser fix no longer dropping the implementer's calls but does not
+  establish it. Inside the staged arm the implementer passed 22/30, so fewer cells reached recovery:
+  staged ran 9 specialist stages and skipped 51 of 60 (22 runs saved two stages, 7 reviewer
+  recoveries saved one, 1 needed the tester).
+- After a state that already verified PASS, `verified_full` entered 49 specialist stages; 49 of 49
+  wrote nothing, with no rollbacks and no regressions.
+- The arms ran sequentially, and provider latency drifted during the run: always-on runs took about
+  2.3× their old-parser wall-clock while costing less. Cost and tokens are the reliable efficiency
+  comparison; the JCT column is not controlled across arms.
 
-The binding constraint looks like repository orientation rather than coding ability — a hypothesis,
-not a result. Raising ceilings or adding a navigation affordance is the obvious lever, and it is a
-deliberate design change to make before a run and measure, not a knob to turn until a benchmark
-turns positive.
+The conclusions of the old-parser run stand under the corrected parser: verifier evidence gives the
+directional 27 → 30 quality effect, and conditional admission matches `verified_full` cell for cell
+at 44% lower cost and tokens.
+
+### Real repositories: post-fix primary reaches writes (`benchmarks/real-repo`)
+
+The SWE-bench Lite harness uses locally available images, real issues, hidden tests, and the
+official pass criterion. Its old-parser smoke and probe datasets are labelled in their manifests.
+The preselected self-tested pool admitted 13 of 15 candidate issues.
+
+The committed `agentResults[].tools` entries name the executed calls: none is `repo_write` or
+`repo_edit` in the old smoke and probe runs. That is an observation from named tools, not an
+inference from the host verified-edit gate's zero accepted writes; that gate does not snapshot
+container-side edits. Several old final replies contain unexecuted calls: a tagged bare JSON
+array, XML tags, or a nested wrapper. A mock-provider replay shows that the direct executor
+treated the array and XML as final answers and dropped nested calls. Reviewers and testers also
+hit the old 10-iteration limit while still inspecting pylint/pytest.
+
+These old runs do not establish a model or navigation capability floor. The parser now handles the
+recorded shapes, and the recovery limit is 16. The first post-parser primary-only smoke run used
+`gpt-4o-mini` on `pylint-dev__pylint-7114`. Its lifecycle records 14 model calls, 25 named tool
+calls (10 `repo_read`, 14 `repo_edit`, 1 `repo_write`), and 15 write attempts. Eleven write calls
+reported success; the container diff confirms `pylint/lint/expand_modules.py` changed. The run
+ended at the token budget with an invalid Python edit, so hidden verification failed. Joule
+estimated its cost at $0.0404. That run predates the larger `repo_read`/`repo_shell` result limits
+and container-side Python syntax check with rollback for `repo_write`/`repo_edit`.
+
+One bounded primary-only rerun with those safeguards made 18 named tool calls (6 `repo_read`,
+3 `repo_edit`, 9 `repo_shell`), with three successful edits and no unidentified calls. Its Python
+file compiled, but the hidden verifier reported F2P 0/1 and P2P 56/56. The agent edited
+`get_python_path` with a condition equivalent to the original, then ended after acknowledging
+remaining failures. The reference patch changes a branch in `expand_modules` instead. It used
+10 of 16 available iterations and 79,637 of 100,000 budgeted tokens, so neither limit ended this
+run. Joule estimated $0.0299 for the rerun; the provider-billed amount is not captured. The two
+post-parser primary runs show that agents now reach real-repository writes, but neither solved this
+issue. Staged recovery and any real-repository success rate remain unmeasured. The authored-fixture
+comparison has been rerun under the corrected parser
+([above](#rerun-under-the-corrected-parser-staged-replication-v2)); the real-repository one has not.
 
 ### Reproducing
 
 ```bash
 npx tsx benchmarks/staged-replication/cli.ts selftest        # fixtures must fail as planted and pass with the reference fix
-npx tsx benchmarks/staged-replication/cli.ts run --seeds 3   # primary / full / staged, 10 tasks x 3 reps
-npx tsx benchmarks/staged-replication/cli.ts analyze
+npx tsx benchmarks/staged-replication/cli.ts run --seeds 3 --arms primary,full,full_verify,staged \
+  --out-dir benchmarks/experiments/staged-replication-v2    # 10 tasks x 4 arms x 3 reps
+npx tsx benchmarks/staged-replication/cli.ts analyze --arms primary,full,full_verify,staged \
+  --out-dir benchmarks/experiments/staged-replication-v2
 
 npx tsx benchmarks/real-repo/selftest.ts <instanceId ...>    # decides the pool; calls no model
 npx tsx benchmarks/real-repo/cli.ts pool

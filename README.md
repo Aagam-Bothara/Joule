@@ -13,7 +13,7 @@ it hands the next agent the actual failure output, and it stops the moment the c
 
 ![CI](https://github.com/Aagam-Bothara/Joule/actions/workflows/test.yml/badge.svg)
 ![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)
-![Tests](https://img.shields.io/badge/tests-1405%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-1426%20passing-brightgreen)
 ![TypeScript](https://img.shields.io/badge/TypeScript-100%25-blue)
 ![Node.js](https://img.shields.io/badge/node-%3E%3D22-brightgreen)
 
@@ -115,14 +115,16 @@ mechanism and its benchmarks are [further down](#escalating-inside-one-task).
 **Authored repository-debugging benchmark: 10 repositories with one planted defect each, 3
 repetitions, 30 cells per arm, `deepseek-v4-flash`, verified-edit gate on.** Each task gives the
 agent a failing suite and nothing about where the defect is. All four arms share the same agents,
-prompts, tools, budgets and verifier — only the execution policy differs.
+prompts, tools, budgets and verifier — only the execution policy differs. These are the 120 runs
+made on 2026-09-30 under the corrected response parser; the earlier old-parser run reached the same
+outcomes in every arm but `PRIMARY` (see [benchmarks/README.md](benchmarks/README.md)).
 
 | arm | success | mean cost | mean tokens | mean JCT | mean stages |
 |---|---:|---:|---:|---:|---:|
-| `PRIMARY` — implementer alone | 15/30 | $0.0021 | 16,282 | 36s | 1.00 |
-| `FULL` — all three, every time | 27/30 | $0.0053 | 40,290 | 96s | 3.00 |
-| `FULL_VERIFY` — all three, verified between stages | 30/30 | $0.0046 | 34,478 | 81s | 3.00 |
-| `STAGED` — escalate only on failure | 30/30 | $0.0027 | 20,348 | 46s | 1.53 |
+| `PRIMARY` — implementer alone | 19/30 | $0.0014 | 10,482 | 52s | 1.00 |
+| `FULL` — all three, every time | 27/30 | $0.0039 | 29,575 | 158s | 3.00 |
+| `FULL_VERIFY` — all three, verified between stages | 30/30 | $0.0036 | 27,154 | 49s | 3.00 |
+| `STAGED` — escalate only on failure | 30/30 | $0.0020 | 15,235 | 27s | 1.30 |
 
 The two middle rows are the ablation that separates the mechanisms:
 
@@ -131,7 +133,7 @@ FULL → FULL_VERIFY      same 3 stages; difference is verifier evidence
                         27/30 → 30/30
 
 FULL_VERIFY → STAGED    same verifier-informed specialists; difference is stopping on PASS
-                        30/30 → 30/30,  cost −41%,  tokens −41%,  JCT −43%
+                        30/30 → 30/30,  cost −44%,  tokens −44%,  JCT −45%
 ```
 
 Read carefully:
@@ -141,10 +143,13 @@ Read carefully:
 - `30/30` against `FULL`'s `27/30` rests on 3 discordant pairs, McNemar exact **p = 0.25**. That is
   directional, not statistically significant, and it is not proof of general reliability.
 - `STAGED` does not "beat" `FULL_VERIFY`. It matches it for less work.
+- The arms ran one after another, and provider latency drifted: `FULL`'s runs took over twice as
+  long as in the old-parser run while costing less. Cost and tokens are the reliable efficiency
+  measures; wall-clock comparisons between arms are weaker.
 
 Scoped claim: *on a 30-cell authored repository-debugging benchmark with DeepSeek V4 Flash, STAGED
-matched FULL_VERIFY's 30/30 outcomes while reducing mean cost and tokens by 41% and wall-clock by
-43%.* It is not a claim about your repository, your model, or agents in general.
+matched FULL_VERIFY's 30/30 outcomes while reducing mean cost and tokens by 44%.* It is not a claim
+about your repository, your model, or agents in general.
 
 ---
 
@@ -176,18 +181,17 @@ Across the 30 `STAGED` cells:
 
 ```
 30 runs
-├── 19  solved by the implementer            → 63% stop after one agent
-└── 11  failed verification
-     ├──  6  recovered by the reviewer       → 37% reach the reviewer
-     └──  5  still failing
-          └── 5  recovered by the tester     → 17% reach the tester
+├── 22  solved by the implementer            → 73% stop after one agent
+└──  8  failed verification
+     ├──  7  recovered by the reviewer       → 27% reach the reviewer
+     └──  1  still failing
+          └── 1  recovered by the tester     →  3% reach the tester
 
 final: 30/30
 ```
 
 This is the resource mechanism made concrete: the majority of tasks never pay for a specialist, and
-the ones that do pay only for as many as the evidence demands. In 10 of the 11 recoveries the
-agent that fixed the repository also named the planted cause in its own report.
+the ones that do pay only for as many as the evidence demands.
 
 ---
 
@@ -197,8 +201,8 @@ agent that fixed the repository also named the planted cause in its own report.
 have **already passed** verification:
 
 ```
-41  specialist stages entered after a passing check
-41  made no edit at all
+49  specialist stages entered after a passing check
+49  made no edit at all
  0  accepted improvements
  0  rollbacks
  0  regressions
@@ -206,7 +210,7 @@ have **already passed** verification:
 
 On this workload and model, once external verification passed, continuing to run specialists
 produced no measured benefit — and no measured harm either. It was simply cost. That is the direct
-empirical justification for conditional admission, and the reason `STAGED` can skip 44 of
+empirical justification for conditional admission, and the reason `STAGED` can skip 51 of
 `FULL_VERIFY`'s 60 specialist stages without losing a single outcome.
 
 We do not generalize this to all agents, models or tasks. A more eager specialist would turn that
@@ -886,16 +890,17 @@ system_insights:
 
 What the staged-recovery evidence does **not** cover:
 
-- **Real repositories are not validated.** Every staged-recovery number above comes from
-  repositories we authored with planted defects. We built a SWE-bench Lite harness to test external
-  validity and it works — real images, real issues, hidden tests, the official pass criterion — but
-  the runs are blocked short of a measurement. Under the frozen configuration, agents navigate a
-  large unfamiliar repository and **never attempt an edit**: zero `repo_write`/`repo_edit` calls
-  across 12 agent runs with DeepSeek V4 Flash, and zero again in a single probe with a stronger
-  coding model, which exhausted its token budget still reading. With the primary never passing,
-  `STAGED` degenerates into `FULL_VERIFY` and the comparison is null by construction, so the paid
-  benchmark was stopped rather than run to a meaningless 0-vs-0 result. **This is a current model
-  and navigation capability floor, not evidence that staged recovery fails on real repositories.**
+- **Staged recovery on real repositories remains unvalidated.** Every staged-recovery number above
+  comes from authored repositories. The old SWE-bench Lite smoke and probe artifacts had zero
+  observed `repo_write`/`repo_edit` calls, but several agents ended with unexecuted calls that the
+  old parser missed. Those runs do **not** establish a model capability floor. Two post-parser
+  primary-only runs on `pylint-dev__pylint-7114` with `gpt-4o-mini` reached writes. The first,
+  before the larger read limit and Python syntax guard, exhausted its budget with invalid source.
+  In the second, the agent made three syntactically valid edits but the required issue test still
+  failed (0/1); all 56 pass-to-pass checks passed. Its edit did not change the condition's behavior,
+  and it stopped after reporting remaining failures. These runs show that the parser fix reached
+  real-repository writes, while the current primary still failed this issue. They do not measure
+  staged recovery or establish a real-repository success rate.
 - **One model, one provider.** Everything is DeepSeek V4 Flash on OpenRouter. No multi-model
   generalization has been shown.
 - **Small samples.** 30 cells per arm on 10 authored fixtures; the earlier control is 15 cells. The
@@ -915,7 +920,7 @@ and are documented as wrong rather than deleted.
 
 ## Current Status
 
-**Research prototype / experimental runtime.** 1405 tests passing across 106 files. Active
+**Research prototype / experimental runtime.** 1426 tests passing across 108 files. Active
 development — expect API refinements.
 
 Supported by authored-fixture evidence:
@@ -973,7 +978,7 @@ Known limitations:
 ```bash
 pnpm install       # install dependencies
 pnpm build         # build all 9 packages
-pnpm test          # 1405 tests across 106 files
+pnpm test          # 1426 tests across 108 files
 pnpm dev           # watch mode
 ```
 
