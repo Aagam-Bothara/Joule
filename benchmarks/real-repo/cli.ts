@@ -119,6 +119,7 @@ async function main(): Promise<void> {
       repositories: [...new Set(items.map(i => i.repo))],
       repetitions: seeds,
       budgetMode: sweCrew('staged').budgetMode,
+      perAgentBudget: sweCrew('staged').budget,
       verificationPolicy: 'SWE-bench criterion in-container: hidden test patch applied over the agent\'s work, FAIL_TO_PASS and PASS_TO_PASS must all pass, test files restored afterwards',
       verifiedEditGate: 'enabled, but inert for container-side edits (it snapshots host paths)',
       tools: TOOLS_NOTE,

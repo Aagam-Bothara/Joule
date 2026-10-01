@@ -16,10 +16,33 @@
  * that carries the caveat.
  */
 
-import type { AgentDefinition, CrewDefinition } from '@joule/shared';
+import type { AgentDefinition, BudgetEnvelope, CrewDefinition } from '@joule/shared';
 import type { ComparisonArm } from '../specialist-value/crews.js';
 
 const TOOLS = ['repo_read', 'repo_write', 'repo_edit', 'repo_shell'];
+
+/**
+ * Four times the `high` envelope, decided 2026-10-01 before any run under it.
+ *
+ * With the parser fixed, all 13 pool tasks ended "Budget exhausted" at 100k
+ * tokens after 6-11 model calls, every one still reading and none having
+ * attempted an edit (benchmarks/experiments/real-repo-primary-baseline-v2).
+ * Each call resends the conversation, so a real repository spends the authored
+ * fixtures' allowance in about eight turns. Every dimension is scaled so that
+ * no other one becomes the new binding limit; cost keeps its $1 ceiling, which
+ * 400k DeepSeek V4 Flash tokens stay far below. The authored benchmark keeps
+ * `high` unchanged. Written out rather than derived from the preset so that the
+ * recorded values cannot drift if `high` is ever retuned.
+ */
+export const REAL_REPO_BUDGET: BudgetEnvelope = {
+  maxTokens: 400_000, // high: 100_000
+  maxToolCalls: 160, // high: 40
+  maxLatencyMs: 600_000, // high: 300_000; matches the agents' 10-minute wall clock
+  maxEscalations: 5,
+  costCeilingUsd: 1.0,
+  maxEnergyWh: 2.0, // high: 0.5
+  maxCarbonGrams: 0.8, // high: 0.2
+};
 const PRIMARY_ITERATIONS = 16;
 // The smoke runs hit 10 while still inspecting pytest/pylint. Match the
 // primary's 16 turns; the existing 100k-token and 10-minute caps still bound
@@ -72,7 +95,7 @@ const RECOVERY_TESTER: AgentDefinition = {
 
 export function sweCrew(arm: ComparisonArm): CrewDefinition {
   const base = {
-    budget: 'high' as const,
+    budget: REAL_REPO_BUDGET,
     budgetMode: 'fixed_per_agent' as const,
     aggregation: 'last' as const,
     agents: [PRIMARY, RECOVERY_REVIEWER, RECOVERY_TESTER],
