@@ -66,6 +66,23 @@ export interface StepAgentOptions {
 
 const MAX_TOOL_ARG_CHARS = 50_000;
 
+/**
+ * Window over the step conversation: the first message (task + state) and a
+ * tail of at most `max - 1` messages. The tail's start moves in strides of half
+ * the window rather than one message per turn, so what is sent stays a
+ * byte-identical prefix for several turns and provider prompt caches keep
+ * hitting. The model sees between half and all of the window.
+ */
+export function historyWindow(messages: ChatMessage[], max: number): ChatMessage[] {
+  if (messages.length <= max) return messages;
+  const stride = Math.max(1, Math.floor(max / 2));
+  const start = Math.ceil((messages.length - (max - 1)) / stride) * stride;
+  let tail = messages.slice(start);
+  // Keep role alternation sane: the tail should start with a user message.
+  while (tail.length > 0 && tail[0].role !== 'user') tail = tail.slice(1);
+  return [messages[0], ...tail];
+}
+
 export class StepAgent {
   private readonly maxHistory: number;
   private readonly relevantToolsAbove: number;
@@ -97,7 +114,7 @@ export class StepAgent {
       provider: decision.provider,
       tier: decision.tier,
       system: this.buildSystemPrompt(task, state),
-      messages: this.window(history),
+      messages: historyWindow(history, this.maxHistory),
       temperature: 0.2,
       responseFormat: 'json',
       // Final answers are JSON-wrapped prose; the providers' 1024 default truncates them.
@@ -169,16 +186,6 @@ Rules:
     return filtered.filter(t => names.has(t.name));
   }
 
-  /** Sliding window: always keep the first message (task + state) and the tail. */
-  private window(messages: ChatMessage[]): ChatMessage[] {
-    if (messages.length <= this.maxHistory) return messages;
-    const first = messages[0];
-    let tail = messages.slice(-(this.maxHistory - 1));
-    // Keep role alternation sane: the tail should start with a user message.
-    while (tail.length > 0 && tail[0].role !== 'user') tail = tail.slice(1);
-    return [first, ...tail];
-  }
-
   /** Lenient parser: accepts the action format and DirectExecutor-style shapes. */
   static parseAction(content: string): AgentAction {
     const raw = (content ?? '').trim();
@@ -186,7 +193,9 @@ Rules:
     if (!json || typeof json !== 'object') {
       return { type: 'malformed', raw };
     }
-    const obj = json as Record<string, unknown>;
+    // The shared JSON reader preserves a top-level call array. Adaptive mode
+    // executes one call per step, so use its first entry as with tool_calls.
+    const obj = (Array.isArray(json) ? { tool_calls: json } : json) as Record<string, unknown>;
     const action = typeof obj.action === 'string' ? obj.action : undefined;
 
     if (action === 'final_answer' || (action === undefined && obj.answer !== undefined)) {
@@ -226,28 +235,77 @@ Rules:
   }
 }
 
-/** Parse a JSON object out of a model reply (tolerates fences, prose around it, raw newlines in strings). */
+/** Parse JSON out of a model reply (tolerates fences, prose, and raw newlines in strings). */
 export function extractJson(raw: string): unknown {
   const cleaned = raw.replace(/```(?:json)?\s*\n?/gi, '').replace(/```/g, '').trim();
   const candidates = [cleaned];
+  // A tagged reply can contain a bare array of calls. Take the first complete
+  // JSON container before considering an object nested inside that array.
+  const container = balancedJsonPrefix(cleaned);
+  if (container && !candidates.includes(container)) candidates.push(container);
   const match = cleaned.match(/\{[\s\S]*\}/);
   if (match && match[0] !== cleaned) candidates.push(match[0]);
   // Small models sometimes close the object early and keep writing
   // ('...}},"plan":[...]'). The first balanced object is usually a complete action.
-  const prefix = balancedObjectPrefix(match ? match[0] : cleaned);
+  const prefix = match ? balancedJsonPrefix(match[0]) : undefined;
   if (prefix && !candidates.includes(prefix)) candidates.push(prefix);
   for (const c of candidates) {
     try { return JSON.parse(c); } catch { /* try repaired */ }
     try { return JSON.parse(repairJsonStrings(c)); } catch { /* next candidate */ }
   }
+  // Last resort: a container the model left open ('...}]' for '...}]}') or a
+  // stray closer mid-way. Tried only after every exact reading has failed.
+  const balanced = balanceJsonContainers(repairJsonStrings(cleaned));
+  if (balanced) {
+    try { return JSON.parse(balanced); } catch { /* unreadable */ }
+  }
   return undefined;
 }
 
-/** The shortest prefix of `text` (starting at its first '{') whose braces balance, string-aware. */
-function balancedObjectPrefix(text: string): string | undefined {
-  const start = text.indexOf('{');
+/**
+ * The first JSON container in text with unmatched closers dropped and missing
+ * ones appended.
+ *
+ * A reply that ends inside a string was cut off mid-value; closing it would
+ * turn `"command": "cd` into a real, truncated command, so that is left
+ * unreadable instead.
+ */
+function balanceJsonContainers(text: string): string | undefined {
+  const start = text.search(/[\[{]/);
   if (start < 0) return undefined;
-  let depth = 0;
+  const closers: string[] = [];
+  let out = '';
+  let inString = false;
+  let escaped = false;
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i];
+    if (inString) {
+      out += ch;
+      if (escaped) escaped = false;
+      else if (ch === '\\') escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') inString = true;
+    else if (ch === '{' || ch === '[') closers.push(ch === '{' ? '}' : ']');
+    else if (ch === '}' || ch === ']') {
+      if (closers[closers.length - 1] !== ch) continue;
+      closers.pop();
+      out += ch;
+      if (closers.length === 0) return out;
+      continue;
+    }
+    out += ch;
+  }
+  if (inString) return undefined;
+  return out.replace(/[\s,]+$/, '') + closers.reverse().join('');
+}
+
+/** The first complete JSON object or array in text, with string-aware nesting. */
+function balancedJsonPrefix(text: string): string | undefined {
+  const start = text.search(/[\[{]/);
+  if (start < 0) return undefined;
+  const closers: string[] = [];
   let inString = false;
   let escaped = false;
   for (let i = start; i < text.length; i++) {
@@ -259,10 +317,10 @@ function balancedObjectPrefix(text: string): string | undefined {
       continue;
     }
     if (ch === '"') inString = true;
-    else if (ch === '{') depth++;
-    else if (ch === '}') {
-      depth--;
-      if (depth === 0) return text.slice(start, i + 1);
+    else if (ch === '{' || ch === '[') closers.push(ch === '{' ? '}' : ']');
+    else if (ch === '}' || ch === ']') {
+      if (closers.pop() !== ch) return undefined;
+      if (closers.length === 0) return text.slice(start, i + 1);
     }
   }
   return undefined;

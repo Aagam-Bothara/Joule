@@ -166,7 +166,75 @@ harness/
 ├── learned-trigger.py   offline study: can a learned trigger beat the rules?
 ├── swe-selftest.ts      checks the SWE-bench evaluation pipeline (base must fail, gold patch must pass)
 └── index.ts       entry point; writes benchmarks/reports/harness-*.json
+
+lifecycle/
+├── record.ts      one experiment record per agent run, from the lifecycle events a run emits
+├── analyze.ts     percentiles, tool-wait buckets, cross-agent concurrency, model-demand overlap
+├── validate.ts    data-quality checks; malformed traces are flagged and excluded, not averaged in
+├── types.ts       record / workflow-summary / aggregate shapes
+├── crews/         crew definitions for the crew experiment (real file_read / shell_exec work)
+├── crew-runner.ts runs real crews in one process and writes records + manifest
+└── cli.ts         collect and analyze; writes benchmarks/experiments/lifecycle/
 ```
+
+### Lifecycle characterization
+
+Every instrumented run emits agent lifecycle events (`ready`, `model_running`, `tool_wait`,
+`completed` / `failed` / `cancelled`) and a timing rollup. This tooling turns those into a dataset
+and characterizes it: where the wall clock goes, how long individual tool-wait windows are, and how
+much of the work actually overlaps across agents.
+
+```bash
+npx tsx benchmarks/lifecycle/cli.ts collect            # benchmarks/reports/harness-*.json -> runs.jsonl
+npx tsx benchmarks/lifecycle/cli.ts analyze            # runs.jsonl -> report + workflows.jsonl + summary.json
+npx tsx benchmarks/lifecycle/cli.ts analyze <file.json|file.jsonl> [--out-dir <dir>] [--json]
+pnpm lifecycle:collect && pnpm lifecycle:analyze       # same two steps through package scripts
+```
+
+Datasets land in `benchmarks/experiments/lifecycle/` (`runs.jsonl`, `workflows.jsonl`,
+`summary.json`) and are gitignored like `benchmarks/reports/`; the code that produces them is not.
+One record per agent run carries identity (`agentId`, `agentRole`, `parentTaskId`), the timing
+rollup, every individual tool-wait window, and the raw events. Crew runs produce one record per
+agent, so full-mode and direct-mode agents are directly comparable.
+
+Concurrency is computed by sweeping lifecycle interval boundaries, never by polling:
+`maxConcurrentAgents`, `maxConcurrentModelRunning`, `maxConcurrentToolWait`, their time-weighted
+averages, and `modelDemandOverlapMs` — the wall-clock time two or more agents under one parent task
+are inside a model call at once. Tool-wait windows are also bucketed (`<100ms`, `100-500ms`,
+`500ms-1s`, `1-2s`, `2-5s`, `5-10s`, `10s+`) so the distribution is visible rather than an average.
+
+One caveat: lifecycle timestamps come from a monotonic clock, which is only comparable inside a
+single process. Records carry the `runId` they came from, and concurrency is only ever computed
+within one `runId`.
+
+#### Collecting real workloads
+
+Two experiments feed the same pipeline. Single-agent runs come from the existing harness — MBPP
+writes a real file and runs a real Python process per task, so its waits are genuine:
+
+```bash
+JOULE_BENCH_SLM=openrouter:<small> JOULE_BENCH_LLM=openrouter:<large> JOULE_BENCH_LABEL=real-single \
+  npx tsx benchmarks/harness/index.ts --live --workload mbpp --n 20 --offset 400 --strategies joule-adaptive
+npx tsx benchmarks/lifecycle/cli.ts collect --label real-single --out-dir benchmarks/experiments/lifecycle/real-single
+npx tsx benchmarks/lifecycle/cli.ts analyze benchmarks/experiments/lifecycle/real-single/runs.jsonl
+```
+
+Crew runs come from `crew-runner.ts`, which executes the definitions in `lifecycle/crews/` against
+real repository work and writes records plus a manifest:
+
+```bash
+OPENROUTER_API_KEY=... npx tsx benchmarks/lifecycle/crew-runner.ts --workflows 10 --model <model>
+npx tsx benchmarks/lifecycle/cli.ts analyze benchmarks/experiments/lifecycle/real-crews/runs.jsonl
+# cheap plumbing check against a local model, one workflow, no API cost:
+npx tsx benchmarks/lifecycle/crew-runner.ts --workflows 1 --crew smoke --provider ollama --model phi3:latest \
+  --out-dir benchmarks/experiments/lifecycle/smoke --label smoke
+```
+
+The runner changes nothing about execution: `parallel` crews overlap their agents through
+`Promise.allSettled`, `sequential` ones do not, and everything runs in one process so the
+concurrency numbers stay valid. Each experiment directory gets a `manifest.json` with the label,
+timestamp, git commit, provider/model, execution modes, the workflows or reports it came from, and
+the data-quality result.
 
 Model selection for live runs: `JOULE_BENCH_SLM`, `JOULE_BENCH_MID` (optional middle rung) and
 `JOULE_BENCH_LLM` as `<provider>:<model>` with provider one of `google`, `anthropic`, `openai`,
@@ -661,7 +729,8 @@ Run 2: top = Gemini 2.5 Pro, breakdowns climb one rung (the new default), parser
 
 What the runs show:
 
-- **The ladder resolves more than any single model in it**, in both runs: 8/15 and 7/15 against
+- **On this slice the ladder resolves more than any single model in it** (the 95-instance run
+  below does not reproduce this), in both runs: 8/15 and 7/15 against
   6/15 and 2/15 for the middle model alone and 2/15 for the small model. In run 2, four of the
   seven resolved instances were resolved by neither the 9B model nor Flash on their own; three
   were resolved by the 9B model without escalating at all, at 1 to 3 cents each.
@@ -684,3 +753,365 @@ What the runs show:
   no code change that affects it; treat every number here as ±2 instances.
 
 Spend: run 1 about $2.60 (Sonnet $1.60), run 2 about $1.60 (Gemini) plus $0.50 of Qwen.
+
+A follow-up on the two instances that hit the step limit in run 2, after adding the
+exploration-stall rule (`explorationStallSteps`, default 8): django-13925 resolved (2/2 hidden
+tests) and pytest-7220 did not. Neither outcome is the rule's doing: in both runs the small model
+escalated earlier through a breakdown or a give-up, and the stall rule never fired. Cost: 7 cents.
+In the 95-instance run below it did not fire once either: there the 9B model fails by producing
+malformed actions, not by reading aimlessly.
+
+### The cheap 2026 stack, 100 problems (2026-09-06)
+
+The same comparison on models a student can afford: small = Qwen3.5 9B (thinking off), middle =
+DeepSeek V4 Flash, top = DeepSeek V4 Pro, all through OpenRouter at the billed price. 100 unseen
+MBPP problems (offset 230), three small-model-only runs per problem for the labels.
+
+```
+python benchmarks/harness/report.py --labels lineup2
+| strategy                  | success | avg cost | cost / Pro | LLM used | precision | recall | wasted | consult ok | handoff ok |
+|---------------------------|--------:|---------:|-----------:|---------:|----------:|-------:|-------:|-----------:|-----------:|
+| Qwen3.5 9B alone (x3)     |     79% |  $0.0022 |       0.19 |       0% |           |        |        |            |            |
+| DeepSeek V4 Flash alone   |     97% |  $0.0015 |       0.13 |     100% |       18% |   100% |     67 |            |            |
+| DeepSeek V4 Pro alone     |     98% |  $0.0114 |       1.00 |     100% |           |        |        |            |            |
+| FrugalGPT-style cascade   |     98% |  $0.0068 |       0.59 |      54% |       24% |    72% |     32 |            |            |
+| Joule two-tier (9B -> Pro)|     98% |  $0.0042 |       0.37 |      28% |       46% |    72% |      7 |        80% |        92% |
+| Joule ladder              |     98% |  $0.0031 |       0.27 |      25% |       48% |    67% |      6 |        64% |        89% |
+```
+
+Every escalating strategy reaches the frontier model's 98%. The ladder does it at 27% of the
+frontier's cost, the two-tier policy at 37%, the cascade at 59%. Two more seeds of both Joule
+policies on the same problems (`report.py --labels lineup2,lineup2-s2,lineup2-s3 --seeds`) give
+two-tier 98% ± 1.5 at 0.37 ± 0.00 and ladder 96% ± 2.0 at 0.27 ± 0.05, so the cost ratios are
+stable and the ladder gives up about two points of success for a quarter less cost; the cascade escalates on 54 of
+100 problems and 32 of those escalations go to problems the small model solves at least four
+times in five. Only 18 of the 100 problems actually need escalation (the 9B model solves the rest
+on its own most of the time), which is why every strategy's precision is lower here than on the
+Llama runs: there is less to find.
+
+How much of the top model's accuracy survives a handoff: the report's `handoff kept` column divides
+success on handed-off problems by V4 Pro's success alone on the same problems (the "retention" that
+cross-model KV-cache transfer work reports; Heo et al., arXiv:2608.03893, get 73–98% within one
+model family). Over the three seeds the two-tier policy keeps 93% and the ladder 86%, so the
+ladder's two lost points come from problems it hands off, partly because its first handoff lands
+on V4 Flash rather than Pro. Earlier stacks keep 95–100% by the same measure.
+
+The caveat from the Gemini runs holds with this stack too. DeepSeek V4 Flash alone is 97% at
+$0.0015, cheaper than the 9B model, because it finishes in fewer steps. On problems this small a
+capable cheap model needs no escalation, and the ladder pays for the small model's turns before
+reaching it. Joule's case is the workload where no single cheap model suffices; the 95-instance
+repository run below finds DeepSeek V4 Flash close to being that model there too. Spend: about
+$3.60. Latency: the ladder averaged 31 s per problem against 15 s for Pro alone.
+
+### Real repositories at scale: 95 SWE-bench Lite instances (2026-09-06)
+
+The repository slice grown to 95 instances (83 Django, 8 pytest, 3 pylint, 1 Flask), same settings
+as above (30 steps, 40 tool calls, per-task cost ceiling), on the cheap stack: Qwen3.5 9B →
+DeepSeek V4 Flash → DeepSeek V4 Pro through OpenRouter. One seed; Pro alone was not run.
+
+```
+Label swe100
+| strategy                | resolved | avg cost | agent finished | notes                                    |
+|-------------------------|---------:|---------:|---------------:|------------------------------------------|
+| Qwen3.5 9B alone        |    10/95 |  $0.0112 |          13/95 | 53 runs end on malformed actions         |
+| DeepSeek V4 Flash alone |    44/95 |  $0.0105 |          53/95 |                                          |
+| Joule ladder            |    37/95 |  $0.0259 |          59/95 | Flash used on 73, Pro on 38              |
+```
+
+What the run shows:
+
+- **The ladder loses to its own middle rung.** Flash alone resolves 7 more instances at about 40%
+  of the ladder's cost. On the same instances the ladder resolves 9 that Flash does not and misses
+  16 that Flash resolves; 7 of its 37 come from the 9B model without escalating, and 7 were
+  resolved by neither model on its own. This does not reproduce the 15-instance result above,
+  where the middle model (Gemini 2.5 Flash) resolved 2 to 6 of 15 alone; DeepSeek V4 Flash
+  resolves 46% on its own.
+- **The 9B model cannot drive this agent.** 53 of its 95 solo runs end because it produced
+  malformed actions twice in a row, and 51 of the ladder's 99 handoffs are for the same reason
+  (43 more follow three failures). It spends 12.5M of the ladder's 18.5M tokens and, at $0.011 per
+  task alone, is no cheaper than Flash, which finishes in fewer, better turns. The harness runs
+  OpenRouter models without JSON mode.
+- **Steps spent on the small model are not refunded.** The median handoff comes at step 8 of 30
+  and the cap is shared across rungs (`rungLocalSteps` is off by default), so the stronger model
+  inherits what is left: 24 ladder runs end on the step limit (Flash alone: 22), some after
+  handoffs at steps 25 and 26.
+- **Handoffs themselves mostly keep the stronger model's accuracy.** On the 69 instances the
+  ladder handed off, it resolves 28 against 31 for Flash alone on the same instances (90%). The
+  larger loss is on the 26 it never handed off: 9 against Flash's 13, the 9B model holding on too
+  long.
+- **Noise.** Two report files exist for this run (08:18 and 08:26 UTC); 51 of the 285 task
+  records differ between them and 8 outcomes flip. The numbers above are from the later one;
+  differences of a few instances are within noise.
+
+Spend: about $4.50 (ladder $2.46, Flash $1.00, 9B $1.07). Latency per instance: Flash 103 s,
+ladder 149 s.
+
+The open question is no longer whether a 9B model can lead on repositories (with this pair it
+cannot) but whether escalation beats the best cheap model on its own. The next run is Flash → Pro
+with a fresh step allowance after a handoff (`joule-rung-local`) on the same 95 instances.
+
+## Staged recovery
+
+A crew that runs a reviewer and a tester after every implementer spends three agents on work one
+agent often finished. Staged recovery runs the next agent only when an external check says the
+previous one did not actually succeed. This section is the evidence for that design, including the
+two measurement errors that had to be corrected before any of it meant anything.
+
+### The earlier crew datasets are not evidence
+
+Datasets E and E2 (crew widths 1–4 on MBPP) are kept for provenance only. Three defects make them
+unusable for any claim about crew width:
+
+- **Budget was confounded with width.** The crew budget was divided by `budgetShare`, so the
+  implementer ran on ~100k tokens at width 1, ~50k at width 2 and ~33k at width 3 and 4. Five
+  implementer failures sit at 34–37k tokens, right at that line. Width changed how many agents
+  there were *and* how much the one writing the code could spend.
+- **One agent failing removed every agent after it.** A failed agent wrote `undefined` to the
+  blackboard, and the next agent's context builder called `JSON.stringify(undefined).slice(...)`.
+  The `TypeError` was thrown while building the *next* agent's prompt, so it died before reaching a
+  model — 15 downstream agents out of 15, which in the traces looked exactly like budget
+  starvation.
+- **Agents could not read any tool output.** Direct mode rendered tool results with `String(...)`,
+  and every tool returns an object, so every file an agent read and every command it ran came back
+  as the literal string `[object Object]`. A reviewer told to inspect the implementer's code was
+  reading nothing. The finding that "specialists read a lot and never write" was a symptom of this,
+  not a result about specialists.
+
+All three are fixed (`budgetMode: 'fixed_per_agent'`, `proseOnly`, JSON tool-result rendering) and
+covered by tests. Measurements taken before those fixes are not comparable with measurements taken
+after.
+
+### Unreadable tool calls were taken as answers (found 2026-10-01)
+
+A fourth defect affects every crew dataset below up to and including `staged-replication-v2`. The
+direct executor treated any reply it could not parse as the agent's final answer. DeepSeek V4 Flash
+regularly writes slightly broken calls: `tool_name` for `toolName`, the tool name as a key
+(`{"file_write": {...}}`, or `{"file_write": "a.py", "content": ...}`), a wrapper or object left
+unclosed, a markdown list or `<toolName>` tags inside `<tool_calls>`, a reply cut off mid-value, or a
+whitespace-only reply (which failed the run outright). Each ended the agent as "completed",
+frequently with the fix it had just written never applied.
+
+Re-reading the stored records — the lone implementer's failed cells, by how its run ended:
+
+| dataset | failed | misread call | empty reply | other |
+| --- | --- | --- | --- | --- |
+| `specialist-value`, implementer alone (Dataset F) | 10 | 6 | 2 | 2 |
+| `specialist-value-control`, second implementer seat | 11 | 10 | 1 | 0 |
+| `staged-replication` (old parser) | 15 | 7 | 5 | 3 |
+| `staged-replication-v2` (first parser fix) | 11 | 10 | 1 | 0 |
+| `staged-replication-v3` (this fix) | 1 | 0 | 1 | 0 |
+
+In Dataset F and the control, most misread calls were file reads and shell commands: the agents
+were investigating, not "stopping voluntarily". The fix makes a reply that is visibly trying to call
+a tool a *malformed* result, never an answer; the agent is told so and may retry twice in a row
+before the run fails. It also reads the observed shapes, and closes containers left open — but
+never a string left open, so a command cut off mid-value is not run. The verbatim replies are test
+fixtures in `packages/core/tests/fixtures/unreadable-tool-calls.json`.
+
+Withdrawn as a result: the "stopped voluntarily" reading of Dataset F, the role-framing conclusion
+of the second-implementer control, and the `always-on → verified_full` quality effect. The
+`verified_full` vs staged comparison was always made on one executor and still stands.
+
+### Does a specialist add verified value? (`benchmarks/specialist-value`)
+
+*Measured with the executor defect above; the interpretation in this section is withdrawn. The
+counts are kept as recorded.*
+
+Five authored repositories, one planted defect each, three repetitions, `deepseek-v4-flash`,
+verified-edit gate on. The task says only that the suite fails; locating the defect is the work.
+
+| arm | success | reviewer writes | notes |
+| --- | --- | --- | --- |
+| implementer alone | 5/15 | — | |
+| + reviewer | 9/15 | 4 proposed, 3 accepted | |
+| + reviewer + tester | 12/15 | | |
+| + second implementer (control) | 4/15 | **0 proposed in 15 runs** | |
+
+When the implementer left the repository failing, a specialist recovered it 11 times out of 20, and
+in 9 of those the fixer also named the planted cause. When the implementer left it passing, all 10
+runs stayed passing, with no rollbacks.
+
+The control is the important row. Replacing the reviewer with a *second implementer* — same model,
+same tools, same ceilings, same position, only the instructions differ — scores 4/15, at the level
+of the implementer alone, and never attempts a single write. A copy of the primary inherits the
+primary's belief that the work is finished. The uplift is the adversarial framing, not a fresh
+context and not more compute: eight of ten lone-implementer failures stopped voluntarily after one
+to five of sixteen allowed model calls without trying to write anything.
+
+### Replication on fresh fixtures (`benchmarks/staged-replication`)
+
+The first three tables below were measured with the executor defect described above. All four arms
+were rerun on the fixed executor; that rerun is the current measurement and is reported
+[at the end of this section](#rerun-on-the-fixed-executor-staged-replication-v3).
+
+Ten new repositories, one per defect class (API contract, cross-file state, edge case, wrong
+algorithm, numeric precision, import interaction, stale cache, boundary, data transformation, error
+behaviour), three repetitions, 90 runs, $0.30. Each fixture is self-tested first: it must fail as
+planted, leave at least one assertion passing, and pass with its reference fix.
+
+| arm | success | cost | tokens | JCT | stages |
+| --- | --- | --- | --- | --- | --- |
+| implementer alone | 15/30 | $0.0021 | 16,282 | 36s | 1.00 |
+| always-on crew | 27/30 | $0.0053 | 40,290 | 96s | 3.00 |
+| staged recovery | 30/30 | $0.0027 | 20,348 | 46s | 1.53 |
+
+Paired on all 30 cells: both pass 27, always-on only 0, staged only 3. Staged skipped 44 of the
+always-on arm's 60 specialist stages — 19 runs where the primary passed (saving two stages each),
+6 where the reviewer recovered (saving one), 5 where the tester was genuinely needed.
+
+### Which half does the work? (`verified_full`)
+
+Staged recovery changes two things at once: it gives recovery agents the verifier's evidence, and
+it declines to run them when the check already passes. `verified_full` holds the first and drops
+the second — every stage runs, every stage is still checked, every result is still handed on — so
+the two effects can be attributed separately. The strategies share the whole path and differ in one
+expression, whether a passing check ends the run.
+
+| comparison | what differs | result |
+| --- | --- | --- |
+| always-on → `verified_full` | verifier evidence only | 27/30 → 30/30, and 14% cheaper |
+| `verified_full` → staged | early stopping only | 30/30 → 30/30, 41% cheaper, 43% faster, 3.00 → 1.53 stages |
+
+**Verifier evidence buys quality; conditional admission buys efficiency.** The decisive detail is
+what always-on specialists did after a state that already verified PASS: 41 such stages ran, and
+**41 of 41 wrote nothing** — no accepted edits, no rollbacks, no regressions. Always-on specialists
+after a pass are pure cost and zero risk. That is exactly the work staged recovery declines.
+
+Caveats: the quality effect rests on 3 discordant pairs (McNemar p = 0.25), so it is directional,
+not significant; only the *equivalence* of `verified_full` and staged is firmly established (30/30
+identical, p = 1.0). One model, one provider, fixtures we authored, n = 30 cells per arm.
+
+### Rerun under the corrected parser (`staged-replication-v2`)
+
+*Superseded by the next section: still measured with the unreadable-call defect.*
+
+The same ten fixtures, the same three repetitions and the same model (`deepseek/deepseek-v4-flash`
+on OpenRouter), run on 2026-09-30 with the corrected response parser, all four arms in one
+invocation: 120 runs, $0.33 estimated. Data in `benchmarks/experiments/staged-replication-v2`.
+
+| arm | success | cost | tokens | JCT | stages |
+| --- | --- | --- | --- | --- | --- |
+| implementer alone | 19/30 | $0.0014 | 10,482 | 52s | 1.00 |
+| always-on crew | 27/30 | $0.0039 | 29,575 | 158s | 3.00 |
+| `verified_full` | 30/30 | $0.0036 | 27,154 | 49s | 3.00 |
+| staged recovery | 30/30 | $0.0020 | 15,235 | 27s | 1.30 |
+
+| comparison | what differs | old parser | corrected parser |
+| --- | --- | --- | --- |
+| always-on → `verified_full` | verifier evidence only | 27/30 → 30/30, 14% cheaper | 27/30 → 30/30, 8% cheaper |
+| `verified_full` → staged | early stopping only | 30/30 → 30/30, 41% cheaper | 30/30 → 30/30, 44% cheaper |
+
+- Paired cells reproduce exactly. Always-on against `verified_full`: 27 both pass, 3 `verified_full`
+  only (McNemar p = 0.25). `verified_full` against staged: 30 both pass, 0 discordant (p = 1.0).
+- The implementer alone rose from 15/30 to 19/30. The arms are not paired across runs, so this
+  is consistent with the parser fix no longer dropping the implementer's calls but does not
+  establish it. Inside the staged arm the implementer passed 22/30, so fewer cells reached recovery:
+  staged ran 9 specialist stages and skipped 51 of 60 (22 runs saved two stages, 7 reviewer
+  recoveries saved one, 1 needed the tester).
+- After a state that already verified PASS, `verified_full` entered 49 specialist stages; 49 of 49
+  wrote nothing, with no rollbacks and no regressions.
+- The arms ran sequentially, and provider latency drifted during the run: always-on runs took about
+  2.3× their old-parser wall-clock while costing less. Cost and tokens are the reliable efficiency
+  comparison; the JCT column is not controlled across arms.
+
+At the time this read as confirming the old-parser conclusions. It did not: 10 of the 11
+lone-implementer failures here ended on a misread call (see above).
+
+### Rerun on the fixed executor (`staged-replication-v3`)
+
+Same fixtures, repetitions, model and arms, run on 2026-10-01 with the unreadable-call fix: 120
+runs, $0.39 estimated. Data in `benchmarks/experiments/staged-replication-v3`.
+
+| arm | success | cost | tokens | stages |
+| --- | --- | --- | --- | --- |
+| implementer alone | 29/30 | $0.0020 | 14,783 | 1.00 |
+| always-on crew | 30/30 | $0.0044 | 33,254 | 3.00 |
+| `verified_full` | 30/30 | $0.0047 | 35,653 | 3.00 |
+| staged recovery | 30/30 | $0.0019 | 14,630 | 1.03 |
+
+- **No agent ended on a misread call.** The one lone-implementer failure ended on three empty
+  replies in a row, which now fails the run explicitly.
+- **Paired cells.** Always-on against `verified_full`: 30 both pass (p = 1.0) — the 27 → 30 effect
+  is gone. `verified_full` against staged: 30 both pass (p = 1.0). Implementer alone against
+  staged: 29 both pass, 1 staged only.
+- **Staged costs what the implementer alone costs** ($0.0019 vs $0.0020): the implementer passed
+  in 29 of 30 staged cells, the reviewer ran once and repaired that cell, and 59 of 60 specialist
+  stages were skipped. Against `verified_full` that is 59% less cost and tokens; against always-on,
+  56%.
+- **After a state that already verified PASS, `verified_full` entered 60 specialist stages; 60 of
+  60 wrote nothing**, with no rollbacks and no regressions.
+- Wall-clock is omitted: a real-repository benchmark shared the provider during these runs.
+
+What this supports is narrower than the earlier claims. Conditional admission is free when the
+first agent succeeds and costs well under half of an always-on crew. Whether a verifier-informed
+recovery stage improves outcomes cannot be read from a benchmark the first agent passes 29/30;
+answering that needs harder tasks.
+
+### Real repositories: the crew implementer resolves none (`benchmarks/real-repo`)
+
+The SWE-bench Lite harness uses locally available images, real issues, hidden tests, and the
+official pass criterion. Its old-parser smoke and probe datasets are labelled in their manifests.
+The preselected self-tested pool admitted 13 of 15 candidate issues.
+
+The committed `agentResults[].tools` entries name the executed calls: none is `repo_write` or
+`repo_edit` in the old smoke and probe runs. That is an observation from named tools, not an
+inference from the host verified-edit gate's zero accepted writes; that gate does not snapshot
+container-side edits. Several old final replies contain unexecuted calls: a tagged bare JSON
+array, XML tags, or a nested wrapper. A mock-provider replay shows that the direct executor
+treated the array and XML as final answers and dropped nested calls. Reviewers and testers also
+hit the old 10-iteration limit while still inspecting pylint/pytest.
+
+These old runs do not establish a model or navigation capability floor. The parser now handles the
+recorded shapes, and the recovery limit is 16. The first post-parser primary-only smoke run used
+`gpt-4o-mini` on `pylint-dev__pylint-7114`. Its lifecycle records 14 model calls, 25 named tool
+calls (10 `repo_read`, 14 `repo_edit`, 1 `repo_write`), and 15 write attempts. Eleven write calls
+reported success; the container diff confirms `pylint/lint/expand_modules.py` changed. The run
+ended at the token budget with an invalid Python edit, so hidden verification failed. Joule
+estimated its cost at $0.0404. That run predates the larger `repo_read`/`repo_shell` result limits
+and container-side Python syntax check with rollback for `repo_write`/`repo_edit`.
+
+One bounded primary-only rerun with those safeguards made 18 named tool calls (6 `repo_read`,
+3 `repo_edit`, 9 `repo_shell`), with three successful edits and no unidentified calls. Its Python
+file compiled, but the hidden verifier reported F2P 0/1 and P2P 56/56. The agent edited
+`get_python_path` with a condition equivalent to the original, then ended after acknowledging
+remaining failures. The reference patch changes a branch in `expand_modules` instead. It used
+10 of 16 available iterations and 79,637 of 100,000 budgeted tokens, so neither limit ended this
+run. Joule estimated $0.0299 for the rerun; the provider-billed amount is not captured. The two
+post-parser primary runs show that agents now reach real-repository writes, but neither solved this
+issue.
+
+**Full-pool primary baselines (2026-09-30/10-01, `deepseek/deepseek-v4-flash`, one run per issue).**
+
+| run | executor | per-agent tokens | resolved | how the runs ended | edit calls |
+| --- | --- | --- | --- | --- | --- |
+| `real-repo-primary-baseline` | before the unreadable-call fix | 100k | 0/13 | 11 misread call, 1 empty reply, 1 budget | 0 |
+| `real-repo-primary-baseline-v2` | fixed | 100k | 0/13 | 13 budget exhausted after 6–11 model calls | 0 |
+| `real-repo-primary-baseline-400k` | fixed | 400k | 0/13 | 11 hit the 16-turn cap, 1 unreadable ×3, 1 network reset | 1 |
+
+The 400k allowance (`REAL_REPO_BUDGET` in `real-repo/crews.ts`: every `high` limit ×4 except cost)
+was decided after the v2 run and before the 400k run. With it, the crew implementer reads and
+searches for 16 turns and does not commit to an edit; estimated $0.48 for the 13 issues.
+
+The same model resolved 44 of 95 SWE-bench Lite instances through the adaptive step agent
+(30 steps, its own prompt and action protocol, [above](#real-repositories-at-scale-95-swe-bench-lite-instances-2026-09-06)).
+On real repositories the gap is between Joule's two agent loops, not between models. Staged recovery
+cannot be compared on these issues until the crew's first stage resolves some of them.
+
+### Reproducing
+
+```bash
+npx tsx benchmarks/staged-replication/cli.ts selftest        # fixtures must fail as planted and pass with the reference fix
+npx tsx benchmarks/staged-replication/cli.ts run --seeds 3 --arms primary,full,full_verify,staged \
+  --out-dir benchmarks/experiments/staged-replication-v3    # 10 tasks x 4 arms x 3 reps
+npx tsx benchmarks/staged-replication/cli.ts analyze --arms primary,full,full_verify,staged \
+  --out-dir benchmarks/experiments/staged-replication-v3
+
+npx tsx benchmarks/real-repo/selftest.ts <instanceId ...>    # decides the pool; calls no model
+npx tsx benchmarks/real-repo/cli.ts pool
+npx tsx benchmarks/real-repo/cli.ts run --arms primary --instances <id> --model <id>
+```
+
+Datasets land in `benchmarks/experiments/` and are gitignored; the code that produces them is not.
+Every manifest records the runtime commit, whether the tree was dirty, the model, the selection
+rule, the verification policy and the tool-loop semantics, because each of those has already
+changed a result at least once in this project.

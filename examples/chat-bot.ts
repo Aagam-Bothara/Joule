@@ -95,7 +95,8 @@ async function main() {
         id: `chat-${Date.now()}`,
         description: input,
         budget: 'medium',
-        context: session.messages.slice(-6).map(m => m.content).join('\n'),
+        // Task context is a structured record, not a blob of text.
+        context: { history: session.messages.slice(-6).map(m => m.content).join('\n') },
         createdAt: new Date().toISOString(),
       });
 

@@ -7,10 +7,12 @@
 
 import {
   ModelTier,
+  type AgentLifecycleEvent,
   type EscalationDecision,
   type ExecutionMode,
   type ExecutionState,
   type ExecutionTrace,
+  type LifecycleMetrics,
   type TraceEvent,
   type TraceSpan,
   type TrajectoryConsult,
@@ -24,6 +26,10 @@ export interface TrajectoryOptions {
   llmPricePerToken?: number;
   /** Human descriptions per agent turn (turns without a tool call) */
   stepDescriptions?: Record<number, string>;
+  /** Lifecycle transitions recorded by the run's tracker */
+  lifecycleEvents?: AgentLifecycleEvent[];
+  /** Model / tool-wait rollup over those transitions */
+  lifecycleMetrics?: LifecycleMetrics;
 }
 
 export function buildTrajectoryReport(
@@ -80,6 +86,8 @@ export function buildTrajectoryReport(
     steps,
     consults,
     decisions: state.decisions,
+    ...(opts.lifecycleEvents ? { lifecycle: opts.lifecycleEvents } : {}),
+    ...(opts.lifecycleMetrics ? { lifecycleMetrics: opts.lifecycleMetrics } : {}),
   };
 }
 
@@ -194,6 +202,12 @@ export function renderTrajectory(report: TrajectoryReport): string {
   }
   lines.push(`Consultations: ${report.consultations}  Handoffs: ${report.handoffs}  Tool calls: ${report.toolCalls}  Steps: ${report.trajectoryLength}`);
   if (report.verifierKinds.length > 0) lines.push(`Verifiers: ${report.verifierKinds.join(', ')}`);
+  const lm = report.lifecycleMetrics;
+  if (lm) {
+    const share = (ms: number): string => (lm.totalRuntimeMs > 0 ? `${Math.round((ms / lm.totalRuntimeMs) * 100)}%` : '0%');
+    const secs = (ms: number): string => `${(ms / 1000).toFixed(1)}s`;
+    lines.push(`Model time: ${secs(lm.modelRuntimeMs)} (${share(lm.modelRuntimeMs)})  Tool wait: ${secs(lm.toolWaitMs)} (${share(lm.toolWaitMs)})  Other: ${secs(lm.otherMs)} (${share(lm.otherMs)})`);
+  }
   return lines.join('\n');
 }
 

@@ -18,5 +18,21 @@ export const jouleNoVerify: Strategy = { name: 'joule-no-verify', modes: ['adapt
 /** The agent's self-reported confidence replaces the evidence-based composite. Tests "no self-reported confidence". */
 export const jouleSelfConf: Strategy = { name: 'joule-self-conf', modes: ['adaptive'], ladder: ['slm', 'llm'], policy: { confidenceSource: 'self-report' }, description: 'Joule with self-reported confidence' };
 
+/**
+ * Ladder with the two repository fixes: a final answer needs a verified check
+ * after the last edit, and each rung gets its own step allowance. Tests whether
+ * the small model's silent failures (confident wrong fixes, aimless reading)
+ * were what let the middle model alone pull ahead on SWE-bench.
+ */
+export const jouleLadderStrict: Strategy = { name: 'joule-ladder-strict', modes: ['adaptive'], ladder: ['slm', 'mid', 'llm'], policy: { finalAnswerRequires: 'verified', rungLocalSteps: true }, description: 'Joule ladder, verified finish and per-rung step budget' };
+
+/**
+ * Two tiers with a per-rung step allowance. Run with the middle model as the
+ * small tier (e.g. DeepSeek V4 Flash -> V4 Pro): on SWE-bench the 9B rung could
+ * not act and its steps were not refunded, so this asks whether escalation
+ * beats the strongest cheap model on its own.
+ */
+export const jouleRungLocal: Strategy = { name: 'joule-rung-local', modes: ['adaptive'], ladder: ['slm', 'llm'], policy: { rungLocalSteps: true }, description: 'Joule two tiers, fresh step allowance after a handoff' };
+
 /** No compile check on written files. Tests the static-check evidence signal. */
 export const jouleNoStatic: Strategy = { name: 'joule-no-static', modes: ['adaptive'], ladder: ['slm', 'llm'], policy: { staticChecks: false }, description: 'Joule without static checks' };

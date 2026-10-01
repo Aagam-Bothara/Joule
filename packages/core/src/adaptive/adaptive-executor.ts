@@ -63,10 +63,11 @@ import {
   writeToolName,
 } from './execution-state.js';
 import { ConfidenceEngine } from './confidence-engine.js';
-import { RuleBasedEscalationPolicy } from './escalation-policy.js';
+import { RuleBasedEscalationPolicy, stepsTowardCap } from './escalation-policy.js';
 import { StepAgent, type AgentAction, type StepAgentTurn } from './step-agent.js';
-import { StepVerifier, staticCheck } from './verifier.js';
+import { StepVerifier, staticCheck, type VerificationPhases } from './verifier.js';
 import { Consultant } from './consultant.js';
+import { AgentLifecycleTracker, inModelCall, inToolWait } from './lifecycle.js';
 
 export interface AdaptiveExecutorDeps {
   budget: BudgetManager;
@@ -85,6 +86,8 @@ export interface AdaptiveAttach {
   state?: ExecutionState;
   /** Human descriptions per agent turn, for the trajectory tree */
   turnDescriptions: Record<number, string>;
+  /** Lifecycle transitions of this run (instrumentation only) */
+  lifecycle?: AgentLifecycleTracker;
   llmPricePerToken?: number;
 }
 
@@ -122,12 +125,45 @@ export class AdaptiveExecutor {
     this.consultant = new Consultant(deps.router, deps.providers, deps.budget, deps.tracer, deps.energyConfig, cfg.consultMode);
   }
 
+  /**
+   * Run the loop under lifecycle instrumentation. The tracker records where the
+   * run's wall clock goes (model calls, tool waits); a run that throws is marked
+   * failed before the error continues on its way, so propagation is unchanged.
+   */
   async run(
     task: Task,
     envelope: BudgetEnvelopeInstance,
     traceId: string,
     mode: ExecutionMode,
     attach: AdaptiveAttach,
+    onProgress?: ProgressCallback,
+  ): Promise<AdaptiveRunResult> {
+    const lifecycle = new AgentLifecycleTracker({
+      taskId: task.id,
+      // A crew agent brings its own identity; a lone run gets a generated id,
+      // so agentId always names an agent and never repeats the task.
+      agentId: task.agentId,
+      agentRole: task.agentRole,
+      parentTaskId: task.parentTaskId,
+      tracer: this.deps.tracer,
+      traceId,
+    });
+    attach.lifecycle = lifecycle;
+    try {
+      return await this.runLoop(task, envelope, traceId, mode, attach, lifecycle, onProgress);
+    } catch (err) {
+      if (!lifecycle.isTerminal()) lifecycle.fail(err);
+      throw err;
+    }
+  }
+
+  private async runLoop(
+    task: Task,
+    envelope: BudgetEnvelopeInstance,
+    traceId: string,
+    mode: ExecutionMode,
+    attach: AdaptiveAttach,
+    lifecycle: AgentLifecycleTracker,
     onProgress?: ProgressCallback,
   ): Promise<AdaptiveRunResult> {
     const { budget, tracer, constitution } = this.deps;
@@ -188,7 +224,7 @@ export class AdaptiveExecutor {
     while (state.status === 'running') {
       state.budget = usage();
       budget.checkBudget(envelope);
-      if (state.step >= cfg.maxSteps) {
+      if (stepsTowardCap(state, cfg.rungLocalSteps) >= cfg.maxSteps) {
         const decision = this.policy.evaluate({
           state, confidence: this.engine.compute(state, state.budget), llmAvailable: nextTier() !== undefined, atTopRung: nextTier() === undefined,
           canEscalate: false, canAfford: () => true, estimatedConsultCostUsd: 0, estimatedHandoffCostUsd: 0, minTurnTokens: 0,
@@ -211,13 +247,18 @@ export class AdaptiveExecutor {
       // AGENT TURN
       let agentRequest: 'consult' | 'give_up' | 'malformed' | undefined;
       let turn: StepAgentTurn | undefined;
+      lifecycle.modelStart(undefined, { step: state.step, tier: state.tier });
       try {
         turn = await this.agent.next(task, state, envelope, state.tier, messages);
         consecutiveModelErrors = 0;
+        lifecycle.modelEnd(turn.response.model, { step: state.step, tier: state.tier });
       } catch (err) {
+        // Budget exhaustion ends the run: the handler in run() marks it failed.
         if (err instanceof BudgetExhaustedError) throw err;
         consecutiveModelErrors++;
         const message = err instanceof Error ? err.message : String(err);
+        // The call is over even though it failed; the run continues from ready.
+        lifecycle.modelEnd(undefined, { step: state.step, tier: state.tier, error: message });
         recordFailure(state, { toolName: 'model', message, kind: 'model_error' });
         tracer.logEvent(traceId, 'error', { type: 'agent_model_error', step: state.step, message });
         attach.turnDescriptions[state.step] = 'model call failed';
@@ -246,7 +287,7 @@ export class AdaptiveExecutor {
             if (action.plan) pushPlan(state, action.plan, 'agent');
             if (action.hypothesis) recordHypothesis(state, action.hypothesis, 'agent');
             attach.turnDescriptions[state.step] = action.description;
-            stepResult = await this.executeTool(action, state, envelope, traceId, turn, activeConsultId);
+            stepResult = await this.executeTool(action, state, envelope, traceId, turn, activeConsultId, lifecycle);
             if (action.confidence !== undefined) stepResult.selfConfidence = action.confidence;
             if (turn.response.meanLogprob !== undefined) stepResult.meanLogprob = turn.response.meanLogprob;
             attach.stepResults.push(stepResult);
@@ -255,14 +296,23 @@ export class AdaptiveExecutor {
           }
           case 'final_answer': {
             if (action.plan) pushPlan(state, action.plan, 'agent');
-            if (cfg.finalAnswerRequires === 'write' && !state.completedSteps.some(s => s.success && isWriteStep(s))) {
-              // Finishing without doing the work is a failure signal like any other:
-              // it is counted, the agent is sent back, and repeats escalate.
-              attach.turnDescriptions[state.step] = 'final answer without a change (refused)';
-              recordFailure(state, { toolName: 'agent', message: 'finished without changing any file', kind: 'verification_failed' });
-              recordObservation(state, { source: 'agent', content: `final answer refused: no file was changed. ${truncate(action.answer, 200)}`, success: false });
-              pendingUser.push('Your final answer was not accepted: the task requires a code change and no file has been changed yet. Make the change, verify it, then finish. Respond with the next action as JSON.');
-              break;
+            if (cfg.finalAnswerRequires !== 'none') {
+              // Finishing without doing (or checking) the work is a failure signal like
+              // any other: it is counted, the agent is sent back, and repeats escalate.
+              const lastWrite = state.completedSteps.filter(s => s.success && isWriteStep(s)).at(-1);
+              const verifiedSince = lastWrite !== undefined && state.completedSteps.some(s => s.stepIndex > lastWrite.stepIndex && s.success && s.verified === true);
+              const refusal = !lastWrite
+                ? 'no file has been changed yet. Make the change, verify it, then finish.'
+                : cfg.finalAnswerRequires === 'verified' && !verifiedSince
+                  ? 'nothing has been verified since your last change. Run the relevant tests or a check that exits 0, then finish.'
+                  : undefined;
+              if (refusal) {
+                attach.turnDescriptions[state.step] = `final answer refused (${lastWrite ? 'unverified change' : 'no change'})`;
+                recordFailure(state, { toolName: 'agent', message: lastWrite ? 'finished without verifying the change' : 'finished without changing any file', kind: 'verification_failed' });
+                recordObservation(state, { source: 'agent', content: `final answer refused: ${refusal} ${truncate(action.answer, 200)}`, success: false });
+                pendingUser.push(`Your final answer was not accepted: ${refusal} Respond with the next action as JSON.`);
+                break;
+              }
             }
             attach.turnDescriptions[state.step] = 'final answer';
             state.result = action.answer;
@@ -331,13 +381,13 @@ export class AdaptiveExecutor {
       switch (decision.action) {
         case 'consult': {
           const advisor = nextTier() ?? topTier;
-          const advice = await this.doConsult(state, envelope, traceId, pendingQuestion, advisor, onProgress);
+          const advice = await this.doConsult(state, envelope, traceId, pendingQuestion, advisor, lifecycle, onProgress);
           decision.consultId = advice.consultId;
           decision.reason = `${decision.reason} → consult ${advisor}`;
           activeConsultId = advice.consultId;
           pendingQuestion = undefined;
           if (advice.edits && advice.edits.length > 0) {
-            appliedEdits = await this.applyEdits(advice, state, envelope, traceId, advisor);
+            appliedEdits = await this.applyEdits(advice, state, envelope, traceId, advisor, lifecycle);
           }
           pendingUser.push(adviceBlock(advice), appliedEdits.length > 0
             ? 'The edit is in place. Verify it (run the checks) and continue. Respond with the next action as JSON.'
@@ -433,6 +483,8 @@ export class AdaptiveExecutor {
     state.budget = usage();
     const status: TaskStatus = state.status === 'completed' ? 'completed' : 'failed';
     if (state.status !== 'completed' && !state.error) state.error = 'execution stopped without a result';
+    if (status === 'completed') lifecycle.complete({ steps: state.step });
+    else lifecycle.fail(state.error, { steps: state.step, executionStatus: state.status });
     tracer.logEvent(traceId, 'info', {
       type: 'adaptive_end',
       status,
@@ -484,6 +536,7 @@ export class AdaptiveExecutor {
     traceId: string,
     turn: StepAgentTurn,
     consultId: string | undefined,
+    lifecycle: AgentLifecycleTracker,
   ): Promise<StepResult> {
     const { tools, tracer, budget } = this.deps;
     const base: StepResult = {
@@ -509,6 +562,7 @@ export class AdaptiveExecutor {
     }
 
     budget.deductToolCall(envelope);
+    lifecycle.toolStart(action.toolName, { step: state.step });
     const spanId = tracer.startSpan(traceId, `step-${state.step}`, { tool: action.toolName, description: action.description });
     let result: StepResult;
     try {
@@ -522,6 +576,7 @@ export class AdaptiveExecutor {
     } finally {
       tracer.endSpan(traceId, spanId);
     }
+    lifecycle.toolEnd(action.toolName, { step: state.step, success: result.success });
 
     if (!result.success) {
       recordFailure(state, { toolName: action.toolName, message: result.error ?? 'unknown error', kind: 'tool_error' });
@@ -533,13 +588,21 @@ export class AdaptiveExecutor {
     // VERIFY — deterministic by default; auto-checks command exit codes even without a declared verifier.
     // A failed tool call is already one failure; verifying its (absent) output would count it twice.
     const cfg = this.policy.config;
+    // Verification is not one kind of wait: a command or browser check waits on
+    // a tool, an LLM judge waits on inference. The verifier reports which, so
+    // judge time is never counted as idle.
+    const phases: VerificationPhases = {
+      tool: (name, run) => inToolWait(lifecycle, name, run, { step: state.step, phase: 'verify' }),
+      model: run => inModelCall(lifecycle, run, undefined, { step: state.step, phase: 'verify' }),
+    };
     let outcome = result.success && cfg.verification !== 'none'
-      ? await this.verifier.verify(action.verify, result)
+      ? await this.verifier.verify(action.verify, result, phases)
       : { passed: false, evidence: 'tool call failed', kind: 'none' };
     // STATIC CHECK — a source file that was just written must at least parse.
     if (result.success && outcome.kind === 'none' && cfg.staticChecks && cfg.verification !== 'none') {
       const written = writtenPath(action.toolArgs, result.output);
-      if (written) outcome = await staticCheck(written);
+      // py_compile is a subprocess, so its wait belongs to tool wait.
+      if (written) outcome = await inToolWait(lifecycle, 'static_check', () => staticCheck(written), { step: state.step, phase: 'verify' });
     }
     if (outcome.kind !== 'none') {
       result.verified = outcome.passed;
@@ -574,6 +637,7 @@ export class AdaptiveExecutor {
     envelope: BudgetEnvelopeInstance,
     traceId: string,
     advisor: ModelTier,
+    lifecycle: AgentLifecycleTracker,
   ): Promise<StepResult[]> {
     const { tools, tracer, budget } = this.deps;
     const tool = writeToolName(state);
@@ -591,6 +655,7 @@ export class AdaptiveExecutor {
         continue;
       }
       budget.deductToolCall(envelope);
+      lifecycle.toolStart(tool, { step: state.step, consultId: advice.consultId, path: edit.path });
       const invocation = { toolName: tool, input: { path: edit.path, content } };
       const started = Date.now();
       const step: StepResult = {
@@ -605,6 +670,7 @@ export class AdaptiveExecutor {
         step.error = err instanceof Error ? err.message : String(err);
         step.durationMs = Date.now() - started;
       }
+      lifecycle.toolEnd(tool, { step: state.step, consultId: advice.consultId, success: step.success });
       if (step.success) {
         known.set(edit.path, content);
         applied++;
@@ -633,13 +699,16 @@ export class AdaptiveExecutor {
     traceId: string,
     question: string | undefined,
     advisor: ModelTier,
+    lifecycle: AgentLifecycleTracker,
     onProgress?: ProgressCallback,
   ): Promise<Advice> {
     const consultId = `c${state.consultations + 1}`;
     const q = question ?? this.autoQuestion(state);
     const req = toConsultationRequest(state, q, consultId, this.policy.config.consultMaxTokens, { files: this.policy.config.consultMode === 'patch' });
     onProgress?.({ phase: 'recovering', stepIndex: state.step, totalSteps: this.policy.config.maxSteps, usage: state.budget, state: 'recover' });
+    lifecycle.modelStart(undefined, { step: state.step, tier: advisor, consultId });
     const advice = await this.consultant.consult(req, envelope, traceId, advisor);
+    lifecycle.modelEnd(advice.model, { step: state.step, tier: advisor, consultId });
     advice.step = state.step;
     state.advice.push(advice);
     state.consultations++;

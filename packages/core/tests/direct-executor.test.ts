@@ -1,10 +1,14 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { z } from 'zod';
 import { DirectExecutor } from '../src/direct-executor.js';
 import { BudgetManager } from '../src/budget-manager.js';
 import { ModelRouter } from '../src/model-router.js';
 import { ToolRegistry } from '../src/tool-registry.js';
 import { ModelProviderRegistry } from '@joule/models';
+import { fileWriteTool } from '@joule/tools';
 import { ModelTier, generateId } from '@joule/shared';
 import type { Task, RoutingConfig, AgentDefinition } from '@joule/shared';
 
@@ -98,6 +102,38 @@ function buildExecutor(responses: string[]) {
   return { executor, budget, tools, envelope, provider };
 }
 
+/** The model's exact final reply from the old-parser real-repo smoke run, copied into a tracked fixture. */
+const smokeReplies = JSON.parse(readFileSync(new URL('./fixtures/real-repo-smoke-replies.json', import.meta.url), 'utf8')) as Record<string, string>;
+
+function realRepoReply(arm: 'staged' | 'full_verify', workloadId: string, role: string): string {
+  const reply = smokeReplies[`${arm}/${workloadId}/${role}`];
+  if (typeof reply !== 'string') throw new Error(`Missing real-repo reply: ${arm}/${workloadId}/${role}`);
+  return reply;
+}
+
+/** Replies the 2026-09-30 runs recorded as final answers; see the fixture's `_source`. */
+const unreadable = JSON.parse(readFileSync(new URL('./fixtures/unreadable-tool-calls.json', import.meta.url), 'utf8')) as Record<string, string>;
+
+/** A recording tool whose schema lists `first` before the other keys, as the real tools do. */
+function registerRecordingTool(tools: ToolRegistry, name: string, first: string, ...rest: string[]) {
+  const execute = vi.fn().mockResolvedValue({ ok: true });
+  const shape = Object.fromEntries([first, ...rest].map(key => [key, z.any().optional()]));
+  tools.register({ name, description: `Recorded ${name} call`, inputSchema: z.object(shape), outputSchema: z.any(), execute }, 'builtin');
+  return execute;
+}
+
+function registerRepoTool(tools: ToolRegistry, name: 'repo_read' | 'repo_shell') {
+  const execute = vi.fn().mockResolvedValue({ ok: true });
+  tools.register({
+    name,
+    description: `Recorded ${name} call`,
+    inputSchema: z.object({ path: z.string().optional(), command: z.string().optional() }),
+    outputSchema: z.any(),
+    execute,
+  }, 'builtin');
+  return execute;
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -163,8 +199,364 @@ describe('DirectExecutor', () => {
     });
   });
 
-  describe('circuit breaker', () => {
-    it('should break circuit after repeated same-tool calls', async () => {
+  describe('wall-clock limit', () => {
+    it('honours an agent that asks for longer than the default', async () => {
+      const agent = makeAgent({ wallTimeoutMs: 900_000 });
+      expect(agent.wallTimeoutMs).toBe(900_000);
+
+      // The limit is read per agent; a benchmark whose agents read several
+      // files before acting sets its own rather than ending for an unrelated
+      // reason. Behaviour with no value set is unchanged.
+      const { executor, envelope } = buildExecutor(['{"answer": "done"}']);
+      const result = await executor.execute(makeTask(), envelope, agent);
+      expect(result.status).toBe('completed');
+      expect(makeAgent().wallTimeoutMs).toBeUndefined();
+    });
+  });
+
+  describe('tolerant response parsing', () => {
+    it('executes the verbatim tagged JSON array from the staged pylint run', async () => {
+      const reply = realRepoReply('staged', 'pylint-dev__pylint-7114', 'Implementer');
+      const { executor, envelope, tools, provider } = buildExecutor([reply, '{"answer":"done"}']);
+      const shell = registerRepoTool(tools, 'repo_shell');
+
+      const result = await executor.execute(makeTask(), envelope, makeAgent({ allowedTools: ['repo_shell'] }));
+
+      expect(result.result).toBe('done');
+      expect(result.lifecycleMetrics?.toolCalls).toBe(1);
+      expect(shell).toHaveBeenCalledOnce();
+      expect(provider.chat).toHaveBeenCalledTimes(2);
+    });
+
+    it('executes the verbatim XML tool call from the full-verify pytest run', async () => {
+      const reply = realRepoReply('full_verify', 'pytest-dev__pytest-9359', 'Implementer');
+      const { executor, envelope, tools } = buildExecutor([reply, '{"answer":"done"}']);
+      const shell = registerRepoTool(tools, 'repo_shell');
+
+      const result = await executor.execute(makeTask(), envelope, makeAgent({ allowedTools: ['repo_shell'] }));
+
+      expect(result.result).toBe('done');
+      expect(result.lifecycleMetrics?.toolCalls).toBe(1);
+      expect(shell).toHaveBeenCalledWith({ command: "cd /testbed && grep -rn 'getstatement' --include='*.py' _pytest/" });
+    });
+
+    it('executes both calls in the verbatim nested wrapper from the full-verify pylint run', async () => {
+      const reply = realRepoReply('full_verify', 'pylint-dev__pylint-7114', 'Reviewer');
+      const { executor, envelope, tools } = buildExecutor([reply, '{"answer":"done"}']);
+      const read = registerRepoTool(tools, 'repo_read');
+
+      const result = await executor.execute(makeTask(), envelope, makeAgent({ allowedTools: ['repo_read'] }));
+
+      expect(result.result).toBe('done');
+      expect(result.lifecycleMetrics?.toolCalls).toBe(2);
+      expect(read).toHaveBeenCalledTimes(2);
+    });
+
+    it('executes a verbatim bare call object sliced from the staged pytest array', async () => {
+      const reply = realRepoReply('staged', 'pytest-dev__pytest-9359', 'Implementer');
+      const bareCall = reply.slice(reply.indexOf('{'), reply.lastIndexOf('}') + 1);
+      const { executor, envelope, tools } = buildExecutor([bareCall, '{"answer":"done"}']);
+      const read = registerRepoTool(tools, 'repo_read');
+
+      const result = await executor.execute(makeTask(), envelope, makeAgent({ allowedTools: ['repo_read'] }));
+
+      expect(result.result).toBe('done');
+      expect(result.lifecycleMetrics?.toolCalls).toBe(1);
+      expect(read).toHaveBeenCalledWith({ path: 'src/_pytest/assertion/util.py' });
+    });
+
+    it.each(['tool', 'name'])('accepts a %s key on a bare call (synthetic alias)', async key => {
+      // The committed real-repo replies contain toolName only; exercise aliases
+      // with the same recorded arguments and an explicitly synthetic key swap.
+      const reply = realRepoReply('staged', 'pytest-dev__pytest-9359', 'Implementer');
+      const bareCall = reply.slice(reply.indexOf('{'), reply.lastIndexOf('}') + 1);
+      const aliased = bareCall.replace('"toolName"', `"${key}"`);
+      const { executor, envelope, tools } = buildExecutor([aliased, '{"answer":"done"}']);
+      const read = registerRepoTool(tools, 'repo_read');
+
+      const result = await executor.execute(makeTask(), envelope, makeAgent({ allowedTools: ['repo_read'] }));
+
+      expect(result.result).toBe('done');
+      expect(result.lifecycleMetrics?.toolCalls).toBe(1);
+      expect(read).toHaveBeenCalledWith({ path: 'src/_pytest/assertion/util.py' });
+    });
+
+    it('still runs the tools when the model closes the object early', async () => {
+      // Observed from a real run: three good tool calls followed by a stray
+      // "]}". A strict parse called that a finished answer and ended the run.
+      const { executor, envelope, provider } = buildExecutor([
+        '{"tool_calls": [{"toolName": "test_tool", "toolArgs": {"query": "x"}}]}]}',
+        '{"answer": "done"}',
+      ]);
+
+      const result = await executor.execute(makeTask(), envelope, makeAgent({ allowedTools: ['test_tool'] }));
+
+      expect(result.lifecycleMetrics?.toolCalls).toBe(1);
+      expect(provider.chat).toHaveBeenCalledTimes(2);
+      expect(result.result).toBe('done');
+    });
+
+    it('finds the tool call when the model writes prose around it', async () => {
+      const { executor, envelope } = buildExecutor([
+        'Let me look at the file first.\n{"tool_calls": [{"toolName": "test_tool", "toolArgs": {}}]}',
+        '{"answer": "done"}',
+      ]);
+
+      const result = await executor.execute(makeTask(), envelope, makeAgent({ allowedTools: ['test_tool'] }));
+
+      expect(result.lifecycleMetrics?.toolCalls).toBe(1);
+    });
+
+    it('still treats a plain reply as the answer', async () => {
+      const { executor, envelope } = buildExecutor(['The chunk function drops the last partial batch.']);
+
+      const result = await executor.execute(makeTask(), envelope, makeAgent());
+
+      expect(result.status).toBe('completed');
+      expect(result.result).toBe('The chunk function drops the last partial batch.');
+      expect(result.lifecycleMetrics?.toolCalls).toBe(0);
+    });
+  });
+
+  describe('replies recorded as answers that were really tool calls', () => {
+    const fileTools = (tools: ToolRegistry) => ({
+      write: registerRecordingTool(tools, 'file_write', 'path', 'content'),
+      read: registerRecordingTool(tools, 'file_read', 'path'),
+      shell: registerRecordingTool(tools, 'shell_exec', 'command', 'cwd'),
+    });
+
+    it('runs a call named with snake_case tool_name', async () => {
+      const { executor, envelope, tools } = buildExecutor([unreadable.snakeCaseToolName, '{"answer":"done"}']);
+      const { write } = fileTools(tools);
+
+      const result = await executor.execute(makeTask(), envelope, makeAgent());
+
+      expect(result.result).toBe('done');
+      expect(write).toHaveBeenCalledOnce();
+      expect(write.mock.calls[0][0].path).toMatch(/pkg\/client\.py$/);
+      expect(write.mock.calls[0][0].content).toContain('def retries():');
+    });
+
+    it('runs a call that uses the tool name as the key for its arguments', async () => {
+      const { executor, envelope, tools } = buildExecutor([unreadable.toolNameAsKeyObject, '{"answer":"done"}']);
+      const { write } = fileTools(tools);
+
+      await executor.execute(makeTask(), envelope, makeAgent());
+
+      expect(write).toHaveBeenCalledOnce();
+      expect(write.mock.calls[0][0].path).toMatch(/pkg\/lookup\.py$/);
+    });
+
+    it('gives a bare value under the tool-name key to the tool\'s first argument', async () => {
+      const { executor, envelope, tools } = buildExecutor([unreadable.toolNameAsKeyValue, '{"answer":"done"}']);
+      const { write, shell } = fileTools(tools);
+
+      await executor.execute(makeTask(), envelope, makeAgent());
+
+      expect(write).toHaveBeenCalledOnce();
+      expect(write.mock.calls[0][0].path).toMatch(/pkg\/search\.py$/);
+      expect(write.mock.calls[0][0].content).toContain('def insert_position');
+      expect(shell).toHaveBeenCalledOnce();
+      expect(shell.mock.calls[0][0].command).toBe('python run_tests.py');
+    });
+
+    it('closes a nested wrapper the model left open', async () => {
+      const { executor, envelope, tools } = buildExecutor([unreadable.unclosedNestedWrapper, '{"answer":"done"}']);
+      const { write } = fileTools(tools);
+
+      await executor.execute(makeTask(), envelope, makeAgent());
+
+      expect(write).toHaveBeenCalledOnce();
+      expect(write.mock.calls[0][0].content).toContain('def group_by');
+    });
+
+    it('runs an open call whose name key is misspelt but names one registered tool', async () => {
+      const { executor, envelope, tools } = buildExecutor([unreadable.misspeltNameUnclosed, '{"answer":"done"}']);
+      const { write } = fileTools(tools);
+
+      await executor.execute(makeTask(), envelope, makeAgent());
+
+      expect(write).toHaveBeenCalledOnce();
+      expect(write.mock.calls[0][0].path).toMatch(/pkg\/cache\.py$/);
+    });
+
+    it('runs a markdown list of calls inside tool_calls tags', async () => {
+      const { executor, envelope, tools } = buildExecutor([unreadable.markdownList, '{"answer":"done"}']);
+      const shell = registerRepoTool(tools, 'repo_shell');
+      const read = registerRepoTool(tools, 'repo_read');
+
+      await executor.execute(makeTask(), envelope, makeAgent());
+
+      expect(shell).toHaveBeenCalledWith({ command: 'cd /testbed && git status --short && git log --oneline -3' });
+      expect(read).toHaveBeenCalledWith({ path: 'pylint/lint/expand_modules.py' });
+    });
+
+    it('runs camelCase name and argument tags despite a native-token closing tag', async () => {
+      const { executor, envelope, tools } = buildExecutor([unreadable.camelXmlWithDsml, '{"answer":"done"}']);
+      const shell = registerRepoTool(tools, 'repo_shell');
+
+      await executor.execute(makeTask(), envelope, makeAgent());
+
+      expect(shell).toHaveBeenCalledOnce();
+      expect(shell.mock.calls[0][0].command).toContain('git status --short | head -50');
+    });
+
+    it('pairs parallel lists of tool names and arguments', async () => {
+      const { executor, envelope, tools } = buildExecutor([unreadable.parallelArrays, '{"answer":"done"}']);
+      const shell = registerRepoTool(tools, 'repo_shell');
+      const read = registerRepoTool(tools, 'repo_read');
+
+      await executor.execute(makeTask(), envelope, makeAgent());
+
+      expect(shell).toHaveBeenCalledOnce();
+      expect(read).toHaveBeenCalledOnce();
+      expect(read.mock.calls[0][0].path).toBe('src/flask/cli.py');
+    });
+
+    it('never runs a call cut off mid-value, and asks the model again', async () => {
+      const { executor, envelope, tools, provider } = buildExecutor([
+        unreadable.truncatedJson,
+        '{"tool_calls": [{"toolName": "repo_shell", "toolArgs": {"command": "ls"}}]}',
+        '{"answer":"done"}',
+      ]);
+      const shell = registerRepoTool(tools, 'repo_shell');
+
+      const result = await executor.execute(makeTask(), envelope, makeAgent());
+
+      expect(result.status).toBe('completed');
+      expect(result.result).toBe('done');
+      expect(shell).toHaveBeenCalledOnce();
+      expect(shell).toHaveBeenCalledWith({ command: 'ls' });
+      const seen = provider.chat.mock.calls[1][0].messages as Array<{ role: string; content: string }>;
+      expect(seen.some(m => m.role === 'user' && m.content.includes('could not be read as a tool call'))).toBe(true);
+    });
+
+    it('does not accept a bare tool_calls tag as the answer', async () => {
+      const { executor, envelope, provider } = buildExecutor([unreadable.bareTag, '{"answer":"done"}']);
+
+      const result = await executor.execute(makeTask(), envelope, makeAgent());
+
+      expect(result.result).toBe('done');
+      expect(provider.chat).toHaveBeenCalledTimes(2);
+    });
+
+    it('fails, rather than answering, after three unreadable calls in a row', async () => {
+      const { executor, envelope, provider } = buildExecutor([unreadable.bareTag]);
+
+      const result = await executor.execute(makeTask(), envelope, makeAgent());
+
+      expect(result.status).toBe('failed');
+      expect(result.error).toContain('could not be parsed');
+      expect(result.error).toContain('last reply: "<tool_calls>"');
+      expect(result.error).not.toContain('\n');
+      expect(provider.chat).toHaveBeenCalledTimes(3);
+    });
+
+    it('counts only consecutive unreadable replies against the limit', async () => {
+      const { executor, envelope } = buildExecutor([
+        unreadable.bareTag, unreadable.bareTag,
+        '{"tool_calls": [{"toolName": "test_tool", "toolArgs": {"query": "a"}}]}',
+        unreadable.bareTag, unreadable.bareTag,
+        '{"answer":"done"}',
+      ]);
+
+      const result = await executor.execute(makeTask(), envelope, makeAgent());
+
+      expect(result.status).toBe('completed');
+      expect(result.result).toBe('done');
+    });
+  });
+
+  describe('tool result rendering', () => {
+    it('shows the full bounded repo_read result to the next model call', async () => {
+      const marker = 'def expand_modules(files_or_modules):';
+      const source = `${'x'.repeat(2_000)}\n${marker}`;
+      const { executor, envelope, tools, provider } = buildExecutor([
+        '{"tool_calls":[{"toolName":"repo_read","toolArgs":{"path":"pylint/lint/expand_modules.py"}}]}',
+        '{"answer":"done"}',
+      ]);
+      tools.register({
+        name: 'repo_read',
+        description: 'Read source from the real repository',
+        inputSchema: z.object({ path: z.string() }),
+        outputSchema: z.any(),
+        execute: async () => ({ content: source, path: 'pylint/lint/expand_modules.py', totalLines: 144, truncated: false }),
+      }, 'builtin');
+
+      await executor.execute(makeTask(), envelope, makeAgent({ allowedTools: ['repo_read'] }));
+
+      const history = provider.chat.mock.calls[1][0].messages.map((m: { content: string }) => m.content).join('\n');
+      expect(history).toContain(marker);
+    });
+
+    it('shows a bounded repo_shell error beyond the first 1,000 characters', async () => {
+      const marker = 'SyntaxError: invalid syntax at line 47';
+      const { executor, envelope, tools, provider } = buildExecutor([
+        '{"tool_calls":[{"toolName":"repo_shell","toolArgs":{"command":"pytest -q"}}]}',
+        '{"answer":"done"}',
+      ]);
+      tools.register({
+        name: 'repo_shell',
+        description: 'Run a check in the real repository',
+        inputSchema: z.object({ command: z.string() }),
+        outputSchema: z.any(),
+        execute: async () => ({ stdout: `${'x'.repeat(2_000)}\n${marker}`, stderr: '', exitCode: 1 }),
+      }, 'builtin');
+
+      await executor.execute(makeTask(), envelope, makeAgent({ allowedTools: ['repo_shell'] }));
+
+      const history = provider.chat.mock.calls[1][0].messages.map((m: { content: string }) => m.content).join('\n');
+      expect(history).toContain(marker);
+    });
+
+    it('shows the model what a tool actually returned', async () => {
+      const { executor, envelope, tools, provider } = buildExecutor([
+        '{"tool_calls": [{"toolName": "reader", "toolArgs": {}}]}',
+        '{"answer": "done"}',
+      ]);
+      tools.register({
+        name: 'reader',
+        description: 'Returns structured output, as the real file and shell tools do',
+        inputSchema: z.object({}),
+        outputSchema: z.any(),
+        execute: async () => ({ content: 'def chunk(items, size):', sizeBytes: 23, truncated: false }),
+      }, 'builtin');
+
+      await executor.execute(makeTask(), envelope, makeAgent({ allowedTools: ['reader'] }));
+
+      // An agent asked to review code has to be able to see the code: the
+      // second call's history is where the tool result reaches the model.
+      const secondCall = provider.chat.mock.calls[1][0];
+      const history = secondCall.messages.map((m: { content: string }) => m.content).join('\n');
+      expect(history).toContain('def chunk(items, size):');
+      expect(history).not.toContain('[object Object]');
+    });
+
+    it('passes a string result through unchanged', async () => {
+      const { executor, envelope, tools, provider } = buildExecutor([
+        '{"tool_calls": [{"toolName": "plain", "toolArgs": {}}]}',
+        '{"answer": "done"}',
+      ]);
+      tools.register({
+        name: 'plain',
+        description: 'Returns text',
+        inputSchema: z.object({}),
+        outputSchema: z.any(),
+        execute: async () => 'ALL TESTS PASSED',
+      }, 'builtin');
+
+      await executor.execute(makeTask(), envelope, makeAgent({ allowedTools: ['plain'] }));
+
+      const history = provider.chat.mock.calls[1][0].messages.map((m: { content: string }) => m.content).join('\n');
+      expect(history).toContain('ALL TESTS PASSED');
+      expect(history).not.toContain('"ALL TESTS PASSED"');
+    });
+  });
+
+  describe('loop detection', () => {
+    it('keeps a tool available when the same tool is called with new arguments', async () => {
+      // The Dataset F pattern: read one file, then another, then another.
+      // Counting tool identity called this a loop and confiscated the tool.
       const { executor, envelope } = buildExecutor([
         '{"tool_calls": [{"toolName": "test_tool", "toolArgs": {"query": "a"}}]}',
         '{"tool_calls": [{"toolName": "test_tool", "toolArgs": {"query": "b"}}]}',
@@ -176,7 +568,54 @@ describe('DirectExecutor', () => {
       const result = await executor.execute(makeTask(), envelope, makeAgent());
 
       expect(result.status).toBe('completed');
-      // The circuit breaker should have kicked in after 3 consecutive calls
+      // Every one of the four calls did real work.
+      expect(result.lifecycleMetrics?.toolCalls).toBe(4);
+    });
+
+    it('refuses a call identical to the one just made', async () => {
+      const { executor, envelope, provider } = buildExecutor([
+        '{"tool_calls": [{"toolName": "test_tool", "toolArgs": {"query": "same"}}]}',
+        '{"tool_calls": [{"toolName": "test_tool", "toolArgs": {"query": "same"}}]}',
+        '{"tool_calls": [{"toolName": "test_tool", "toolArgs": {"query": "same"}}]}',
+        '{"answer": "stopped repeating"}',
+      ]);
+
+      const result = await executor.execute(makeTask(), envelope, makeAgent());
+
+      // Two executions, then the third identical call is refused rather than run.
+      expect(result.lifecycleMetrics?.toolCalls).toBe(2);
+      const history = provider.chat.mock.calls[3][0].messages
+        .map((m: { content: string }) => m.content).join('\n');
+      expect(history).toContain('REPEATED CALL');
+    });
+
+    it('lets an agent carry on with the same tool after a refused repeat', async () => {
+      const { executor, envelope } = buildExecutor([
+        '{"tool_calls": [{"toolName": "test_tool", "toolArgs": {"query": "same"}}]}',
+        '{"tool_calls": [{"toolName": "test_tool", "toolArgs": {"query": "same"}}]}',
+        '{"tool_calls": [{"toolName": "test_tool", "toolArgs": {"query": "same"}}]}',
+        // A different argument is different work: the tool was never taken away.
+        '{"tool_calls": [{"toolName": "test_tool", "toolArgs": {"query": "moved on"}}]}',
+        '{"answer": "done"}',
+      ]);
+
+      const result = await executor.execute(makeTask(), envelope, makeAgent());
+
+      expect(result.status).toBe('completed');
+      expect(result.lifecycleMetrics?.toolCalls).toBe(3);
+    });
+
+    it('treats argument order as the same call', async () => {
+      const { executor, envelope } = buildExecutor([
+        '{"tool_calls": [{"toolName": "test_tool", "toolArgs": {"query": "x", "extra": 1}}]}',
+        '{"tool_calls": [{"toolName": "test_tool", "toolArgs": {"extra": 1, "query": "x"}}]}',
+        '{"tool_calls": [{"toolName": "test_tool", "toolArgs": {"extra": 1, "query": "x"}}]}',
+        '{"answer": "done"}',
+      ]);
+
+      const result = await executor.execute(makeTask(), envelope, makeAgent());
+
+      expect(result.lifecycleMetrics?.toolCalls).toBe(2);
     });
   });
 
@@ -197,6 +636,19 @@ describe('DirectExecutor', () => {
 
       expect(result.status).toBe('failed');
       expect(result.error).toContain('empty response');
+    });
+
+    it('asks again after one empty reply instead of ending the run', async () => {
+      // Seen on the second turn of a direct probe of deepseek-v4-flash: the
+      // reply was a single space.
+      const { executor, envelope, provider } = buildExecutor([' ', '{"answer":"done"}']);
+
+      const result = await executor.execute(makeTask(), envelope, makeAgent());
+
+      expect(result.status).toBe('completed');
+      expect(result.result).toBe('done');
+      const seen = provider.chat.mock.calls[1][0].messages as Array<{ role: string; content: string }>;
+      expect(seen.some(m => m.role === 'user' && m.content.includes('Your last reply was empty'))).toBe(true);
     });
   });
 
@@ -370,6 +822,319 @@ describe('DirectExecutor', () => {
 
       // The injection should be sanitized, not crash the executor
       expect(result.status).toBe('completed');
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Verified-edit gate: a later write that breaks a passing workspace is
+  // undone. Opt-in, so a task without a policy behaves exactly as before.
+  // -------------------------------------------------------------------------
+
+  // Each check runs as a real subprocess, which needs more than the default
+  // per-test budget when the whole suite is competing for the CPU.
+  describe('verified-edit gate', { timeout: 60_000 }, () => {
+    let dir: string;
+
+    beforeEach(() => {
+      dir = mkdtempSync(join(tmpdir(), 'joule-direct-gate-'));
+      // A checker with no shell quoting of its own: exit 0 iff the file is good.
+      writeFileSync(join(dir, 'check.js'), [
+        'const fs = require("fs");',
+        'const p = require("path").join(__dirname, "solution.py");',
+        'if (!fs.existsSync(p)) process.exit(1);',
+        'process.exit(fs.readFileSync(p, "utf8").includes("GOOD") ? 0 : 1);',
+      ].join('\n'));
+    });
+
+    afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+    /** buildExecutor only knows test_tool; the gate needs a real writer. */
+    const buildWriter = (responses: string[]) => {
+      const built = buildExecutor(responses);
+      built.tools.register(fileWriteTool, 'builtin');
+      return built;
+    };
+
+    const solution = () => join(dir, 'solution.py').replace(/\\/g, '/');
+    const write = (content: string) =>
+      JSON.stringify({ tool_calls: [{ toolName: 'file_write', toolArgs: { path: solution(), content } }] });
+    const policy = () => ({ command: 'node check.js', cwd: dir, timeoutMs: 20_000 });
+
+    it('rolls back a write that breaks a passing workspace', async () => {
+      const { executor, envelope } = buildWriter([
+        write('# GOOD v1'),
+        write('# BROKEN by a later agent'),
+        '{"answer": "done"}',
+      ]);
+
+      const result = await executor.execute(
+        { ...makeTask(), verifiedEdit: policy() }, envelope, makeAgent({ allowedTools: ['file_write'] }),
+      );
+
+      // The good version survived the bad write.
+      expect(readFileSync(join(dir, 'solution.py'), 'utf8')).toBe('# GOOD v1');
+      expect(result.verifiedEdits).toMatchObject({ rollbacks: 1, verified: true });
+      expect(result.status).toBe('completed');
+    });
+
+    it('keeps a write that leaves the workspace passing', async () => {
+      const { executor, envelope } = buildWriter([
+        write('# GOOD v1'),
+        write('# GOOD v2 improved'),
+        '{"answer": "done"}',
+      ]);
+
+      const result = await executor.execute(
+        { ...makeTask(), verifiedEdit: policy() }, envelope, makeAgent({ allowedTools: ['file_write'] }),
+      );
+
+      expect(readFileSync(join(dir, 'solution.py'), 'utf8')).toBe('# GOOD v2 improved');
+      expect(result.verifiedEdits).toMatchObject({ rollbacks: 0 });
+    });
+
+    it('lets an agent iterate freely until something first passes', async () => {
+      const { executor, envelope } = buildWriter([
+        write('# still wrong'),
+        write('# GOOD at last'),
+        '{"answer": "done"}',
+      ]);
+
+      const result = await executor.execute(
+        { ...makeTask(), verifiedEdit: policy() }, envelope, makeAgent({ allowedTools: ['file_write'] }),
+      );
+
+      expect(readFileSync(join(dir, 'solution.py'), 'utf8')).toBe('# GOOD at last');
+      expect(result.verifiedEdits?.rollbacks).toBe(0);
+    });
+
+    it('does nothing at all without a policy on the task', async () => {
+      const { executor, envelope } = buildWriter([
+        write('# GOOD v1'),
+        write('# BROKEN'),
+        '{"answer": "done"}',
+      ]);
+
+      const result = await executor.execute(makeTask(), envelope, makeAgent({ allowedTools: ['file_write'] }));
+
+      // Unchanged behaviour: the breaking write stands.
+      expect(readFileSync(join(dir, 'solution.py'), 'utf8')).toBe('# BROKEN');
+      expect(result.verifiedEdits).toBeUndefined();
+    });
+
+    it('protects a write that names its path as `filepath`', async () => {
+      // The tool normalizes this alias, so the gate has to recognize it too:
+      // an alias it misses is a write it snapshots nothing for and counts as
+      // no proposal, which reads afterwards as an agent that never wrote.
+      const writeVia = (key: string, content: string) =>
+        JSON.stringify({ tool_calls: [{ toolName: 'file_write', toolArgs: { [key]: solution(), content } }] });
+
+      const { executor, envelope } = buildWriter([
+        writeVia('filepath', '# GOOD v1'),
+        writeVia('filepath', '# BROKEN by a later agent'),
+        '{"answer": "done"}',
+      ]);
+
+      const result = await executor.execute(
+        { ...makeTask(), verifiedEdit: policy() }, envelope, makeAgent({ allowedTools: ['file_write'] }),
+      );
+
+      expect(readFileSync(join(dir, 'solution.py'), 'utf8')).toBe('# GOOD v1');
+      expect(result.verifiedEdits).toMatchObject({ rollbacks: 1, proposed: 2, accepted: 1 });
+    });
+
+    it('reports on the lifecycle event whether a write survived', async () => {
+      const { executor, envelope } = buildWriter([
+        write('# GOOD v1'),
+        write('# BROKEN by a later agent'),
+        '{"answer": "done"}',
+      ]);
+
+      const result = await executor.execute(
+        { ...makeTask(), verifiedEdit: policy() }, envelope, makeAgent({ allowedTools: ['file_write'] }),
+      );
+
+      const closes = (result.lifecycle ?? []).filter(e => e.from === 'tool_wait' && e.tool === 'file_write');
+      expect(closes).toHaveLength(2);
+      expect(closes[0].metadata).toMatchObject({ ok: true });
+      // The reverted write is distinguishable from the one that stood.
+      expect(closes[1].metadata).toMatchObject({ ok: false, rolledBack: true });
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Lifecycle instrumentation — same tracker, events and metrics as the
+  // adaptive path, so direct-mode crew agents are not invisible.
+  // -------------------------------------------------------------------------
+
+  describe('lifecycle instrumentation', () => {
+    it('records which tool was called and whether it worked', async () => {
+      const { executor, envelope, tools } = buildExecutor([
+        '{"tool_calls": [{"toolName": "test_tool", "toolArgs": {"query": "ok"}}]}',
+        '{"tool_calls": [{"toolName": "flaky_tool", "toolArgs": {}}]}',
+        '{"answer": "done"}',
+      ]);
+      tools.register({
+        name: 'flaky_tool',
+        description: 'Always fails',
+        inputSchema: z.object({}),
+        outputSchema: z.any(),
+        execute: async () => { throw new Error('upstream refused the call'); },
+      }, 'builtin');
+
+      const result = await executor.execute(makeTask(), envelope, makeAgent());
+
+      const closes = (result.lifecycle ?? []).filter(e => e.from === 'tool_wait');
+      expect(closes.map(e => e.tool)).toEqual(['test_tool', 'flaky_tool']);
+      expect(closes[0].metadata).toMatchObject({ ok: true });
+      // A tool call that failed is not the same as one that never happened.
+      expect(closes[1].metadata).toMatchObject({ ok: false, error: 'upstream refused the call' });
+    });
+
+    it('records ready -> model_running -> ready -> completed for a direct answer', async () => {
+      const { executor, envelope } = buildExecutor(['{"answer": "The answer is 42"}']);
+
+      const result = await executor.execute(makeTask(), envelope, makeAgent());
+
+      expect(result.status).toBe('completed');
+      expect(result.lifecycle!.map(e => e.to)).toEqual(['model_running', 'ready', 'completed']);
+      expect(result.lifecycle!.map(e => e.reason)).toEqual(['model_start', 'model_end', 'task_complete']);
+      expect(result.lifecycle![0].model).toBe('test-slm');
+
+      const m = result.lifecycleMetrics!;
+      expect(m.modelCalls).toBe(1);
+      expect(m.toolCalls).toBe(0);
+      expect(m.toolWaitMs).toBe(0);
+      expect(m.idleFraction).toBe(0);
+      expect(m.avgToolWaitMs).toBe(0);
+      expect(m.finalState).toBe('completed');
+      expect(m.modelRuntimeMs + m.toolWaitMs + m.otherMs).toBe(m.totalRuntimeMs);
+    });
+
+    it('wraps real tool work in tool_wait and leaves in-memory work out of it', async () => {
+      const { executor, envelope, tools } = buildExecutor([
+        '{"tool_calls": [{"toolName": "slow_tool", "toolArgs": {}}]}',
+        '{"answer": "done"}',
+      ]);
+      tools.register({
+        name: 'slow_tool',
+        description: 'Waits on something external',
+        inputSchema: z.object({}),
+        outputSchema: z.any(),
+        execute: async () => {
+          await new Promise(resolve => setTimeout(resolve, 25));
+          return { ok: true };
+        },
+      }, 'builtin');
+
+      const result = await executor.execute(makeTask(), envelope, makeAgent());
+
+      expect(result.lifecycle!.map(e => e.to)).toEqual([
+        'model_running', 'ready',   // first LLM call
+        'tool_wait', 'ready',       // slow_tool
+        'model_running', 'ready',   // second LLM call
+        'completed',
+      ]);
+      expect(result.lifecycle!.find(e => e.reason === 'tool_start')!.tool).toBe('slow_tool');
+
+      const m = result.lifecycleMetrics!;
+      expect(m.toolCalls).toBe(1);
+      expect(m.modelCalls).toBe(2);
+      expect(m.toolWaitMs).toBeGreaterThanOrEqual(20);
+      expect(m.idleFraction).toBeGreaterThan(0);
+      expect(m.avgToolWaitMs).toBe(m.toolWaitMs);
+      expect(m.finalState).toBe('completed');
+    });
+
+    it('returns to ready after a throwing tool, without ending the run', async () => {
+      const { executor, envelope, tools } = buildExecutor([
+        '{"tool_calls": [{"toolName": "exploding_tool", "toolArgs": {}}]}',
+        '{"answer": "recovered"}',
+      ]);
+      tools.register({
+        name: 'exploding_tool',
+        description: 'Throws',
+        inputSchema: z.object({}),
+        outputSchema: z.any(),
+        execute: async () => { throw new Error('tool exploded'); },
+      }, 'builtin');
+
+      const result = await executor.execute(makeTask(), envelope, makeAgent());
+
+      expect(result.status).toBe('completed');
+      expect(result.lifecycle!.map(e => e.to)).toEqual([
+        'model_running', 'ready', 'tool_wait', 'ready', 'model_running', 'ready', 'completed',
+      ]);
+    });
+
+    it('carries crew identity onto every event and keeps agents distinct', async () => {
+      const crewTask = (agentId: string, role: string): Task => ({
+        ...makeTask(),
+        agentId,
+        agentRole: role,
+        parentTaskId: 'task-root',
+      });
+      const researcher = buildExecutor(['{"answer": "found it"}']);
+      const reviewer = buildExecutor(['{"answer": "looks good"}']);
+
+      const a = await researcher.executor.execute(
+        crewTask('agent_researcher', 'researcher'), researcher.envelope,
+        makeAgent({ id: 'agent_researcher', role: 'researcher' }),
+      );
+      const b = await reviewer.executor.execute(
+        crewTask('agent_reviewer', 'reviewer'), reviewer.envelope,
+        makeAgent({ id: 'agent_reviewer', role: 'reviewer' }),
+      );
+
+      expect(a.lifecycle!.every(e => e.agentId === 'agent_researcher' && e.agentRole === 'researcher' && e.parentTaskId === 'task-root')).toBe(true);
+      expect(b.lifecycle!.every(e => e.agentId === 'agent_reviewer' && e.agentRole === 'reviewer' && e.parentTaskId === 'task-root')).toBe(true);
+      expect(a.lifecycle![0].agentId).not.toBe(b.lifecycle![0].agentId);
+      expect(a.lifecycle![0].taskId).toBe(a.taskId);
+    });
+
+    it('falls back to the agent definition for a standalone direct task', async () => {
+      const { executor, envelope } = buildExecutor(['{"answer": "x"}']);
+
+      const result = await executor.execute(makeTask(), envelope, makeAgent({ id: 'test-agent', role: 'test' }));
+
+      expect(result.lifecycle!.every(e => e.agentId === 'test-agent' && e.agentRole === 'test')).toBe(true);
+      expect(result.lifecycle![0].parentTaskId).toBeUndefined();
+    });
+
+    it('marks a failed model call as failed without changing error semantics', async () => {
+      const { executor, envelope, provider } = buildExecutor(['{"answer": "never reached"}']);
+      provider.chat.mockRejectedValueOnce(new Error('provider exploded'));
+
+      const result = await executor.execute(makeTask(), envelope, makeAgent());
+
+      expect(result.status).toBe('failed');
+      expect(result.error).toContain('provider exploded');
+      expect(result.lifecycle!.map(e => e.to)).toEqual(['model_running', 'failed']);
+      expect(result.lifecycle![1]).toMatchObject({ from: 'model_running', reason: 'error' });
+      expect(result.lifecycle![1].metadata).toMatchObject({ error: 'provider exploded' });
+      expect(result.lifecycleMetrics!.finalState).toBe('failed');
+    });
+
+    it('ends failed from ready when the run stops for a non-model reason', async () => {
+      const { executor, envelope } = buildExecutor(['   ']);
+
+      const result = await executor.execute(makeTask(), envelope, makeAgent());
+
+      expect(result.status).toBe('failed');
+      const last = result.lifecycle![result.lifecycle!.length - 1];
+      expect(last).toMatchObject({ from: 'ready', to: 'failed', reason: 'error' });
+      expect(last.metadata).toMatchObject({ error: 'LLM returned empty response' });
+    });
+
+    it('puts the transitions in the returned trace as agent_lifecycle events', async () => {
+      const { executor, envelope } = buildExecutor(['{"answer": "done"}']);
+
+      const result = await executor.execute(makeTask(), envelope, makeAgent());
+
+      const span = result.trace.spans.find(s => s.name === 'agent-lifecycle');
+      expect(span).toBeDefined();
+      expect(span!.events.every(e => e.type === 'agent_lifecycle')).toBe(true);
+      expect(span!.events.map(e => e.data.to)).toEqual(['model_running', 'ready', 'completed']);
+      expect(span!.events.every(e => e.data.agentId === 'test-agent')).toBe(true);
     });
   });
 });

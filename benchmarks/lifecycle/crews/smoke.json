@@ -1,0 +1,27 @@
+{
+  "name": "smoke",
+  "description": "Two agents, one file read each, tight iteration cap — for validating the experiment plumbing cheaply",
+  "strategy": "parallel",
+  "agents": [
+    {
+      "id": "reader-a",
+      "role": "Package Reader",
+      "instructions": "Use file_read once on the file the task names, then answer in one sentence. Do not call any other tool.",
+      "allowedTools": ["file_read"],
+      "budgetShare": 0.5,
+      "maxIterations": 2,
+      "maxRetries": 0
+    },
+    {
+      "id": "reader-b",
+      "role": "Config Reader",
+      "instructions": "Use file_read once on the file the task names, then answer in one sentence. Do not call any other tool.",
+      "allowedTools": ["file_read"],
+      "budgetShare": 0.5,
+      "maxIterations": 2,
+      "maxRetries": 0
+    }
+  ],
+  "budget": "high",
+  "aggregation": "concat"
+}

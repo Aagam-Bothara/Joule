@@ -81,6 +81,8 @@ export async function runStrategy(
     acc.slmTokens += tier?.slmTokens ?? 0;
     acc.midTokens = (acc.midTokens ?? 0) + (tier?.midTokens ?? 0);
     acc.llmTokens += tier?.llmTokens ?? 0;
+    acc.promptTokens = (acc.promptTokens ?? 0) + (tier?.promptTokens ?? 0);
+    acc.cachedPromptTokens = (acc.cachedPromptTokens ?? 0) + (tier?.cachedPromptTokens ?? 0);
     acc.consultations += t?.consultations ?? 0;
     acc.handoffs += t?.handoffs ?? 0;
     acc.toolCalls += result.budgetUsed.toolCallsUsed;

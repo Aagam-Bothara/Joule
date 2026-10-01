@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { readFileSync } from 'node:fs';
 import { ModelTier, type BudgetUsage, type ExecutionMode, type StepResult } from '@joule/shared';
 import { RuleBasedEscalationPolicy, type PolicyInput } from '../src/adaptive/escalation-policy.js';
 import { ConfidenceEngine } from '../src/adaptive/confidence-engine.js';
@@ -334,6 +335,15 @@ describe('StepAgent.parseAction', () => {
     expect(StepAgent.parseAction('{"action":"give_up","reason":"no tool"}').type).toBe('give_up');
   });
 
+  it('keeps accepting a bare tool array when the shared JSON reader returns the array', () => {
+    const path = new URL('./fixtures/real-repo-smoke-replies.json', import.meta.url);
+    const reply = JSON.parse(readFileSync(path, 'utf8'))['staged/pytest-dev__pytest-9359/Implementer'] as string;
+    const array = reply.slice(reply.indexOf('['));
+    const action = StepAgent.parseAction(array);
+    expect(action.type).toBe('tool_call');
+    if (action.type === 'tool_call') expect(action.toolName).toBe('repo_read');
+  });
+
   it('repairs raw newlines inside JSON string values (common with small models writing code)', () => {
     const a = StepAgent.parseAction('{"action":"tool_call","toolName":"file_write","toolArgs":{"path":"s.py","content":"def f(x):\n    return x\n"}}');
     expect(a.type).toBe('tool_call');
@@ -368,13 +378,13 @@ describe('Budget and trace additions', () => {
   });
 
   it('computeTierUsage splits model_call events by tier', () => {
-    const ev = (tier: string, totalTokens: number, costUsd: number) => ({
-      id: 'e', traceId: 't', type: 'model_call' as const, timestamp: 0, wallClock: '', data: { tier, totalTokens, costUsd },
+    const ev = (tier: string, totalTokens: number, costUsd: number, extra: Record<string, number> = {}) => ({
+      id: 'e', traceId: 't', type: 'model_call' as const, timestamp: 0, wallClock: '', data: { tier, totalTokens, costUsd, ...extra },
     });
     const usage = computeTierUsage([{
-      id: 's', traceId: 't', name: 'root', startTime: 0, events: [ev('slm', 100, 0.001), ev('llm', 50, 0.01)],
-      children: [{ id: 'c', traceId: 't', name: 'child', startTime: 0, events: [ev('slm', 20, 0.0002)], children: [] }],
+      id: 's', traceId: 't', name: 'root', startTime: 0, events: [ev('slm', 100, 0.001), ev('llm', 50, 0.01, { promptTokens: 40, cachedPromptTokens: 30 })],
+      children: [{ id: 'c', traceId: 't', name: 'child', startTime: 0, events: [ev('slm', 20, 0.0002, { promptTokens: 15 })], children: [] }],
     }]);
-    expect(usage).toEqual({ slmTokens: 120, midTokens: 0, llmTokens: 50, slmCostUsd: 0.0012, midCostUsd: 0, llmCostUsd: 0.01, slmCalls: 2, midCalls: 0, llmCalls: 1 });
+    expect(usage).toEqual({ slmTokens: 120, midTokens: 0, llmTokens: 50, slmCostUsd: 0.0012, midCostUsd: 0, llmCostUsd: 0.01, slmCalls: 2, midCalls: 0, llmCalls: 1, promptTokens: 55, cachedPromptTokens: 30 });
   });
 });

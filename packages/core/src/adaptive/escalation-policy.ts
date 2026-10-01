@@ -73,6 +73,7 @@ export const DEFAULT_POLICY_CONFIG: Required<EscalationPolicyConfig> = {
   finalAnswerRequires: 'none',
   breakdownSkipsToTop: false,
   explorationStallSteps: 8,
+  rungLocalSteps: false,
 };
 
 export class RuleBasedEscalationPolicy {
@@ -134,8 +135,8 @@ export class RuleBasedEscalationPolicy {
       // Global on purpose: a tool that does not exist does not appear at a higher rung.
       return { action: 'abort', reason: `impossible tool requirement: ${last.toolName} is not available` };
     }
-    if (state.step >= cfg.maxSteps) {
-      return { action: 'abort', reason: `step limit reached (${cfg.maxSteps})` };
+    if (stepsTowardCap(state, cfg.rungLocalSteps) >= cfg.maxSteps) {
+      return { action: 'abort', reason: `step limit reached (${cfg.maxSteps}${cfg.rungLocalSteps ? ' per rung' : ''})` };
     }
 
     // ── 2. HANDOFF hard triggers ────────────────────────────────────
@@ -371,6 +372,12 @@ export function duplicateVerificationFailures(state: ExecutionState, sinceStep =
     if (s.verifyScore !== undefined && prev.verifyScore !== undefined && s.verifyScore === prev.verifyScore) n++;
   }
   return n;
+}
+
+/** Steps counted against `maxSteps`: all of them, or only the current rung's when the cap is rung-local. */
+export function stepsTowardCap(state: ExecutionState, rungLocal: boolean): number {
+  if (!rungLocal || state.handoffAtStep === undefined) return state.step;
+  return state.step - state.handoffAtStep - 1;
 }
 
 function stripUndefined<T extends object>(obj?: T): Partial<T> {

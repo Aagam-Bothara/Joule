@@ -22,13 +22,15 @@ import type { TraceExporter } from './trace-exporters/exporter.js';
  * tokens" and "estimated LLM-only cost" answerable from a trace alone.
  */
 export function computeTierUsage(spans: TraceSpan[]): TierUsage {
-  const usage: TierUsage = { slmTokens: 0, midTokens: 0, llmTokens: 0, slmCostUsd: 0, midCostUsd: 0, llmCostUsd: 0, slmCalls: 0, midCalls: 0, llmCalls: 0 };
+  const usage: TierUsage = { slmTokens: 0, midTokens: 0, llmTokens: 0, slmCostUsd: 0, midCostUsd: 0, llmCostUsd: 0, slmCalls: 0, midCalls: 0, llmCalls: 0, promptTokens: 0, cachedPromptTokens: 0 };
   const walk = (list: TraceSpan[]): void => {
     for (const span of list) {
       for (const event of span.events) {
         if (event.type !== 'model_call') continue;
         const tokens = Number(event.data.totalTokens ?? 0) || 0;
         const cost = Number(event.data.costUsd ?? 0) || 0;
+        usage.promptTokens += Number(event.data.promptTokens ?? 0) || 0;
+        usage.cachedPromptTokens += Number(event.data.cachedPromptTokens ?? 0) || 0;
         if (event.data.tier === 'llm') {
           usage.llmTokens += tokens; usage.llmCostUsd += cost; usage.llmCalls += 1;
         } else if (event.data.tier === 'mid') {
@@ -149,6 +151,7 @@ export class TraceLogger {
       provider: response.provider,
       tier: response.tier,
       promptTokens: response.tokenUsage.promptTokens,
+      cachedPromptTokens: response.tokenUsage.cachedPromptTokens,
       completionTokens: response.tokenUsage.completionTokens,
       totalTokens: response.tokenUsage.totalTokens,
       latencyMs: response.latencyMs,

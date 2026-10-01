@@ -1,6 +1,7 @@
 import {
   type Task,
   type TaskResult,
+  type TaskStatus,
   type AgentDefinition,
   type ModelRequest,
   type ChatMessage,
@@ -16,6 +17,9 @@ import type { BudgetManager, BudgetEnvelopeInstance } from './budget-manager.js'
 import { ModelRouter } from './model-router.js';
 import { ToolRegistry } from './tool-registry.js';
 import type { ProgressCallback } from './task-executor.js';
+import { AgentLifecycleTracker } from './adaptive/lifecycle.js';
+import { extractJson } from './adaptive/step-agent.js';
+import { VerifiedEditGate } from './verified-edit.js';
 
 /**
  * A parsed tool call extracted from the LLM's JSON response.
@@ -29,10 +33,78 @@ interface ParsedToolCall {
  * A parsed LLM response — either tool calls to execute, or a final answer.
  */
 interface ParsedResponse {
-  type: 'tool_calls' | 'final_answer';
+  type: 'tool_calls' | 'final_answer' | 'malformed';
   toolCalls?: ParsedToolCall[];
   answer?: string;
 }
+
+/**
+ * The registered tools, each with the argument a bare value belongs to.
+ *
+ * Models sometimes write `{"file_write": "a.py", "content": ...}`: the tool
+ * name as a key, holding its main argument. The main argument is the first
+ * key of the tool's input schema (`path`, `command`).
+ */
+type ToolCatalog = ReadonlyMap<string, string | undefined>;
+
+/** The first key of a Zod object schema, or undefined for any other schema. */
+function firstSchemaKey(schema: unknown): string | undefined {
+  const def = (schema as { _def?: { typeName?: string; shape?: () => Record<string, unknown> } } | undefined)?._def;
+  if (def?.typeName !== 'ZodObject' || typeof def.shape !== 'function') return undefined;
+  return Object.keys(def.shape())[0];
+}
+
+const asArgs = (value: unknown): Record<string, unknown> =>
+  value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
+
+/** Normalize the call shapes seen in model replies, including nested wrappers. */
+function toolCallsFrom(value: unknown, catalog: ToolCatalog = new Map()): ParsedToolCall[] {
+  if (Array.isArray(value)) return value.flatMap(v => toolCallsFrom(v, catalog));
+  if (value === null || typeof value !== 'object') return [];
+  const obj = value as Record<string, unknown>;
+  const argsOf = () => asArgs(obj.toolArgs ?? obj.tool_args ?? obj.args ?? obj.input ?? {});
+
+  const toolName = [obj.toolName, obj.tool_name, obj.tool, obj.name]
+    .find((name): name is string => typeof name === 'string' && name.length > 0);
+  if (toolName) return [{ toolName, toolArgs: argsOf() }];
+
+  // {"file_write": {...}} or {"file_write": "a.py", "content": "..."}
+  const keyed = Object.keys(obj).filter(key => catalog.has(key));
+  if (keyed.length === 1) {
+    const [name] = keyed;
+    const held = obj[name];
+    if (held !== null && typeof held === 'object' && !Array.isArray(held)) return [{ toolName: name, toolArgs: asArgs(held) }];
+    const rest = { ...obj };
+    delete rest[name];
+    const primary = catalog.get(name);
+    return [{ toolName: name, toolArgs: primary !== undefined ? { ...rest, [primary]: held } : rest }];
+  }
+
+  // {"toolNames": ["a", "b"], "toolArgs": [{...}, {...}]}
+  if (Array.isArray(obj.toolNames) && Array.isArray(obj.toolArgs) && obj.toolNames.length === obj.toolArgs.length) {
+    const names = obj.toolNames as unknown[];
+    const args = obj.toolArgs as unknown[];
+    if (names.every(n => typeof n === 'string' && n.length > 0)) {
+      return names.map((n, i) => ({ toolName: n as string, toolArgs: asArgs(args[i]) }));
+    }
+  }
+
+  if (Array.isArray(obj.tool_calls)) return toolCallsFrom(obj.tool_calls, catalog);
+  if (Array.isArray(obj.steps)) return toolCallsFrom(obj.steps, catalog);
+
+  // A misspelt name key ("tool_cype") still names exactly one registered tool.
+  if (obj.toolArgs !== undefined || obj.tool_args !== undefined || obj.args !== undefined) {
+    const named = Object.values(obj).filter((v): v is string => typeof v === 'string' && catalog.has(v));
+    if (named.length === 1) return [{ toolName: named[0], toolArgs: argsOf() }];
+  }
+  return [];
+}
+
+/**
+ * Text that is trying to call a tool. A reply containing one of these that
+ * still yields no call is a malformed call, not the agent's final answer.
+ */
+const CALL_MARKERS = /"tool_?calls"|"tool_?name"|<tool_?calls?>|<tool_?name>|｜DSML｜/i;
 
 /** A recorded trace span for tool execution or LLM call. */
 interface TraceSpan {
@@ -42,17 +114,56 @@ interface TraceSpan {
   metadata?: Record<string, unknown>;
 }
 
+/** A call's identity: the tool plus its arguments, with key order normalized. */
+function callSignature(toolName: string, args: Record<string, unknown>): string {
+  const stable = Object.keys(args)
+    .sort()
+    .map(key => `${key}=${JSON.stringify(args[key])}`)
+    .join('&');
+  return `${toolName}(${stable})`;
+}
+
 /** Default wall-clock timeout for the entire execution loop (5 minutes). */
 const DEFAULT_WALL_TIMEOUT_MS = 5 * 60 * 1000;
 
 /** Maximum number of messages before sliding window kicks in. */
 const MAX_MESSAGE_HISTORY = 20;
 
-/** Maximum consecutive calls to the same tool before circuit-breaking. */
-const MAX_SAME_TOOL_CONSECUTIVE = 3;
+/**
+ * Maximum consecutive times the *same call* may be repeated before it is
+ * refused.
+ *
+ * The signal for a stuck agent is an identical call — same tool, same
+ * arguments — returning the same result over and over. Reaching for one tool
+ * repeatedly is not that: reading three files in a row, or running a command
+ * and then re-running it after an edit, is ordinary work on a repository.
+ * Counting tool identity instead of call identity misread that as a loop and
+ * took the tool away: in Dataset F it disabled `file_read` and `shell_exec` for
+ * four testers, which then had nothing left to work with.
+ */
+const MAX_IDENTICAL_TOOL_CALLS = 3;
+
+/**
+ * Consecutive empty or unreadable replies an agent is told about and allowed
+ * to correct before the run fails.
+ *
+ * Accepting such a reply as the final answer was the old behaviour, and it was
+ * wrong: in the 2026-09-30 authored rerun, 10 of the 11 failed lone-implementer
+ * cells ended on a tool call the parser could not read, most of them the fix
+ * itself; the eleventh ended on an empty reply.
+ */
+const MAX_FORMAT_RETRIES = 2;
+
+/** How much of an unreadable reply to show back to the model with the correction. */
+const MAX_RETRY_ECHO_CHARS = 2_000;
 
 /** Maximum size for a single tool argument value in characters. */
 const MAX_TOOL_ARG_SIZE = 50_000;
+
+/** Repository tools already cap their payloads; preserve enough to show a file or test failure. */
+const REPO_READ_RESULT_CHARS = 16_000;
+const REPO_SHELL_RESULT_CHARS = 10_000;
+const DEFAULT_TOOL_RESULT_CHARS = 1_000;
 
 /**
  * DirectExecutor — OpenClaw-style reactive agent loop.
@@ -94,7 +205,22 @@ export class DirectExecutor {
     const taskId = task.id;
     const traceId = generateId('direct-trace');
     const maxIterations = agent.maxIterations ?? 10;
-    const wallTimeoutMs = DEFAULT_WALL_TIMEOUT_MS;
+    const wallTimeoutMs = agent.wallTimeoutMs ?? DEFAULT_WALL_TIMEOUT_MS;
+
+    // Opt-in verified-edit gate: without a policy on the task this stays
+    // undefined and every write behaves exactly as it did before.
+    const gate = task.verifiedEdit ? new VerifiedEditGate(task.verifiedEdit) : undefined;
+    if (gate) await gate.establishBaseline();
+
+    // The same tracker the adaptive path uses, so direct-mode agents produce
+    // comparable events. Identity comes from the task the crew built; a
+    // standalone run falls back to the agent definition's own id and role.
+    const lifecycle = new AgentLifecycleTracker({
+      taskId,
+      agentId: task.agentId ?? agent.id,
+      agentRole: task.agentRole ?? agent.role,
+      parentTaskId: task.parentTaskId,
+    });
 
     // Build system prompt with tool descriptions + site knowledge
     const systemPrompt = this.buildSystemPrompt(agent, task.description);
@@ -110,10 +236,15 @@ export class DirectExecutor {
     let lastError: string | undefined;
     const traceSpans: TraceSpan[] = [];
 
-    // Circuit breaker state: track consecutive calls to same tool
-    let lastToolName: string | undefined;
-    let sameToolCount = 0;
-    const circuitBrokenTools = new Set<string>();
+    // Loop detection: the last call made, and how many times in a row it has
+    // been repeated. No tool is ever taken away — only an identical repeat is
+    // refused, so the agent keeps every tool it was given.
+    let lastCallSignature: string | undefined;
+    let identicalCallCount = 0;
+
+    // Consecutive replies that were empty or an unreadable tool call.
+    let formatErrors = 0;
+    const catalog = this.toolCatalog();
 
     // Report initial progress
     onProgress?.({
@@ -178,6 +309,7 @@ export class DirectExecutor {
       };
 
       let response;
+      lifecycle.modelStart(decision.model, { iteration, tier: decision.tier, provider: decision.provider });
       try {
         response = await provider.chat(request);
       } catch (err) {
@@ -188,8 +320,11 @@ export class DirectExecutor {
           durationMs: monotonicNow() - llmSpanStart,
           metadata: { error: lastError, iteration },
         });
+        // The loop ends here, so the run dies inside the model call.
+        lifecycle.fail(err, { iteration, phase: 'model' });
         break;
       }
+      lifecycle.modelEnd(response.model, { iteration, tier: decision.tier });
 
       const llmDuration = monotonicNow() - llmSpanStart;
       traceSpans.push({
@@ -212,20 +347,38 @@ export class DirectExecutor {
         usage: this.budgetManager.getUsage(envelope),
       });
 
-      // Detect empty/malformed responses — fail instead of treating as success
-      if (!response.content || response.content.trim().length === 0) {
-        lastError = 'LLM returned empty response';
+      // An empty reply or an unreadable tool call is neither progress nor an
+      // answer. Say so and let the agent retry, a bounded number of times in a
+      // row; past that the run fails rather than guessing.
+      const empty = !response.content || response.content.trim().length === 0;
+      const parsed: ParsedResponse = empty ? { type: 'malformed' } : this.parseResponse(response.content, catalog);
+
+      if (parsed.type === 'malformed') {
+        formatErrors++;
         traceSpans.push({
-          name: 'empty_response',
+          name: empty ? 'empty_response' : 'malformed_response',
           startedAt: isoNow(),
           durationMs: 0,
-          metadata: { iteration },
+          metadata: { iteration, attempt: formatErrors, ...(empty ? {} : { rawContent: this.truncate(response.content, 200) }) },
         });
-        break;
+        if (formatErrors > MAX_FORMAT_RETRIES) {
+          // The reply itself, escaped onto one line, so a record of the failure
+          // shows which shape broke without the full trace.
+          lastError = empty
+            ? 'LLM returned empty response'
+            : `LLM returned a tool call that could not be parsed; last reply: ${JSON.stringify(this.truncate(response.content, 200))}`;
+          break;
+        }
+        if (!empty) messages.push({ role: 'assistant', content: this.truncate(response.content, MAX_RETRY_ECHO_CHARS) });
+        messages.push({
+          role: 'user',
+          content: `${empty ? 'Your last reply was empty' : 'Your last reply could not be read as a tool call'}, so nothing was executed. `
+            + 'Reply with ONLY one raw JSON object: {"tool_calls": [{"toolName": "<tool_name>", "toolArgs": {<arguments>}}]} '
+            + 'to use tools, or {"answer": "<your final answer>"} when you are done.',
+        });
+        continue;
       }
-
-      // Parse response
-      const parsed = this.parseResponse(response.content);
+      formatErrors = 0;
 
       if (parsed.type === 'final_answer') {
         finalAnswer = parsed.answer;
@@ -240,33 +393,40 @@ export class DirectExecutor {
         const toolResults: string[] = [];
 
         for (const toolCall of parsed.toolCalls) {
-          // Circuit breaker: skip tools that have been broken
-          if (circuitBrokenTools.has(toolCall.toolName)) {
-            toolResults.push(
-              `[${toolCall.toolName}] CIRCUIT BROKEN: This tool has been called too many times consecutively. Try a different approach.`,
-            );
-            continue;
-          }
+          // Sanitize tool argument sizes
+          const sanitizedArgs = this.sanitizeToolArgs(toolCall.toolArgs);
 
-          // Track consecutive same-tool calls
-          if (toolCall.toolName === lastToolName) {
-            sameToolCount++;
-            if (sameToolCount >= MAX_SAME_TOOL_CONSECUTIVE) {
-              circuitBrokenTools.add(toolCall.toolName);
+          // Refuse a call that is identical to the one just made: it would
+          // return the same result again. A different argument is different
+          // work, and the tool stays available either way.
+          const signature = callSignature(toolCall.toolName, sanitizedArgs);
+          if (signature === lastCallSignature) {
+            identicalCallCount++;
+            if (identicalCallCount >= MAX_IDENTICAL_TOOL_CALLS) {
               toolResults.push(
-                `[${toolCall.toolName}] CIRCUIT BROKEN: Called ${sameToolCount} times consecutively without progress. Try a different tool or approach.`,
+                `[${toolCall.toolName}] REPEATED CALL: this exact call has already been made ${identicalCallCount - 1} time(s) `
+                + 'and returned the same result. Change the arguments, or try something else.',
               );
               continue;
             }
           } else {
-            lastToolName = toolCall.toolName;
-            sameToolCount = 1;
+            lastCallSignature = signature;
+            identicalCallCount = 1;
           }
 
-          // Sanitize tool argument sizes
-          const sanitizedArgs = this.sanitizeToolArgs(toolCall.toolArgs);
-
           const toolSpanStart = monotonicNow();
+          // Only real tool work counts as waiting; the circuit-breaker and
+          // argument checks above are in-memory and stay out of the timeline.
+          lifecycle.toolStart(toolCall.toolName, { iteration });
+          // What the call did, reported on the closing lifecycle event. Without
+          // it a record shows that an agent called `file_write` but not whether
+          // the write landed — the difference between an agent that tried to
+          // contribute and one that succeeded.
+          const outcome: { ok?: boolean; rolledBack?: boolean; error?: string } = {};
+          // Opt-in: remember the file this write is about to replace, so a
+          // regression can be undone.
+          const guarded = gate?.guards(toolCall.toolName, sanitizedArgs) === true;
+          const before = guarded ? gate!.snapshot(sanitizedArgs) : undefined;
           try {
             const result = await this.tools.invoke({
               toolName: toolCall.toolName,
@@ -274,11 +434,24 @@ export class DirectExecutor {
             });
 
             const toolDuration = monotonicNow() - toolSpanStart;
-            const output = this.truncate(String(result.output ?? 'OK'), 1000);
+            const outputLimit = toolCall.toolName === 'repo_read' ? REPO_READ_RESULT_CHARS
+              : toolCall.toolName === 'repo_shell' ? REPO_SHELL_RESULT_CHARS : DEFAULT_TOOL_RESULT_CHARS;
+            const output = this.truncate(this.renderToolOutput(result.output), outputLimit);
 
-            if (result.success) {
+            if (result.success && before) {
+              // The write landed; keep it only if the workspace still verifies.
+              const decision = await gate!.review(before, toolCall.toolName, task.agentRole ?? agent.role ?? toolCall.toolName);
+              outcome.ok = decision.kept;
+              outcome.rolledBack = decision.rolledBack;
+              toolResults.push(decision.kept
+                ? `[${toolCall.toolName}] Success: ${output}${decision.message ? ` (${decision.message})` : ''}`
+                : `[${toolCall.toolName}] REJECTED: ${decision.message}`);
+            } else if (result.success) {
+              outcome.ok = true;
               toolResults.push(`[${toolCall.toolName}] Success: ${output}`);
             } else {
+              outcome.ok = false;
+              outcome.error = result.error ?? 'Unknown error';
               toolResults.push(`[${toolCall.toolName}] Error: ${result.error ?? 'Unknown error'}`);
             }
 
@@ -291,6 +464,8 @@ export class DirectExecutor {
           } catch (err) {
             const toolDuration = monotonicNow() - toolSpanStart;
             const errMsg = err instanceof Error ? err.message : String(err);
+            outcome.ok = false;
+            outcome.error = errMsg;
             toolResults.push(`[${toolCall.toolName}] Error: ${errMsg}`);
             traceSpans.push({
               name: `tool:${toolCall.toolName}`,
@@ -298,6 +473,10 @@ export class DirectExecutor {
               durationMs: toolDuration,
               metadata: { success: false, error: errMsg, iteration },
             });
+          } finally {
+            // A throwing tool must not leave the lifecycle stuck in tool_wait;
+            // a failed tool call is reported to the agent and the run continues.
+            lifecycle.toolEnd(toolCall.toolName, { iteration, ...outcome });
           }
         }
 
@@ -330,6 +509,15 @@ export class DirectExecutor {
         : undefined;
     }
 
+    // Close the lifecycle on whatever ended the loop, matching `status` below.
+    const status: TaskStatus = finalAnswer ? 'completed' : 'failed';
+    if (!lifecycle.isTerminal()) {
+      if (status === 'completed') lifecycle.complete({ iterations: iteration });
+      else lifecycle.fail(lastError, { iterations: iteration });
+    }
+    const lifecycleEvents = lifecycle.events;
+    const lifecycleMetrics = lifecycle.metrics();
+
     const elapsedMs = monotonicNow() - startTime;
     const finalUsage = this.budgetManager.getUsage(envelope);
     const budgetUsed: BudgetUsage = {
@@ -357,7 +545,7 @@ export class DirectExecutor {
       id: generateId('result'),
       taskId,
       traceId,
-      status: finalAnswer ? 'completed' : 'failed',
+      status,
       result: finalAnswer,
       stepResults: [],
       budgetUsed,
@@ -371,26 +559,50 @@ export class DirectExecutor {
           allocated: envelope.envelope,
           used: budgetUsed,
         },
-        spans: traceSpans.map(s => ({
-          id: generateId('span'),
-          traceId,
-          name: s.name,
-          startTime: new Date(s.startedAt).getTime(),
-          endTime: new Date(s.startedAt).getTime() + s.durationMs,
-          events: s.metadata ? [{
-            id: generateId('evt'),
+        spans: [
+          ...traceSpans.map(s => ({
+            id: generateId('span'),
             traceId,
-            type: 'info' as const,
-            timestamp: new Date(s.startedAt).getTime(),
-            wallClock: s.startedAt,
-            duration: s.durationMs,
-            data: s.metadata,
-          }] : [],
-          children: [],
-        })),
+            name: s.name,
+            startTime: new Date(s.startedAt).getTime(),
+            endTime: new Date(s.startedAt).getTime() + s.durationMs,
+            events: s.metadata ? [{
+              id: generateId('evt'),
+              traceId,
+              type: 'info' as const,
+              timestamp: new Date(s.startedAt).getTime(),
+              wallClock: s.startedAt,
+              duration: s.durationMs,
+              data: s.metadata,
+            }] : [],
+            children: [],
+          })),
+          // Lifecycle transitions as `agent_lifecycle` events: the same type and
+          // payload the adaptive path logs through TraceLogger, so a consumer
+          // reads both modes the same way.
+          ...(lifecycleEvents.length > 0 ? [{
+            id: generateId('span'),
+            traceId,
+            name: 'agent-lifecycle',
+            startTime: lifecycle.startTime,
+            endTime: lifecycleEvents[lifecycleEvents.length - 1].timestamp,
+            events: lifecycleEvents.map(e => ({
+              id: generateId('evt'),
+              traceId,
+              type: 'agent_lifecycle' as const,
+              timestamp: e.timestamp,
+              wallClock: new Date(Date.now() - (monotonicNow() - e.timestamp)).toISOString(),
+              data: { ...e } as Record<string, unknown>,
+            })),
+            children: [],
+          }] : []),
+        ],
       },
       error: lastError,
       completedAt: isoNow(),
+      lifecycle: lifecycleEvents,
+      lifecycleMetrics,
+      ...(gate ? { verifiedEdits: gate.stats } : {}),
     };
   }
 
@@ -450,59 +662,54 @@ Respond with:
    * Parse LLM response into either tool calls or final answer.
    * Handles various response formats gracefully.
    */
-  private parseResponse(content: string): ParsedResponse {
-    // Try to extract JSON from the response
-    const cleaned = content.trim()
-      .replace(/^```json\s*/i, '')
-      .replace(/^```\s*/i, '')
-      .replace(/\s*```$/i, '')
-      .trim();
+  private parseResponse(content: string, catalog: ToolCatalog = this.toolCatalog()): ParsedResponse {
+    // Some model replies use XML tags for the call name and JSON arguments
+    // (`<tool_name>` or `<toolName>`, possibly as list items). Parse the paired
+    // tags, including replies whose outer closing tag is bad.
+    if (/<tool_calls>/i.test(content)) {
+      const xmlCalls = [...content.matchAll(/<tool_?name>\s*([^<>]+?)\s*<\/tool_?name>[^<]*<tool_?args>\s*([\s\S]*?)\s*<\/tool_?args>/gi)]
+        .flatMap(match => toolCallsFrom({ toolName: match[1].trim(), toolArgs: extractJson(match[2]) }, catalog));
+      if (xmlCalls.length > 0) return { type: 'tool_calls', toolCalls: xmlCalls };
 
-    try {
-      const parsed = JSON.parse(cleaned);
+      // A markdown list of calls: `- repo_shell: {"command": "..."}`
+      const listed = [...content.matchAll(/^\s*[-*]\s*([A-Za-z_][\w.-]*)\s*:\s*(\{.*\})\s*$/gm)]
+        .filter(match => catalog.has(match[1]))
+        .flatMap(match => toolCallsFrom({ toolName: match[1], toolArgs: extractJson(match[2]) }, catalog));
+      if (listed.length > 0) return { type: 'tool_calls', toolCalls: listed };
+    }
 
+    // `extractJson` is the same tolerant reader the adaptive path uses: it
+    // copes with code fences, prose around JSON, raw newlines inside
+    // strings, and a container closed early with text still trailing it. A strict
+    // parse treats all of those as "the agent is finished", which silently ends
+    // a run that was in the middle of calling three tools.
+    const parsed = extractJson(content);
+
+    if (parsed !== undefined && parsed !== null && typeof parsed === 'object') {
       // Check for final answer
-      if (parsed.answer !== undefined) {
+      if (!Array.isArray(parsed) && (parsed as Record<string, unknown>).answer !== undefined) {
+        const answer = (parsed as Record<string, unknown>).answer;
         return {
           type: 'final_answer',
-          answer: typeof parsed.answer === 'string' ? parsed.answer : JSON.stringify(parsed.answer),
+          answer: typeof answer === 'string' ? answer : JSON.stringify(answer),
         };
       }
 
-      // Check for tool calls
-      if (parsed.tool_calls && Array.isArray(parsed.tool_calls)) {
-        const toolCalls: ParsedToolCall[] = parsed.tool_calls
-          .filter((tc: any) => tc.toolName && typeof tc.toolName === 'string')
-          .map((tc: any) => ({
-            toolName: tc.toolName,
-            toolArgs: tc.toolArgs ?? {},
-          }));
-
-        if (toolCalls.length > 0) {
-          return { type: 'tool_calls', toolCalls };
-        }
-      }
-
-      // If it has steps (old format), treat first step as tool call
-      if (parsed.steps && Array.isArray(parsed.steps) && parsed.steps.length > 0) {
-        const toolCalls: ParsedToolCall[] = parsed.steps
-          .filter((s: any) => s.toolName)
-          .map((s: any) => ({
-            toolName: s.toolName,
-            toolArgs: s.toolArgs ?? {},
-          }));
-
-        if (toolCalls.length > 0) {
-          return { type: 'tool_calls', toolCalls };
-        }
-      }
-
-      // Unknown structure — treat as final answer
-      return { type: 'final_answer', answer: content };
-    } catch {
-      // Not valid JSON — treat entire response as final answer
-      return { type: 'final_answer', answer: content };
+      const toolCalls = toolCallsFrom(parsed, catalog);
+      if (toolCalls.length > 0) return { type: 'tool_calls', toolCalls };
     }
+
+    // A reply that is trying to call a tool is not the agent's answer, however
+    // it is broken: accepting it ends the run on an edit that never happened.
+    if (CALL_MARKERS.test(content)) return { type: 'malformed' };
+
+    // No recognizable call or answer: preserve the reply as the answer.
+    return { type: 'final_answer', answer: content };
+  }
+
+  /** Registered tool names, each with the schema key a bare value fills. */
+  private toolCatalog(): ToolCatalog {
+    return new Map(this.tools.list().map(tool => [tool.name, firstSchemaKey(tool.inputSchema)]));
   }
 
   /**
@@ -541,6 +748,22 @@ Respond with:
       }
     }
     return sanitized;
+  }
+
+  /**
+   * A tool result as text the model can read.
+   *
+   * Tools return objects — `file_read` gives `{content, sizeBytes, truncated}`,
+   * `shell_exec` gives `{stdout, stderr, exitCode}` — and `String(anObject)` is
+   * "[object Object]". That is what every direct-mode agent was shown for every
+   * file it read and every command it ran, so an agent asked to review code
+   * received nothing to review. The other execution paths have always used JSON
+   * here; this makes the direct loop agree with them.
+   */
+  private renderToolOutput(output: unknown): string {
+    if (output === undefined || output === null) return 'OK';
+    if (typeof output === 'string') return output;
+    return JSON.stringify(output) ?? 'OK';
   }
 
   private truncate(str: string, maxLen: number): string {

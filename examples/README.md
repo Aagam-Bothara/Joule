@@ -30,6 +30,7 @@ npx tsx examples/quick-start.ts
 | [`adaptive-escalation.ts`](adaptive-escalation.ts) | **Adaptive execution** — a small model does the task, a large model is consulted only on evidence, and the trajectory shows every decision |
 | [`quick-start.ts`](quick-start.ts) | Minimal setup — create Joule, register a tool, run a task, see the energy report |
 | [`budget-constrained.ts`](budget-constrained.ts) | **7-dimensional budget enforcement** — run a task with strict cost caps, see exactly what was spent |
+| [`staged-recovery.ts`](staged-recovery.ts) | **Verification-driven staging** — an implementer runs, the task's real check decides, and recovery roles start only if it fails |
 | [`research-crew.ts`](research-crew.ts) | **Multi-agent orchestration** — 3 agents (researcher, analyst, writer) collaborate on a research task |
 | [`guardrails.ts`](guardrails.ts) | **Governance + safety** — constitutional rules block dangerous tools, approval policies gate actions |
 | [`chat-bot.ts`](chat-bot.ts) | Interactive readline chat with session persistence |

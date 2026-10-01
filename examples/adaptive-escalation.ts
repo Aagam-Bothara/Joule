@@ -74,6 +74,8 @@ async function main() {
   ].join('\n'));
 
   const result = await joule.execute({
+    id: 'comb-sort',
+    createdAt: new Date().toISOString(),
     description: [
       `Write a Python function named \`comb_sort\` that sorts a list with the comb sort algorithm and save it to "${solution}".`,
       `Run the tests with: python "${tests}" (working directory "${dir}"). They print ALL TESTS PASSED on success. Make them pass before you finish.`,

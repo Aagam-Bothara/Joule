@@ -182,7 +182,8 @@ routing:
 | `escalation.verification` | string   | `deterministic` | `none` disables the step verifier entirely. Ablation only |
 | `escalation.confidenceSource` | string | `evidence` | `self-report` asks the agent for a confidence number and uses it instead of the evidence-based composite. Ablation only |
 | `escalation.maxOutputTokens` | number | `4096` | Output token cap per agent turn; raise it for repository work where a step may write a whole file |
-| `escalation.finalAnswerRequires` | string | `none` | `write`: a final answer is refused (and counted as a failure) until the run has changed at least one file; for tasks that are only done when code changed |
+| `escalation.finalAnswerRequires` | string | `none` | `write`: a final answer is refused (and counted as a failure) until the run has changed at least one file. `verified`: additionally, a step must have verified successfully after the last change, so an unchecked edit cannot end the task |
+| `escalation.rungLocalSteps` | boolean | `false` | Count `maxSteps` per rung: after a handoff the new model gets a fresh step allowance instead of what the previous rung left (the cost ceiling stays the hard cap) |
 | `escalation.breakdownSkipsToTop` | boolean | `false` | On a reasoning breakdown (repeated unparseable output, give-up with no progress) hand off straight to the top rung instead of the next one |
 | `escalation.explorationStallSteps` | number | `8` | Consecutive successful steps that neither change a file nor verify anything (reads, searches) before a CONSULT; the signal for a model wandering through a repository without failing |
 

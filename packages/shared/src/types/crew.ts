@@ -62,13 +62,74 @@ export interface AgentDefinition {
 
   /** Max iterations for direct execution mode (default: 10). Prevents infinite loops. */
   maxIterations?: number;
+
+  /**
+   * Wall-clock limit for one direct-mode run, in ms (default: 5 minutes).
+   *
+   * The default suits an interactive agent. A benchmark whose agents read
+   * several files before acting may need longer, and needs to say so rather
+   * than have runs end for a reason unrelated to what it is measuring.
+   */
+  wallTimeoutMs?: number;
 }
 
 // ============================================================================
 // Orchestration Strategy
 // ============================================================================
 
-export type OrchestrationStrategy = 'sequential' | 'parallel' | 'hierarchical' | 'graph';
+/**
+ * `staged_recovery` runs the first agent, checks the task's external verifier,
+ * and only starts the next agent if that check fails. Crew width becomes a
+ * consequence of failing verification rather than something chosen up front.
+ * It requires `task.verifiedEdit`, since the decision to escalate must come
+ * from outside the agent's own belief that it finished.
+ */
+/**
+ * `verified_full` is `staged_recovery` with early stopping switched off: every
+ * stage runs, and every stage is still followed by the check whose result is
+ * handed to the next agent. It exists to separate the two things staged
+ * recovery changes at once — giving specialists the verifier's evidence, and
+ * declining to run them at all — by holding the first and dropping the second.
+ */
+export type OrchestrationStrategy =
+  | 'sequential' | 'parallel' | 'hierarchical' | 'graph' | 'staged_recovery' | 'verified_full';
+
+/** Why a staged-recovery stage did not run. */
+export type StageSkipReason = 'verification_already_passed';
+
+/** One stage of a staged-recovery crew, run or skipped. */
+export interface StageReport {
+  /** 1-based position in the escalation order */
+  stage: number;
+  agentId: string;
+  role: string;
+  executed: boolean;
+  /** Set only when `executed` is false */
+  skipReason?: StageSkipReason;
+  status?: string;
+  error?: string;
+  modelCalls?: number;
+  toolCalls?: number;
+  proposedWrites?: number;
+  acceptedWrites?: number;
+  rolledBackWrites?: number;
+  tokensUsed?: number;
+  costUsd?: number;
+  /** The external check after this stage ran */
+  verification?: { passed: boolean; output: string };
+}
+
+/** What a staged-recovery crew did, and which stage settled it. */
+export interface StagedRecoveryReport {
+  stagesExecuted: number;
+  /** 1-based stage whose verification passed; absent if none did */
+  solvedAtStage?: number;
+  solvedByRole?: string;
+  /** Final state of the external verifier */
+  verified: boolean;
+  /** Every stage in escalation order, including the ones never started */
+  stages: StageReport[];
+}
 
 // ============================================================================
 // Crew Definition
@@ -103,6 +164,22 @@ export interface CrewDefinition {
 
   /** Budget for the entire crew */
   budget?: BudgetPresetName | Partial<BudgetEnvelope>;
+
+  /**
+   * How `budget` is divided among the agents.
+   *
+   * - 'share' (default): the crew budget is split by `budgetShare`, so the
+   *   crew as a whole is capped and each extra agent shrinks the others.
+   * - 'fixed_per_agent': every agent gets the crew budget as its own ceiling,
+   *   so adding an agent adds capacity instead of taking it from the agents
+   *   already there.
+   *
+   * The second mode exists for experiments that vary crew size: under 'share'
+   * an implementer at width 1 gets three times the tokens it gets at width 3,
+   * which makes crew width and per-agent budget the same variable. Production
+   * crews keep the capped default unless they opt in.
+   */
+  budgetMode?: 'share' | 'fixed_per_agent';
 
   /** How to combine agent results into the final output */
   aggregation?: 'concat' | 'last' | 'custom';
@@ -228,6 +305,13 @@ export interface CrewResult {
 
   /** Error message if crew failed */
   error?: string;
+
+  /**
+   * Present only for `staged_recovery`. `agentResults` still holds just the
+   * agents that ran, so a stage that was never needed is recorded here rather
+   * than faked as a completed agent that did no work.
+   */
+  staged?: StagedRecoveryReport;
 }
 
 // ============================================================================

@@ -63,15 +63,16 @@ async function main() {
   console.log('  Tokens:', result.budgetUsed.tokensUsed);
   console.log('  Cost:  $', result.budgetUsed.costUsd.toFixed(4));
   console.log('  Time:  ', result.budgetUsed.elapsedMs, 'ms');
-  console.log('  Energy:', result.budgetUsed.energyWh.toFixed(6), 'Wh');
-  console.log('  Carbon:', result.budgetUsed.carbonGrams.toFixed(6), 'g CO2');
+  console.log('  Energy:', (result.budgetUsed.energyWh ?? 0).toFixed(6), 'Wh');
+  console.log('  Carbon:', (result.budgetUsed.carbonGrams ?? 0).toFixed(6), 'g CO2');
 
   if (result.efficiencyReport) {
     console.log('');
     console.log('--- Energy Efficiency ---');
-    console.log('  Energy/Token:', result.efficiencyReport.energyPerToken.toFixed(8), 'Wh');
-    console.log('  Carbon/Token:', result.efficiencyReport.carbonPerToken.toFixed(8), 'g');
-    console.log('  Rating:      ', result.efficiencyReport.efficiencyRating);
+    const eff = result.efficiencyReport;
+    console.log('  Energy:  ', eff.actualEnergyWh.toFixed(6), 'Wh');
+    console.log('  Baseline:', eff.baselineEnergyWh.toFixed(6), 'Wh', `(${eff.baselineModel})`);
+    console.log('  Saved:   ', eff.savedEnergyWh.toFixed(6), 'Wh', `(${eff.savingsPercent.toFixed(1)}%)`);
   }
 
   await joule.shutdown();

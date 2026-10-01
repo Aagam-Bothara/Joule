@@ -283,6 +283,41 @@ describe('policy switches for repository work', () => {
   });
 });
 
+describe('verified finish and per-rung steps', () => {
+  it('finalAnswerRequires: verified refuses a final answer until a check passes after the last write', async () => {
+    const { executor, calls } = build({
+      slm: [
+        toolCall('file_write', { path: 'solution.py', content: 'def f(x):\n    return sorted(x)' }),
+        finalAnswer('done without checking'),
+        toolCall('shell_exec', { command: 'python run_tests.py' }),  // passes
+        finalAnswer('done'),
+      ],
+      llm: ['{"advice":"x","edits":[]}'],
+    }, tools, { finalAnswerRequires: 'verified' });
+    const result = await executor.execute(task('Fix f in "solution.py"'));
+    expect(result.status).toBe('completed');
+    expect(result.result).toBe('done');
+    expect(result.trajectory!.steps[1].description).toContain('unverified change');
+    expect(calls[2].messages.at(-1)?.content).toContain('nothing has been verified');
+  });
+
+  it('rungLocalSteps gives the model after a handoff a fresh step allowance', async () => {
+    const { executor } = build({
+      slm: ['not an action', 'still prose'],                    // breakdown at steps 0-1 -> handoff
+      llm: [
+        toolCall('file_write', { path: 'solution.py', content: 'def f(x):\n    return sorted(x)' }),
+        toolCall('shell_exec', { command: 'python run_tests.py' }),
+        finalAnswer('done'),
+      ],
+    }, tools, { maxSteps: 3, rungLocalSteps: true });
+    const result = await executor.execute(task('Fix f in "solution.py"'));
+    // Without rung-local steps the cap of 3 would have ended the run right after the handoff.
+    expect(result.status).toBe('completed');
+    expect(result.trajectory!.handoffs).toBe(1);
+    expect(result.trajectory!.trajectoryLength).toBeGreaterThan(3);
+  });
+});
+
 describe('exploration stall', () => {
   it('eight successful reads with no write and no verification trigger a consult; a write resets the window', async () => {
     tools.register({

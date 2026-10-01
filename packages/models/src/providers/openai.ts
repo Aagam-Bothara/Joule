@@ -104,10 +104,14 @@ export class OpenAIProvider extends ModelProvider {
 
     const latencyMs = monotonicNow() - startTime;
     const choice = response.choices[0];
+    // Prompt-cache reads: OpenAI and OpenRouter report prompt_tokens_details, DeepSeek's own API prompt_cache_hit_tokens.
+    const cacheUsage = response.usage as { prompt_tokens_details?: { cached_tokens?: number } | null; prompt_cache_hit_tokens?: number } | undefined;
+    const cachedPromptTokens = cacheUsage?.prompt_tokens_details?.cached_tokens ?? cacheUsage?.prompt_cache_hit_tokens ?? 0;
     const tokenUsage = {
       promptTokens: response.usage?.prompt_tokens ?? 0,
       completionTokens: response.usage?.completion_tokens ?? 0,
       totalTokens: response.usage?.total_tokens ?? 0,
+      ...(cachedPromptTokens > 0 ? { cachedPromptTokens } : {}),
     };
     const reported = (response.usage as { cost?: unknown } | undefined)?.cost;
     const costUsd = typeof reported === 'number' && reported > 0 ? reported : this.calculateCost(request.model, tokenUsage);

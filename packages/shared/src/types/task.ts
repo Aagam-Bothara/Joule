@@ -4,6 +4,7 @@ import type { EfficiencyReport } from './energy.js';
 import type { SessionMessage } from './session.js';
 import type { ModelTier } from './model.js';
 import type { ExecutionMode, ExecutionState, TrajectoryReport } from './execution.js';
+import type { AgentLifecycleEvent, LifecycleMetrics } from './lifecycle.js';
 
 export interface Task {
   id: string;
@@ -15,7 +16,32 @@ export interface Task {
   sessionId?: string;
   /** Execution strategy. Defaults to routing.defaultMode (static-router). */
   mode?: ExecutionMode;
+  /**
+   * Identity of the agent working this task, when several agents work toward
+   * one goal (crews, sub-agents). Each gets its own lifecycle; `parentTaskId`
+   * ties them back to the task they were spawned from.
+   */
+  agentId?: string;
+  agentRole?: string;
+  parentTaskId?: string;
+  /**
+   * Opt-in verified-edit gate. When set, an agent's write is checked with this
+   * command and rolled back if it turns a passing state into a failing one.
+   * Without it, writes behave exactly as before.
+   */
+  verifiedEdit?: VerifiedEditPolicy;
   createdAt: string;
+}
+
+/** How to check the workspace, and which tools to guard. */
+export interface VerifiedEditPolicy {
+  /** Shell command whose exit code decides whether the workspace is passing */
+  command: string;
+  /** Directory to run it in */
+  cwd?: string;
+  timeoutMs?: number;
+  /** Tools treated as writes; defaults to file_write / file_edit / repo_write / repo_edit */
+  tools?: string[];
 }
 
 export type TaskStatus =
@@ -81,6 +107,26 @@ export interface TaskResult {
   trajectory?: TrajectoryReport;
   /** Adaptive execution: final structured state */
   executionState?: ExecutionState;
+  /**
+   * Agent lifecycle transitions for this run, oldest first. Every execution
+   * mode that is instrumented reports the same events here, so runs are
+   * comparable regardless of which executor produced them.
+   */
+  lifecycle?: AgentLifecycleEvent[];
+  /** Model / tool-wait timing rollup over `lifecycle` */
+  lifecycleMetrics?: LifecycleMetrics;
+  /** Verified-edit gate activity, when a policy was set on the task */
+  verifiedEdits?: {
+    checks: number;
+    rollbacks: number;
+    /** Writes the gate reviewed */
+    proposed: number;
+    /** Writes that left the workspace verifying */
+    accepted: number;
+    acceptanceRate: number;
+    verified?: boolean | undefined;
+    byAuthor: Record<string, { proposed: number; accepted: number; rolledBack: number }>;
+  };
 }
 
 // --- Task Specification (structured goal + success criteria) ---

@@ -43,6 +43,8 @@ export interface TokenUsage {
   promptTokens: number;
   completionTokens: number;
   totalTokens: number;
+  /** Part of promptTokens the provider served from its prompt cache, when reported */
+  cachedPromptTokens?: number;
 }
 
 export interface ModelResponse {

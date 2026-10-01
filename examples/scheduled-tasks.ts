@@ -56,7 +56,8 @@ async function main() {
   // Pause a schedule
   console.log('');
   console.log(`Pausing: ${hourly.name}`);
-  await scheduler.toggle(hourly.id, false);
+  await scheduler.pause(hourly.id);
+  // ...and scheduler.resume(hourly.id) puts it back on the clock.
 
   // Remove a schedule
   console.log(`Removing: ${weekly.name}`);

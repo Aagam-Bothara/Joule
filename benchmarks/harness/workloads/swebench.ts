@@ -29,6 +29,7 @@ import { dirname, join, resolve } from 'node:path';
 import { z } from 'zod';
 import { BUDGET_PRESETS, type ToolDefinition } from '@joule/shared';
 import type { Workload } from '../types.js';
+import { editRepoFile, writeRepoFile } from './repo-python-guard.js';
 
 interface SweItem {
   repo: string;
@@ -182,7 +183,7 @@ export function evaluateInstance(item: SweItem, container: string, hostDir: stri
 
 // ── tools ───────────────────────────────────────────────────────────
 
-function repoTools(container: () => string, shadowDir: string): ToolDefinition[] {
+export function repoTools(container: () => string, shadowDir: string): ToolDefinition[] {
   const repoShell: ToolDefinition = {
     name: 'repo_shell',
     description: 'Run a shell command inside the repository (working directory is the repository root, Python environment active). Arguments: command (string, required). Returns stdout, stderr and exitCode. Use it to search (grep -rn), run scripts (python -c "..."), and run tests (pytest path/to/test.py -x -q).',
@@ -223,8 +224,7 @@ function repoTools(container: () => string, shadowDir: string): ToolDefinition[]
     async execute(input: { path: string; content: string }) {
       const c = container();
       const p = input.path.replace(/^\/testbed\//, '');
-      const r = inRepo(c, `mkdir -p "$(dirname '${p}')" && cat > '${p}'`, 60_000, input.content);
-      if (r.status !== 0) throw new Error(`write failed: ${r.stderr.trim().slice(0, 200)}`);
+      writeRepoFile(p, input.content, (command, timeoutMs, content) => inRepo(c, command, timeoutMs, content));
       // Host shadow copy so the executor's static check can compile it.
       const shadow = join(shadowDir, p.replace(/\//g, '/'));
       try { mkdirSync(dirname(shadow), { recursive: true }); writeFileSync(shadow, input.content); } catch { /* best effort */ }
@@ -239,24 +239,10 @@ function repoTools(container: () => string, shadowDir: string): ToolDefinition[]
     async execute(input: { path: string; search: string; replace: string }) {
       const c = container();
       const p = input.path.replace(/^\/testbed\//, '');
-      const cur = inRepo(c, `cat '${p}'`, 60_000);
-      if (cur.status !== 0) throw new Error(`cannot read ${p}: ${cur.stderr.trim().slice(0, 200) || 'no such file'}`);
-      const text = cur.stdout;
-      let i = text.indexOf(input.search);
-      let search = input.search;
-      if (i < 0) {
-        // Tolerate trailing-whitespace drift in the search block.
-        search = input.search.split('\n').map(l => l.replace(/\s+$/, '')).join('\n');
-        i = text.indexOf(search);
-      }
-      if (i < 0) throw new Error(`search text not found in ${p}; read the file and copy the block exactly`);
-      if (text.indexOf(search, i + 1) >= 0) throw new Error(`search text occurs more than once in ${p}; include more surrounding lines`);
-      const next = text.slice(0, i) + input.replace + text.slice(i + search.length);
-      const w = inRepo(c, `cat > '${p}'`, 60_000, next);
-      if (w.status !== 0) throw new Error(`write failed: ${w.stderr.trim().slice(0, 200)}`);
+      const { content, line } = editRepoFile(p, input.search, input.replace, (command, timeoutMs, next) => inRepo(c, command, timeoutMs, next));
       const shadow = join(shadowDir, p);
-      try { mkdirSync(dirname(shadow), { recursive: true }); writeFileSync(shadow, next); } catch { /* best effort */ }
-      return { path: shadow, repoPath: p, written: true, line: text.slice(0, i).split('\n').length, _content: next };
+      try { mkdirSync(dirname(shadow), { recursive: true }); writeFileSync(shadow, content); } catch { /* best effort */ }
+      return { path: shadow, repoPath: p, written: true, line, _content: content };
     },
   };
   return [repoShell, repoRead, repoWrite, repoEdit];

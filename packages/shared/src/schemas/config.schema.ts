@@ -75,9 +75,10 @@ export const routingConfigSchema = z.object({
     staticChecks: z.boolean().optional(),
     observationChars: z.number().int().min(200).optional(),
     maxOutputTokens: z.number().int().min(256).optional(),
-    finalAnswerRequires: z.enum(['none', 'write']).optional(),
+    finalAnswerRequires: z.enum(['none', 'write', 'verified']).optional(),
     breakdownSkipsToTop: z.boolean().optional(),
     explorationStallSteps: z.number().int().min(2).optional(),
+    rungLocalSteps: z.boolean().optional(),
   }).optional(),
 });
 

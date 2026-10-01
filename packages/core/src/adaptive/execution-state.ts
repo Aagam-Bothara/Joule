@@ -282,10 +282,24 @@ function renderStep(s: StepResult): string {
   return `- step ${s.stepIndex + 1} [${s.toolName}]${desc}: ${status}. ${body}`;
 }
 
+/**
+ * Sections that stay the same across a task's consultations come first and the
+ * question comes last, so repeated consults share a prefix that providers can
+ * serve from their prompt cache (billed at a fraction of fresh input).
+ */
 export function renderConsultation(req: ConsultationRequest): string {
   const lines: string[] = [];
   lines.push('GOAL', req.goal, '');
-  lines.push('QUESTION', req.question, '');
+  if (req.constraints.length > 0) {
+    lines.push('CONSTRAINTS');
+    for (const c of req.constraints) lines.push(`- ${c}`);
+    lines.push('');
+  }
+  if (req.files && req.files.length > 0) {
+    lines.push('CURRENT FILES');
+    for (const f of req.files) lines.push(`--- ${f.path} ---`, f.content, '--- end ---');
+    lines.push('');
+  }
   if (req.relevantEvidence.length > 0) {
     lines.push('EVIDENCE');
     for (const o of req.relevantEvidence) {
@@ -303,16 +317,7 @@ export function renderConsultation(req: ConsultationRequest): string {
     for (const s of req.attemptedSolutions) lines.push(renderStep(s));
     lines.push('');
   }
-  if (req.constraints.length > 0) {
-    lines.push('CONSTRAINTS');
-    for (const c of req.constraints) lines.push(`- ${c}`);
-    lines.push('');
-  }
-  if (req.files && req.files.length > 0) {
-    lines.push('CURRENT FILES');
-    for (const f of req.files) lines.push(`--- ${f.path} ---`, f.content, '--- end ---');
-    lines.push('');
-  }
+  lines.push('QUESTION', req.question, '');
   lines.push(`Answer the question directly and concretely in at most ${req.maxTokens} tokens. Do not solve the whole task; the smaller model will continue.`);
   return lines.join('\n');
 }

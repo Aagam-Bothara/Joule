@@ -1,0 +1,514 @@
+/**
+ * Lifecycle characterization — aggregation and concurrency analysis.
+ *
+ * Concurrency is computed by sweeping lifecycle interval boundaries, never by
+ * polling: every agent contributes the intervals it was active, running a model
+ * or waiting on a tool, and the sweep reports the level over time.
+ *
+ * The duration buckets exist to show the shape of the tool-wait distribution.
+ * Nothing here decides which bucket is "long enough" for anything.
+ */
+
+import type {
+  AgentExecutionMode,
+  AgentLifecycleRecord,
+  DurationBucket,
+  HideableWindow,
+  IdleStats,
+  LifecycleAggregate,
+  LifecycleAnalysis,
+  LifecycleInterval,
+  ModeBreakdown,
+  ReclaimableStats,
+  RuntimeStats,
+  ThresholdShare,
+  ToolWaitStats,
+  WorkflowLifecycleSummary,
+} from './types.js';
+import { activeInterval, intervalsInState } from './record.js';
+
+// ── Statistics ───────────────────────────────────────────────────────
+
+/** Nearest-rank percentile, matching the runtime's own p95 convention. */
+export function percentile(values: readonly number[], p: number): number {
+  if (values.length === 0) return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  const rank = Math.ceil(p * sorted.length);
+  return sorted[Math.min(sorted.length - 1, Math.max(0, rank - 1))];
+}
+
+export function mean(values: readonly number[]): number {
+  return values.length > 0 ? values.reduce((a, b) => a + b, 0) / values.length : 0;
+}
+
+function runtimeStats(values: readonly number[]): RuntimeStats {
+  return {
+    mean: mean(values),
+    median: percentile(values, 0.5),
+    p75: percentile(values, 0.75),
+    p90: percentile(values, 0.9),
+    p95: percentile(values, 0.95),
+  };
+}
+
+function idleStats(values: readonly number[]): IdleStats {
+  return {
+    mean: mean(values),
+    median: percentile(values, 0.5),
+    p25: percentile(values, 0.25),
+    p75: percentile(values, 0.75),
+    p90: percentile(values, 0.9),
+    p95: percentile(values, 0.95),
+  };
+}
+
+function toolWaitStats(values: readonly number[]): ToolWaitStats {
+  return {
+    count: values.length,
+    mean: mean(values),
+    median: percentile(values, 0.5),
+    p75: percentile(values, 0.75),
+    p90: percentile(values, 0.9),
+    p95: percentile(values, 0.95),
+    max: values.length > 0 ? Math.max(...values) : 0,
+  };
+}
+
+/** Latency bands for individual tool-wait windows. */
+const BUCKETS: Array<{ label: string; lowerMs: number; upperMs: number | null }> = [
+  { label: '<100ms', lowerMs: 0, upperMs: 100 },
+  { label: '100-500ms', lowerMs: 100, upperMs: 500 },
+  { label: '500ms-1s', lowerMs: 500, upperMs: 1000 },
+  { label: '1-2s', lowerMs: 1000, upperMs: 2000 },
+  { label: '2-5s', lowerMs: 2000, upperMs: 5000 },
+  { label: '5-10s', lowerMs: 5000, upperMs: 10_000 },
+  { label: '10s+', lowerMs: 10_000, upperMs: null },
+];
+
+/** Thresholds the characterization reports directly. */
+export const WAIT_THRESHOLDS_MS = [500, 1000, 2000, 5000, 10_000];
+
+export function waitsOverThresholds(durations: readonly number[], thresholds = WAIT_THRESHOLDS_MS): ThresholdShare[] {
+  return thresholds.map(thresholdMs => {
+    const count = durations.filter(d => d > thresholdMs).length;
+    return { thresholdMs, count, fraction: durations.length > 0 ? count / durations.length : 0 };
+  });
+}
+
+/** Hypothetical fixed overheads the hideable-time table is computed for. */
+export const MIGRATION_COSTS_MS = [100, 250, 500, 1000, 2000];
+
+/**
+ * For each hypothetical overhead, how many waits are longer than it and how
+ * much of the measured tool-wait time would be left over. Pure arithmetic on
+ * the traces: nothing is migrated, and no overhead value is claimed achievable.
+ */
+export function hideableWindows(durations: readonly number[], costs = MIGRATION_COSTS_MS): HideableWindow[] {
+  const total = durations.reduce((a, b) => a + b, 0);
+  return costs.map(migrationCostMs => {
+    const eligible = durations.filter(d => d > migrationCostMs);
+    const hideableMs = eligible.reduce((sum, d) => sum + (d - migrationCostMs), 0);
+    return {
+      migrationCostMs,
+      eligibleWaits: eligible.length,
+      eligibleFraction: durations.length > 0 ? eligible.length / durations.length : 0,
+      hideableMs,
+      hideableFraction: total > 0 ? hideableMs / total : 0,
+    };
+  });
+}
+
+export function bucketToolWaits(durations: readonly number[]): DurationBucket[] {
+  return BUCKETS.map(b => {
+    const count = durations.filter(d => d >= b.lowerMs && (b.upperMs === null || d < b.upperMs)).length;
+    return { ...b, count, percentage: durations.length > 0 ? count / durations.length : 0 };
+  });
+}
+
+// ── Concurrency sweep ────────────────────────────────────────────────
+
+export interface ConcurrencyProfile {
+  /** Highest number of intervals overlapping at any instant */
+  max: number;
+  /** Time-weighted mean level over `windowMs` */
+  avg: number;
+  /** Time with at least two intervals overlapping */
+  overlapMs: number;
+}
+
+/**
+ * Sweep interval boundaries. Intervals that merely touch (one ends exactly as
+ * the next begins) are not counted as overlapping, and empty intervals
+ * contribute nothing.
+ */
+export function concurrencyProfile(intervals: readonly LifecycleInterval[], windowMs: number): ConcurrencyProfile {
+  const points: Array<{ t: number; delta: number }> = [];
+  for (const i of intervals) {
+    if (i.end <= i.start) continue;
+    points.push({ t: i.start, delta: 1 }, { t: i.end, delta: -1 });
+  }
+  if (points.length === 0) return { max: 0, avg: 0, overlapMs: 0 };
+  // Closing before opening at the same instant keeps touching intervals apart.
+  points.sort((a, b) => (a.t - b.t) || (a.delta - b.delta));
+
+  let level = 0;
+  let max = 0;
+  let weighted = 0;
+  let overlapMs = 0;
+  let prev = points[0].t;
+  for (const p of points) {
+    const dt = p.t - prev;
+    if (dt > 0) {
+      weighted += level * dt;
+      if (level >= 2) overlapMs += dt;
+    }
+    level += p.delta;
+    max = Math.max(max, level);
+    prev = p.t;
+  }
+  return { max, avg: windowMs > 0 ? weighted / windowMs : 0, overlapMs };
+}
+
+// ── Reclaimable tool wait ────────────────────────────────────────────
+
+/** Merge overlapping intervals into a disjoint, sorted set. */
+export function mergeIntervals(list: readonly LifecycleInterval[]): LifecycleInterval[] {
+  const sorted = [...list].filter(i => i.end > i.start).sort((a, b) => a.start - b.start);
+  const out: LifecycleInterval[] = [];
+  for (const i of sorted) {
+    const last = out[out.length - 1];
+    if (last && i.start <= last.end) last.end = Math.max(last.end, i.end);
+    else out.push({ ...i });
+  }
+  return out;
+}
+
+/** How much of `window` is covered by a merged interval set. */
+export function overlapWith(window: LifecycleInterval, merged: readonly LifecycleInterval[]): number {
+  let total = 0;
+  for (const i of merged) {
+    if (i.end <= window.start) continue;
+    if (i.start >= window.end) break;
+    total += Math.min(i.end, window.end) - Math.max(i.start, window.start);
+  }
+  return Math.max(0, total);
+}
+
+/**
+ * For every agent's tool wait, how much of it coincided with *another* agent
+ * being in model_running — the time a busy agent's resources could have served
+ * someone else. `afterCost` repeats the measurement as if a fixed start-up cost
+ * were paid when each wait begins.
+ *
+ * `ready` is excluded deliberately: it is the gap between a model reply and the
+ * next call, measured at well under 0.1% of wall clock, so counting it as
+ * "demand" would change nothing and would blur what is being claimed.
+ */
+export function reclaimableToolWait(
+  records: readonly AgentLifecycleRecord[],
+  costs: readonly number[] = MIGRATION_COSTS_MS,
+): ReclaimableStats {
+  const modelByAgent = records.map(r => intervalsInState(r.lifecycleEvents, 'model_running'));
+  let totalToolWaitMs = 0;
+  let reclaimableToolWaitMs = 0;
+  const afterCostMs = new Map<number, number>(costs.map(c => [c, 0]));
+
+  records.forEach((record, index) => {
+    // Everyone else's model demand, as one merged timeline.
+    const others = mergeIntervals(modelByAgent.filter((_, i) => i !== index).flat());
+    for (const wait of intervalsInState(record.lifecycleEvents, 'tool_wait')) {
+      totalToolWaitMs += Math.max(0, wait.end - wait.start);
+      reclaimableToolWaitMs += overlapWith(wait, others);
+      for (const cost of costs) {
+        const started = wait.start + cost;
+        if (started >= wait.end) continue;
+        afterCostMs.set(cost, (afterCostMs.get(cost) ?? 0) + overlapWith({ start: started, end: wait.end }, others));
+      }
+    }
+  });
+
+  return {
+    totalToolWaitMs,
+    reclaimableToolWaitMs,
+    reclaimableFraction: totalToolWaitMs > 0 ? reclaimableToolWaitMs / totalToolWaitMs : 0,
+    isolatedToolWaitMs: Math.max(0, totalToolWaitMs - reclaimableToolWaitMs),
+    afterCost: costs.map(migrationCostMs => ({
+      migrationCostMs,
+      reclaimableMs: afterCostMs.get(migrationCostMs) ?? 0,
+      fractionOfToolWait: totalToolWaitMs > 0 ? (afterCostMs.get(migrationCostMs) ?? 0) / totalToolWaitMs : 0,
+    })),
+  };
+}
+
+// ── Workflows ────────────────────────────────────────────────────────
+
+/** A standalone task is its own workflow. Timestamps only compare within a run. */
+function workflowKey(record: AgentLifecycleRecord): string {
+  return `${record.runId} ${record.parentTaskId ?? record.taskId}`;
+}
+
+export function groupByWorkflow(records: readonly AgentLifecycleRecord[]): Map<string, AgentLifecycleRecord[]> {
+  const groups = new Map<string, AgentLifecycleRecord[]>();
+  for (const record of records) {
+    const key = workflowKey(record);
+    const list = groups.get(key);
+    if (list) list.push(record);
+    else groups.set(key, [record]);
+  }
+  return groups;
+}
+
+export function summarizeWorkflow(records: readonly AgentLifecycleRecord[]): WorkflowLifecycleSummary | undefined {
+  const spans = records.map(r => activeInterval(r.lifecycleEvents)).filter((i): i is LifecycleInterval => i !== undefined);
+  if (spans.length === 0) return undefined;
+
+  const start = Math.min(...spans.map(s => s.start));
+  const end = Math.max(...spans.map(s => s.end));
+  const wallClockRuntimeMs = Math.max(0, end - start);
+
+  const modelIntervals = records.flatMap(r => intervalsInState(r.lifecycleEvents, 'model_running'));
+  const toolIntervals = records.flatMap(r => intervalsInState(r.lifecycleEvents, 'tool_wait'));
+
+  const agents = concurrencyProfile(spans, wallClockRuntimeMs);
+  const model = concurrencyProfile(modelIntervals, wallClockRuntimeMs);
+  const tools = concurrencyProfile(toolIntervals, wallClockRuntimeMs);
+  const reclaimable = reclaimableToolWait(records);
+
+  return {
+    runId: records[0].runId,
+    parentTaskId: records[0].parentTaskId ?? records[0].taskId,
+    agentCount: new Set(records.map(r => r.agentId)).size,
+    wallClockRuntimeMs,
+    totalAgentRuntimeMs: records.reduce((sum, r) => sum + r.totalRuntimeMs, 0),
+    maxConcurrentAgents: agents.max,
+    avgConcurrentAgents: agents.avg,
+    maxConcurrentModelRunning: model.max,
+    avgConcurrentModelRunning: model.avg,
+    maxConcurrentToolWait: tools.max,
+    avgConcurrentToolWait: tools.avg,
+    modelDemandOverlapMs: model.overlapMs,
+    modelDemandOverlapFraction: wallClockRuntimeMs > 0 ? model.overlapMs / wallClockRuntimeMs : 0,
+    reclaimableToolWaitMs: reclaimable.reclaimableToolWaitMs,
+    reclaimableFraction: reclaimable.reclaimableFraction,
+  };
+}
+
+export function summarizeWorkflows(records: readonly AgentLifecycleRecord[]): WorkflowLifecycleSummary[] {
+  const out: WorkflowLifecycleSummary[] = [];
+  for (const group of groupByWorkflow(records).values()) {
+    const summary = summarizeWorkflow(group);
+    if (summary) out.push(summary);
+  }
+  return out;
+}
+
+/**
+ * Reclaimable time computed per workflow and then pooled, so an agent is only
+ * ever compared with agents it actually ran beside.
+ */
+export function pooledReclaimable(
+  records: readonly AgentLifecycleRecord[],
+  costs: readonly number[] = MIGRATION_COSTS_MS,
+): ReclaimableStats {
+  const parts = [...groupByWorkflow(records).values()].map(group => reclaimableToolWait(group, costs));
+  const sum = (pick: (p: ReclaimableStats) => number): number => parts.reduce((s, p) => s + pick(p), 0);
+  const totalToolWaitMs = sum(p => p.totalToolWaitMs);
+  const reclaimableToolWaitMs = sum(p => p.reclaimableToolWaitMs);
+  return {
+    totalToolWaitMs,
+    reclaimableToolWaitMs,
+    reclaimableFraction: totalToolWaitMs > 0 ? reclaimableToolWaitMs / totalToolWaitMs : 0,
+    isolatedToolWaitMs: Math.max(0, totalToolWaitMs - reclaimableToolWaitMs),
+    afterCost: costs.map((migrationCostMs, i) => {
+      const reclaimableMs = parts.reduce((s, p) => s + (p.afterCost[i]?.reclaimableMs ?? 0), 0);
+      return { migrationCostMs, reclaimableMs, fractionOfToolWait: totalToolWaitMs > 0 ? reclaimableMs / totalToolWaitMs : 0 };
+    }),
+  };
+}
+
+// ── Aggregate ────────────────────────────────────────────────────────
+
+function modeBreakdown(records: readonly AgentLifecycleRecord[], executionMode: AgentExecutionMode): ModeBreakdown | undefined {
+  const rs = records.filter(r => r.executionMode === executionMode);
+  if (rs.length === 0) return undefined;
+  return {
+    executionMode,
+    runs: rs.length,
+    successRate: rs.filter(r => r.success).length / rs.length,
+    medianIdleFraction: percentile(rs.map(r => r.idleFraction), 0.5),
+    medianTotalRuntimeMs: percentile(rs.map(r => r.totalRuntimeMs), 0.5),
+    toolWaitWindows: rs.reduce((sum, r) => sum + r.toolWaitDurationsMs.length, 0),
+  };
+}
+
+export function aggregateRecords(records: readonly AgentLifecycleRecord[]): LifecycleAggregate {
+  const waits = records.flatMap(r => r.toolWaitDurationsMs);
+  const modes: AgentExecutionMode[] = ['full', 'direct'];
+  return {
+    runs: records.length,
+    agents: new Set(records.map(r => r.agentId)).size,
+    workflows: groupByWorkflow(records).size,
+    successRate: records.length > 0 ? records.filter(r => r.success).length / records.length : 0,
+    totalRuntimeMs: runtimeStats(records.map(r => r.totalRuntimeMs)),
+    idleFraction: idleStats(records.map(r => r.idleFraction)),
+    toolWaitMs: toolWaitStats(waits),
+    buckets: bucketToolWaits(waits),
+    overThresholds: waitsOverThresholds(waits),
+    hideable: hideableWindows(waits),
+    // Computed per workflow, then pooled: agents only contend with agents they
+    // actually ran alongside.
+    reclaimable: pooledReclaimable(records),
+    totals: {
+      runtimeMs: records.reduce((s, r) => s + r.totalRuntimeMs, 0),
+      modelRuntimeMs: records.reduce((s, r) => s + r.modelRuntimeMs, 0),
+      toolWaitMs: records.reduce((s, r) => s + r.toolWaitMs, 0),
+      otherMs: records.reduce((s, r) => s + r.otherMs, 0),
+      modelCalls: records.reduce((s, r) => s + r.modelCalls, 0),
+      toolCalls: records.reduce((s, r) => s + r.toolCalls, 0),
+    },
+    byMode: modes.map(m => modeBreakdown(records, m)).filter((m): m is ModeBreakdown => m !== undefined),
+  };
+}
+
+export function analyzeRecords(records: readonly AgentLifecycleRecord[], source: string): LifecycleAnalysis {
+  return {
+    generatedAt: new Date().toISOString(),
+    source,
+    aggregate: aggregateRecords(records),
+    workflows: summarizeWorkflows(records),
+  };
+}
+
+// ── Report ───────────────────────────────────────────────────────────
+
+const ms = (n: number): string => (n >= 1000 ? `${(n / 1000).toFixed(2)}s` : `${Math.round(n)}ms`);
+const pct = (x: number): string => `${(x * 100).toFixed(1)}%`;
+const pad = (s: string, n: number): string => s.padEnd(n);
+const num = (s: string | number, n: number): string => String(s).padStart(n);
+
+/**
+ * One band per agent over a shared time axis, so overlap between agents is
+ * visible at a glance:
+ *
+ *     researcher  |####----########....|  model 12.1s  tool 4.0s
+ *
+ * `#` is model_running, `-` is tool_wait, `.` is ready, ` ` is before the agent
+ * started or after it finished. Cells take the state that covers most of them.
+ */
+export function renderAgentBands(records: readonly AgentLifecycleRecord[], width = 60): string {
+  const spans = records
+    .map(r => ({ record: r, span: activeInterval(r.lifecycleEvents) }))
+    .filter((x): x is { record: AgentLifecycleRecord; span: LifecycleInterval } => x.span !== undefined);
+  if (spans.length === 0) return '(no lifecycle events)';
+
+  const start = Math.min(...spans.map(s => s.span.start));
+  const end = Math.max(...spans.map(s => s.span.end));
+  const total = Math.max(1, end - start);
+  const cell = total / width;
+  const nameWidth = Math.min(22, Math.max(...spans.map(s => (s.record.agentRole ?? s.record.agentId).length)));
+
+  const lines: string[] = [];
+  for (const { record, span } of spans) {
+    const model = intervalsInState(record.lifecycleEvents, 'model_running');
+    const tool = intervalsInState(record.lifecycleEvents, 'tool_wait');
+    const covered = (list: readonly LifecycleInterval[], from: number, to: number): number =>
+      list.reduce((sum, i) => sum + Math.max(0, Math.min(i.end, to) - Math.max(i.start, from)), 0);
+
+    let band = '';
+    for (let i = 0; i < width; i++) {
+      const from = start + i * cell;
+      const to = from + cell;
+      if (to <= span.start || from >= span.end) {
+        band += ' ';
+        continue;
+      }
+      const m = covered(model, from, to);
+      const t = covered(tool, from, to);
+      band += m >= t && m > 0 ? '#' : t > 0 ? '-' : '.';
+    }
+    const name = (record.agentRole ?? record.agentId).slice(0, nameWidth).padEnd(nameWidth);
+    lines.push(`  ${name} |${band}|  model ${(record.modelRuntimeMs / 1000).toFixed(1)}s  tool ${(record.toolWaitMs / 1000).toFixed(1)}s`);
+  }
+  lines.push(`  ${' '.repeat(nameWidth)}  0s${' '.repeat(Math.max(0, width - 8))}${(total / 1000).toFixed(1)}s`);
+  lines.push(`  legend: # model_running   - tool_wait   . ready`);
+  return lines.join('\n');
+}
+
+/** Human-readable characterization report. */
+export function renderLifecycleReport(analysis: LifecycleAnalysis): string {
+  const { aggregate: a, workflows } = analysis;
+  const lines: string[] = ['Joule Lifecycle Characterization', ''];
+  lines.push(`${pad('Source:', 22)}${analysis.source}`);
+  lines.push(`${pad('Runs:', 22)}${num(a.runs, 6)}`);
+  lines.push(`${pad('Agents:', 22)}${num(a.agents, 6)}`);
+  lines.push(`${pad('Parent workflows:', 22)}${num(a.workflows, 6)}`);
+  lines.push(`${pad('Success rate:', 22)}${num(pct(a.successRate), 6)}`);
+
+  if (a.runs === 0) {
+    lines.push('', 'No lifecycle records found.');
+    return lines.join('\n');
+  }
+
+  const total = a.totals.runtimeMs || 1;
+  lines.push('', 'Where the time goes (totals across runs)');
+  lines.push(`  ${pad('model_running', 18)}${num(ms(a.totals.modelRuntimeMs), 9)}   ${num(pct(a.totals.modelRuntimeMs / total), 6)}   ${a.totals.modelCalls} calls`);
+  lines.push(`  ${pad('tool_wait', 18)}${num(ms(a.totals.toolWaitMs), 9)}   ${num(pct(a.totals.toolWaitMs / total), 6)}   ${a.totals.toolCalls} calls`);
+  lines.push(`  ${pad('other', 18)}${num(ms(a.totals.otherMs), 9)}   ${num(pct(a.totals.otherMs / total), 6)}`);
+
+  const rt = a.totalRuntimeMs;
+  lines.push('', 'Total runtime per run');
+  lines.push(`  mean ${ms(rt.mean)}   median ${ms(rt.median)}   p75 ${ms(rt.p75)}   p90 ${ms(rt.p90)}   p95 ${ms(rt.p95)}`);
+
+  const idle = a.idleFraction;
+  lines.push('', 'Idle fraction (tool_wait / total runtime)');
+  lines.push(`  mean ${pct(idle.mean)}   median ${pct(idle.median)}   p25 ${pct(idle.p25)}   p75 ${pct(idle.p75)}   p90 ${pct(idle.p90)}   p95 ${pct(idle.p95)}`);
+
+  const tw = a.toolWaitMs;
+  lines.push('', `Individual tool-wait windows (n=${tw.count})`);
+  if (tw.count > 0) {
+    lines.push(`  mean ${ms(tw.mean)}   median ${ms(tw.median)}   p75 ${ms(tw.p75)}   p90 ${ms(tw.p90)}   p95 ${ms(tw.p95)}   max ${ms(tw.max)}`);
+    lines.push('');
+    for (const b of a.buckets) {
+      lines.push(`  ${pad(b.label, 14)}${num(b.count, 6)}   ${num(pct(b.percentage), 6)}`);
+    }
+    lines.push('');
+    for (const t of a.overThresholds) {
+      lines.push(`  ${pad(`> ${ms(t.thresholdMs)}`, 14)}${num(t.count, 6)}   ${num(pct(t.fraction), 6)}`);
+    }
+
+    lines.push('', 'Hypothetical migration overhead (analysis only — nothing is migrated)');
+    for (const h of a.hideable) {
+      lines.push(`  ${pad(`${ms(h.migrationCostMs)}:`, 10)} eligible waits ${num(`${h.eligibleWaits}`, 5)} (${num(pct(h.eligibleFraction), 6)})   hideable idle ${num(ms(h.hideableMs), 9)} (${num(pct(h.hideableFraction), 6)})`);
+    }
+
+    const r = a.reclaimable;
+    lines.push('', 'Cross-agent reclaimable tool wait (overlap with another agent needing the model)');
+    lines.push(`  ${pad('tool wait total', 34)}${num(ms(r.totalToolWaitMs), 9)}`);
+    lines.push(`  ${pad('overlapping other model demand', 34)}${num(ms(r.reclaimableToolWaitMs), 9)}   ${num(pct(r.reclaimableFraction), 6)}`);
+    lines.push(`  ${pad('isolated (nobody else waiting)', 34)}${num(ms(r.isolatedToolWaitMs), 9)}   ${num(pct(1 - r.reclaimableFraction), 6)}`);
+    for (const c of r.afterCost) {
+      lines.push(`  ${pad(`after a ${ms(c.migrationCostMs)} start-up cost`, 34)}${num(ms(c.reclaimableMs), 9)}   ${num(pct(c.fractionOfToolWait), 6)}`);
+    }
+  }
+
+  if (workflows.length > 0) {
+    const maxOf = (pick: (w: WorkflowLifecycleSummary) => number): number => Math.max(...workflows.map(pick));
+    const avgOf = (pick: (w: WorkflowLifecycleSummary) => number): number => mean(workflows.map(pick));
+    const overlapMs = workflows.reduce((s, w) => s + w.modelDemandOverlapMs, 0);
+    const wallMs = workflows.reduce((s, w) => s + w.wallClockRuntimeMs, 0);
+    lines.push('', `Concurrency across ${workflows.length} workflow(s)`);
+    lines.push(`  ${pad('agents', 18)}max ${num(maxOf(w => w.maxConcurrentAgents), 3)}   avg ${avgOf(w => w.avgConcurrentAgents).toFixed(2)}`);
+    lines.push(`  ${pad('model_running', 18)}max ${num(maxOf(w => w.maxConcurrentModelRunning), 3)}   avg ${avgOf(w => w.avgConcurrentModelRunning).toFixed(2)}`);
+    lines.push(`  ${pad('tool_wait', 18)}max ${num(maxOf(w => w.maxConcurrentToolWait), 3)}   avg ${avgOf(w => w.avgConcurrentToolWait).toFixed(2)}`);
+    lines.push(`  model demand overlap (2+ agents): ${ms(overlapMs)} of ${ms(wallMs)} wall clock (${pct(wallMs > 0 ? overlapMs / wallMs : 0)})`);
+  }
+
+  if (a.byMode.length > 0) {
+    lines.push('', 'By execution mode');
+    for (const m of a.byMode) {
+      lines.push(`  ${pad(m.executionMode, 8)}runs ${num(m.runs, 5)}   success ${num(pct(m.successRate), 6)}   median idle ${num(pct(m.medianIdleFraction), 6)}   median runtime ${num(ms(m.medianTotalRuntimeMs), 8)}   windows ${m.toolWaitWindows}`);
+    }
+  }
+
+  return lines.join('\n');
+}

@@ -234,6 +234,19 @@ export class BudgetManager {
   }
 
   /**
+   * Create a child envelope with the parent's own ceilings rather than a slice
+   * of them, and with a fresh clock and fresh counters.
+   *
+   * Siblings created this way do not compete: each one gets the same allowance
+   * no matter how many there are, or when it is created. Deductions still
+   * mirror to the parent, so the parent measures the group's total spending
+   * without capping any individual member.
+   */
+  createPeerEnvelope(parent: BudgetEnvelopeInstance): BudgetEnvelopeInstance {
+    return this.registerChild(parent, { ...parent.envelope });
+  }
+
+  /**
    * Create a child envelope that shares a fraction of the parent's remaining budget.
    * Deductions on the child are automatically mirrored to the parent via deduct methods.
    */
@@ -255,10 +268,15 @@ export class BudgetManager {
         : undefined,
     };
 
+    return this.registerChild(parent, subEnvelope);
+  }
+
+  /** Register a fresh child envelope under `parent`, so deductions mirror upward. */
+  private registerChild(parent: BudgetEnvelopeInstance, envelope: BudgetEnvelope): BudgetEnvelopeInstance {
     const id = `budget_${this.nextId++}`;
     const instance: BudgetEnvelopeInstance = {
       id,
-      envelope: subEnvelope,
+      envelope,
       state: {
         tokensUsed: 0,
         toolCallsUsed: 0,
