@@ -336,10 +336,8 @@ describe('StepAgent.parseAction', () => {
   });
 
   it('keeps accepting a bare tool array when the shared JSON reader returns the array', () => {
-    const path = new URL('../../../benchmarks/experiments/real-repo-smoke/staged/runs.jsonl', import.meta.url);
-    const record = readFileSync(path, 'utf8').trim().split('\n').map(line => JSON.parse(line))
-      .find(row => row.workloadId === 'pytest-dev__pytest-9359');
-    const reply = record.agentResults.find((agent: { role: string }) => agent.role === 'Implementer').answer as string;
+    const path = new URL('./fixtures/real-repo-smoke-replies.json', import.meta.url);
+    const reply = JSON.parse(readFileSync(path, 'utf8'))['staged/pytest-dev__pytest-9359/Implementer'] as string;
     const array = reply.slice(reply.indexOf('['));
     const action = StepAgent.parseAction(array);
     expect(action.type).toBe('tool_call');

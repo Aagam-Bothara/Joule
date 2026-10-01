@@ -102,12 +102,11 @@ function buildExecutor(responses: string[]) {
   return { executor, budget, tools, envelope, provider };
 }
 
-/** Read the model's exact final reply from the committed, old-parser run. */
+/** The model's exact final reply from the old-parser real-repo smoke run, copied into a tracked fixture. */
+const smokeReplies = JSON.parse(readFileSync(new URL('./fixtures/real-repo-smoke-replies.json', import.meta.url), 'utf8')) as Record<string, string>;
+
 function realRepoReply(arm: 'staged' | 'full_verify', workloadId: string, role: string): string {
-  const file = new URL(`../../../benchmarks/experiments/real-repo-smoke/${arm}/runs.jsonl`, import.meta.url);
-  const records = readFileSync(file, 'utf8').trim().split('\n').map(line => JSON.parse(line));
-  const reply = records.find(record => record.workloadId === workloadId)
-    ?.agentResults.find((agent: { role: string }) => agent.role === role)?.answer;
+  const reply = smokeReplies[`${arm}/${workloadId}/${role}`];
   if (typeof reply !== 'string') throw new Error(`Missing real-repo reply: ${arm}/${workloadId}/${role}`);
   return reply;
 }
