@@ -33,27 +33,78 @@ interface ParsedToolCall {
  * A parsed LLM response — either tool calls to execute, or a final answer.
  */
 interface ParsedResponse {
-  type: 'tool_calls' | 'final_answer';
+  type: 'tool_calls' | 'final_answer' | 'malformed';
   toolCalls?: ParsedToolCall[];
   answer?: string;
 }
 
+/**
+ * The registered tools, each with the argument a bare value belongs to.
+ *
+ * Models sometimes write `{"file_write": "a.py", "content": ...}`: the tool
+ * name as a key, holding its main argument. The main argument is the first
+ * key of the tool's input schema (`path`, `command`).
+ */
+type ToolCatalog = ReadonlyMap<string, string | undefined>;
+
+/** The first key of a Zod object schema, or undefined for any other schema. */
+function firstSchemaKey(schema: unknown): string | undefined {
+  const def = (schema as { _def?: { typeName?: string; shape?: () => Record<string, unknown> } } | undefined)?._def;
+  if (def?.typeName !== 'ZodObject' || typeof def.shape !== 'function') return undefined;
+  return Object.keys(def.shape())[0];
+}
+
+const asArgs = (value: unknown): Record<string, unknown> =>
+  value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
+
 /** Normalize the call shapes seen in model replies, including nested wrappers. */
-function toolCallsFrom(value: unknown): ParsedToolCall[] {
-  if (Array.isArray(value)) return value.flatMap(toolCallsFrom);
+function toolCallsFrom(value: unknown, catalog: ToolCatalog = new Map()): ParsedToolCall[] {
+  if (Array.isArray(value)) return value.flatMap(v => toolCallsFrom(v, catalog));
   if (value === null || typeof value !== 'object') return [];
   const obj = value as Record<string, unknown>;
-  const toolName = [obj.toolName, obj.tool, obj.name]
+  const argsOf = () => asArgs(obj.toolArgs ?? obj.tool_args ?? obj.args ?? obj.input ?? {});
+
+  const toolName = [obj.toolName, obj.tool_name, obj.tool, obj.name]
     .find((name): name is string => typeof name === 'string' && name.length > 0);
-  if (toolName) {
-    const args = obj.toolArgs ?? obj.tool_args ?? obj.args ?? obj.input ?? {};
-    return [{ toolName, toolArgs: args !== null && typeof args === 'object' && !Array.isArray(args)
-      ? args as Record<string, unknown> : {} }];
+  if (toolName) return [{ toolName, toolArgs: argsOf() }];
+
+  // {"file_write": {...}} or {"file_write": "a.py", "content": "..."}
+  const keyed = Object.keys(obj).filter(key => catalog.has(key));
+  if (keyed.length === 1) {
+    const [name] = keyed;
+    const held = obj[name];
+    if (held !== null && typeof held === 'object' && !Array.isArray(held)) return [{ toolName: name, toolArgs: asArgs(held) }];
+    const rest = { ...obj };
+    delete rest[name];
+    const primary = catalog.get(name);
+    return [{ toolName: name, toolArgs: primary !== undefined ? { ...rest, [primary]: held } : rest }];
   }
-  if (Array.isArray(obj.tool_calls)) return toolCallsFrom(obj.tool_calls);
-  if (Array.isArray(obj.steps)) return toolCallsFrom(obj.steps);
+
+  // {"toolNames": ["a", "b"], "toolArgs": [{...}, {...}]}
+  if (Array.isArray(obj.toolNames) && Array.isArray(obj.toolArgs) && obj.toolNames.length === obj.toolArgs.length) {
+    const names = obj.toolNames as unknown[];
+    const args = obj.toolArgs as unknown[];
+    if (names.every(n => typeof n === 'string' && n.length > 0)) {
+      return names.map((n, i) => ({ toolName: n as string, toolArgs: asArgs(args[i]) }));
+    }
+  }
+
+  if (Array.isArray(obj.tool_calls)) return toolCallsFrom(obj.tool_calls, catalog);
+  if (Array.isArray(obj.steps)) return toolCallsFrom(obj.steps, catalog);
+
+  // A misspelt name key ("tool_cype") still names exactly one registered tool.
+  if (obj.toolArgs !== undefined || obj.tool_args !== undefined || obj.args !== undefined) {
+    const named = Object.values(obj).filter((v): v is string => typeof v === 'string' && catalog.has(v));
+    if (named.length === 1) return [{ toolName: named[0], toolArgs: argsOf() }];
+  }
   return [];
 }
+
+/**
+ * Text that is trying to call a tool. A reply containing one of these that
+ * still yields no call is a malformed call, not the agent's final answer.
+ */
+const CALL_MARKERS = /"tool_?calls"|"tool_?name"|<tool_?calls?>|<tool_?name>|｜DSML｜/i;
 
 /** A recorded trace span for tool execution or LLM call. */
 interface TraceSpan {
@@ -91,6 +142,20 @@ const MAX_MESSAGE_HISTORY = 20;
  * four testers, which then had nothing left to work with.
  */
 const MAX_IDENTICAL_TOOL_CALLS = 3;
+
+/**
+ * Consecutive empty or unreadable replies an agent is told about and allowed
+ * to correct before the run fails.
+ *
+ * Accepting such a reply as the final answer was the old behaviour, and it was
+ * wrong: in the 2026-09-30 authored rerun, 10 of the 11 failed lone-implementer
+ * cells ended on a tool call the parser could not read, most of them the fix
+ * itself; the eleventh ended on an empty reply.
+ */
+const MAX_FORMAT_RETRIES = 2;
+
+/** How much of an unreadable reply to show back to the model with the correction. */
+const MAX_RETRY_ECHO_CHARS = 2_000;
 
 /** Maximum size for a single tool argument value in characters. */
 const MAX_TOOL_ARG_SIZE = 50_000;
@@ -176,6 +241,10 @@ export class DirectExecutor {
     // refused, so the agent keeps every tool it was given.
     let lastCallSignature: string | undefined;
     let identicalCallCount = 0;
+
+    // Consecutive replies that were empty or an unreadable tool call.
+    let formatErrors = 0;
+    const catalog = this.toolCatalog();
 
     // Report initial progress
     onProgress?.({
@@ -278,20 +347,38 @@ export class DirectExecutor {
         usage: this.budgetManager.getUsage(envelope),
       });
 
-      // Detect empty/malformed responses — fail instead of treating as success
-      if (!response.content || response.content.trim().length === 0) {
-        lastError = 'LLM returned empty response';
+      // An empty reply or an unreadable tool call is neither progress nor an
+      // answer. Say so and let the agent retry, a bounded number of times in a
+      // row; past that the run fails rather than guessing.
+      const empty = !response.content || response.content.trim().length === 0;
+      const parsed: ParsedResponse = empty ? { type: 'malformed' } : this.parseResponse(response.content, catalog);
+
+      if (parsed.type === 'malformed') {
+        formatErrors++;
         traceSpans.push({
-          name: 'empty_response',
+          name: empty ? 'empty_response' : 'malformed_response',
           startedAt: isoNow(),
           durationMs: 0,
-          metadata: { iteration },
+          metadata: { iteration, attempt: formatErrors, ...(empty ? {} : { rawContent: this.truncate(response.content, 200) }) },
         });
-        break;
+        if (formatErrors > MAX_FORMAT_RETRIES) {
+          // The reply itself, escaped onto one line, so a record of the failure
+          // shows which shape broke without the full trace.
+          lastError = empty
+            ? 'LLM returned empty response'
+            : `LLM returned a tool call that could not be parsed; last reply: ${JSON.stringify(this.truncate(response.content, 200))}`;
+          break;
+        }
+        if (!empty) messages.push({ role: 'assistant', content: this.truncate(response.content, MAX_RETRY_ECHO_CHARS) });
+        messages.push({
+          role: 'user',
+          content: `${empty ? 'Your last reply was empty' : 'Your last reply could not be read as a tool call'}, so nothing was executed. `
+            + 'Reply with ONLY one raw JSON object: {"tool_calls": [{"toolName": "<tool_name>", "toolArgs": {<arguments>}}]} '
+            + 'to use tools, or {"answer": "<your final answer>"} when you are done.',
+        });
+        continue;
       }
-
-      // Parse response
-      const parsed = this.parseResponse(response.content);
+      formatErrors = 0;
 
       if (parsed.type === 'final_answer') {
         finalAnswer = parsed.answer;
@@ -575,13 +662,20 @@ Respond with:
    * Parse LLM response into either tool calls or final answer.
    * Handles various response formats gracefully.
    */
-  private parseResponse(content: string): ParsedResponse {
-    // Some model replies use XML tags for the call name and JSON arguments.
-    // Parse the paired tags, including replies whose outer closing tag is bad.
+  private parseResponse(content: string, catalog: ToolCatalog = this.toolCatalog()): ParsedResponse {
+    // Some model replies use XML tags for the call name and JSON arguments
+    // (`<tool_name>` or `<toolName>`, possibly as list items). Parse the paired
+    // tags, including replies whose outer closing tag is bad.
     if (/<tool_calls>/i.test(content)) {
-      const xmlCalls = [...content.matchAll(/<tool_name>\s*([^<>]+?)\s*<\/tool_name>\s*<tool_args>\s*([\s\S]*?)\s*<\/tool_args>/gi)]
-        .flatMap(match => toolCallsFrom({ toolName: match[1].trim(), toolArgs: extractJson(match[2]) }));
+      const xmlCalls = [...content.matchAll(/<tool_?name>\s*([^<>]+?)\s*<\/tool_?name>[^<]*<tool_?args>\s*([\s\S]*?)\s*<\/tool_?args>/gi)]
+        .flatMap(match => toolCallsFrom({ toolName: match[1].trim(), toolArgs: extractJson(match[2]) }, catalog));
       if (xmlCalls.length > 0) return { type: 'tool_calls', toolCalls: xmlCalls };
+
+      // A markdown list of calls: `- repo_shell: {"command": "..."}`
+      const listed = [...content.matchAll(/^\s*[-*]\s*([A-Za-z_][\w.-]*)\s*:\s*(\{.*\})\s*$/gm)]
+        .filter(match => catalog.has(match[1]))
+        .flatMap(match => toolCallsFrom({ toolName: match[1], toolArgs: extractJson(match[2]) }, catalog));
+      if (listed.length > 0) return { type: 'tool_calls', toolCalls: listed };
     }
 
     // `extractJson` is the same tolerant reader the adaptive path uses: it
@@ -601,12 +695,21 @@ Respond with:
         };
       }
 
-      const toolCalls = toolCallsFrom(parsed);
+      const toolCalls = toolCallsFrom(parsed, catalog);
       if (toolCalls.length > 0) return { type: 'tool_calls', toolCalls };
     }
 
+    // A reply that is trying to call a tool is not the agent's answer, however
+    // it is broken: accepting it ends the run on an edit that never happened.
+    if (CALL_MARKERS.test(content)) return { type: 'malformed' };
+
     // No recognizable call or answer: preserve the reply as the answer.
     return { type: 'final_answer', answer: content };
+  }
+
+  /** Registered tool names, each with the schema key a bare value fills. */
+  private toolCatalog(): ToolCatalog {
+    return new Map(this.tools.list().map(tool => [tool.name, firstSchemaKey(tool.inputSchema)]));
   }
 
   /**

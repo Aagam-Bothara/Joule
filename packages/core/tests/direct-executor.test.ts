@@ -112,6 +112,17 @@ function realRepoReply(arm: 'staged' | 'full_verify', workloadId: string, role: 
   return reply;
 }
 
+/** Replies the 2026-09-30 runs recorded as final answers; see the fixture's `_source`. */
+const unreadable = JSON.parse(readFileSync(new URL('./fixtures/unreadable-tool-calls.json', import.meta.url), 'utf8')) as Record<string, string>;
+
+/** A recording tool whose schema lists `first` before the other keys, as the real tools do. */
+function registerRecordingTool(tools: ToolRegistry, name: string, first: string, ...rest: string[]) {
+  const execute = vi.fn().mockResolvedValue({ ok: true });
+  const shape = Object.fromEntries([first, ...rest].map(key => [key, z.any().optional()]));
+  tools.register({ name, description: `Recorded ${name} call`, inputSchema: z.object(shape), outputSchema: z.any(), execute }, 'builtin');
+  return execute;
+}
+
 function registerRepoTool(tools: ToolRegistry, name: 'repo_read' | 'repo_shell') {
   const execute = vi.fn().mockResolvedValue({ ok: true });
   tools.register({
@@ -308,6 +319,155 @@ describe('DirectExecutor', () => {
     });
   });
 
+  describe('replies recorded as answers that were really tool calls', () => {
+    const fileTools = (tools: ToolRegistry) => ({
+      write: registerRecordingTool(tools, 'file_write', 'path', 'content'),
+      read: registerRecordingTool(tools, 'file_read', 'path'),
+      shell: registerRecordingTool(tools, 'shell_exec', 'command', 'cwd'),
+    });
+
+    it('runs a call named with snake_case tool_name', async () => {
+      const { executor, envelope, tools } = buildExecutor([unreadable.snakeCaseToolName, '{"answer":"done"}']);
+      const { write } = fileTools(tools);
+
+      const result = await executor.execute(makeTask(), envelope, makeAgent());
+
+      expect(result.result).toBe('done');
+      expect(write).toHaveBeenCalledOnce();
+      expect(write.mock.calls[0][0].path).toMatch(/pkg\/client\.py$/);
+      expect(write.mock.calls[0][0].content).toContain('def retries():');
+    });
+
+    it('runs a call that uses the tool name as the key for its arguments', async () => {
+      const { executor, envelope, tools } = buildExecutor([unreadable.toolNameAsKeyObject, '{"answer":"done"}']);
+      const { write } = fileTools(tools);
+
+      await executor.execute(makeTask(), envelope, makeAgent());
+
+      expect(write).toHaveBeenCalledOnce();
+      expect(write.mock.calls[0][0].path).toMatch(/pkg\/lookup\.py$/);
+    });
+
+    it('gives a bare value under the tool-name key to the tool\'s first argument', async () => {
+      const { executor, envelope, tools } = buildExecutor([unreadable.toolNameAsKeyValue, '{"answer":"done"}']);
+      const { write, shell } = fileTools(tools);
+
+      await executor.execute(makeTask(), envelope, makeAgent());
+
+      expect(write).toHaveBeenCalledOnce();
+      expect(write.mock.calls[0][0].path).toMatch(/pkg\/search\.py$/);
+      expect(write.mock.calls[0][0].content).toContain('def insert_position');
+      expect(shell).toHaveBeenCalledOnce();
+      expect(shell.mock.calls[0][0].command).toBe('python run_tests.py');
+    });
+
+    it('closes a nested wrapper the model left open', async () => {
+      const { executor, envelope, tools } = buildExecutor([unreadable.unclosedNestedWrapper, '{"answer":"done"}']);
+      const { write } = fileTools(tools);
+
+      await executor.execute(makeTask(), envelope, makeAgent());
+
+      expect(write).toHaveBeenCalledOnce();
+      expect(write.mock.calls[0][0].content).toContain('def group_by');
+    });
+
+    it('runs an open call whose name key is misspelt but names one registered tool', async () => {
+      const { executor, envelope, tools } = buildExecutor([unreadable.misspeltNameUnclosed, '{"answer":"done"}']);
+      const { write } = fileTools(tools);
+
+      await executor.execute(makeTask(), envelope, makeAgent());
+
+      expect(write).toHaveBeenCalledOnce();
+      expect(write.mock.calls[0][0].path).toMatch(/pkg\/cache\.py$/);
+    });
+
+    it('runs a markdown list of calls inside tool_calls tags', async () => {
+      const { executor, envelope, tools } = buildExecutor([unreadable.markdownList, '{"answer":"done"}']);
+      const shell = registerRepoTool(tools, 'repo_shell');
+      const read = registerRepoTool(tools, 'repo_read');
+
+      await executor.execute(makeTask(), envelope, makeAgent());
+
+      expect(shell).toHaveBeenCalledWith({ command: 'cd /testbed && git status --short && git log --oneline -3' });
+      expect(read).toHaveBeenCalledWith({ path: 'pylint/lint/expand_modules.py' });
+    });
+
+    it('runs camelCase name and argument tags despite a native-token closing tag', async () => {
+      const { executor, envelope, tools } = buildExecutor([unreadable.camelXmlWithDsml, '{"answer":"done"}']);
+      const shell = registerRepoTool(tools, 'repo_shell');
+
+      await executor.execute(makeTask(), envelope, makeAgent());
+
+      expect(shell).toHaveBeenCalledOnce();
+      expect(shell.mock.calls[0][0].command).toContain('git status --short | head -50');
+    });
+
+    it('pairs parallel lists of tool names and arguments', async () => {
+      const { executor, envelope, tools } = buildExecutor([unreadable.parallelArrays, '{"answer":"done"}']);
+      const shell = registerRepoTool(tools, 'repo_shell');
+      const read = registerRepoTool(tools, 'repo_read');
+
+      await executor.execute(makeTask(), envelope, makeAgent());
+
+      expect(shell).toHaveBeenCalledOnce();
+      expect(read).toHaveBeenCalledOnce();
+      expect(read.mock.calls[0][0].path).toBe('src/flask/cli.py');
+    });
+
+    it('never runs a call cut off mid-value, and asks the model again', async () => {
+      const { executor, envelope, tools, provider } = buildExecutor([
+        unreadable.truncatedJson,
+        '{"tool_calls": [{"toolName": "repo_shell", "toolArgs": {"command": "ls"}}]}',
+        '{"answer":"done"}',
+      ]);
+      const shell = registerRepoTool(tools, 'repo_shell');
+
+      const result = await executor.execute(makeTask(), envelope, makeAgent());
+
+      expect(result.status).toBe('completed');
+      expect(result.result).toBe('done');
+      expect(shell).toHaveBeenCalledOnce();
+      expect(shell).toHaveBeenCalledWith({ command: 'ls' });
+      const seen = provider.chat.mock.calls[1][0].messages as Array<{ role: string; content: string }>;
+      expect(seen.some(m => m.role === 'user' && m.content.includes('could not be read as a tool call'))).toBe(true);
+    });
+
+    it('does not accept a bare tool_calls tag as the answer', async () => {
+      const { executor, envelope, provider } = buildExecutor([unreadable.bareTag, '{"answer":"done"}']);
+
+      const result = await executor.execute(makeTask(), envelope, makeAgent());
+
+      expect(result.result).toBe('done');
+      expect(provider.chat).toHaveBeenCalledTimes(2);
+    });
+
+    it('fails, rather than answering, after three unreadable calls in a row', async () => {
+      const { executor, envelope, provider } = buildExecutor([unreadable.bareTag]);
+
+      const result = await executor.execute(makeTask(), envelope, makeAgent());
+
+      expect(result.status).toBe('failed');
+      expect(result.error).toContain('could not be parsed');
+      expect(result.error).toContain('last reply: "<tool_calls>"');
+      expect(result.error).not.toContain('\n');
+      expect(provider.chat).toHaveBeenCalledTimes(3);
+    });
+
+    it('counts only consecutive unreadable replies against the limit', async () => {
+      const { executor, envelope } = buildExecutor([
+        unreadable.bareTag, unreadable.bareTag,
+        '{"tool_calls": [{"toolName": "test_tool", "toolArgs": {"query": "a"}}]}',
+        unreadable.bareTag, unreadable.bareTag,
+        '{"answer":"done"}',
+      ]);
+
+      const result = await executor.execute(makeTask(), envelope, makeAgent());
+
+      expect(result.status).toBe('completed');
+      expect(result.result).toBe('done');
+    });
+  });
+
   describe('tool result rendering', () => {
     it('shows the full bounded repo_read result to the next model call', async () => {
       const marker = 'def expand_modules(files_or_modules):';
@@ -477,6 +637,19 @@ describe('DirectExecutor', () => {
 
       expect(result.status).toBe('failed');
       expect(result.error).toContain('empty response');
+    });
+
+    it('asks again after one empty reply instead of ending the run', async () => {
+      // Seen on the second turn of a direct probe of deepseek-v4-flash: the
+      // reply was a single space.
+      const { executor, envelope, provider } = buildExecutor([' ', '{"answer":"done"}']);
+
+      const result = await executor.execute(makeTask(), envelope, makeAgent());
+
+      expect(result.status).toBe('completed');
+      expect(result.result).toBe('done');
+      const seen = provider.chat.mock.calls[1][0].messages as Array<{ role: string; content: string }>;
+      expect(seen.some(m => m.role === 'user' && m.content.includes('Your last reply was empty'))).toBe(true);
     });
   });
 

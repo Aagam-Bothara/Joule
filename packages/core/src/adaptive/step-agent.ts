@@ -253,7 +253,52 @@ export function extractJson(raw: string): unknown {
     try { return JSON.parse(c); } catch { /* try repaired */ }
     try { return JSON.parse(repairJsonStrings(c)); } catch { /* next candidate */ }
   }
+  // Last resort: a container the model left open ('...}]' for '...}]}') or a
+  // stray closer mid-way. Tried only after every exact reading has failed.
+  const balanced = balanceJsonContainers(repairJsonStrings(cleaned));
+  if (balanced) {
+    try { return JSON.parse(balanced); } catch { /* unreadable */ }
+  }
   return undefined;
+}
+
+/**
+ * The first JSON container in text with unmatched closers dropped and missing
+ * ones appended.
+ *
+ * A reply that ends inside a string was cut off mid-value; closing it would
+ * turn `"command": "cd` into a real, truncated command, so that is left
+ * unreadable instead.
+ */
+function balanceJsonContainers(text: string): string | undefined {
+  const start = text.search(/[\[{]/);
+  if (start < 0) return undefined;
+  const closers: string[] = [];
+  let out = '';
+  let inString = false;
+  let escaped = false;
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i];
+    if (inString) {
+      out += ch;
+      if (escaped) escaped = false;
+      else if (ch === '\\') escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') inString = true;
+    else if (ch === '{' || ch === '[') closers.push(ch === '{' ? '}' : ']');
+    else if (ch === '}' || ch === ']') {
+      if (closers[closers.length - 1] !== ch) continue;
+      closers.pop();
+      out += ch;
+      if (closers.length === 0) return out;
+      continue;
+    }
+    out += ch;
+  }
+  if (inString) return undefined;
+  return out.replace(/[\s,]+$/, '') + closers.reverse().join('');
 }
 
 /** The first complete JSON object or array in text, with string-aware nesting. */
