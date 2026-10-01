@@ -881,7 +881,41 @@ All three are fixed (`budgetMode: 'fixed_per_agent'`, `proseOnly`, JSON tool-res
 covered by tests. Measurements taken before those fixes are not comparable with measurements taken
 after.
 
+### Unreadable tool calls were taken as answers (found 2026-10-01)
+
+A fourth defect affects every crew dataset below up to and including `staged-replication-v2`. The
+direct executor treated any reply it could not parse as the agent's final answer. DeepSeek V4 Flash
+regularly writes slightly broken calls: `tool_name` for `toolName`, the tool name as a key
+(`{"file_write": {...}}`, or `{"file_write": "a.py", "content": ...}`), a wrapper or object left
+unclosed, a markdown list or `<toolName>` tags inside `<tool_calls>`, a reply cut off mid-value, or a
+whitespace-only reply (which failed the run outright). Each ended the agent as "completed",
+frequently with the fix it had just written never applied.
+
+Re-reading the stored records — the lone implementer's failed cells, by how its run ended:
+
+| dataset | failed | misread call | empty reply | other |
+| --- | --- | --- | --- | --- |
+| `specialist-value`, implementer alone (Dataset F) | 10 | 6 | 2 | 2 |
+| `specialist-value-control`, second implementer seat | 11 | 10 | 1 | 0 |
+| `staged-replication` (old parser) | 15 | 7 | 5 | 3 |
+| `staged-replication-v2` (first parser fix) | 11 | 10 | 1 | 0 |
+| `staged-replication-v3` (this fix) | 1 | 0 | 1 | 0 |
+
+In Dataset F and the control, most misread calls were file reads and shell commands: the agents
+were investigating, not "stopping voluntarily". The fix makes a reply that is visibly trying to call
+a tool a *malformed* result, never an answer; the agent is told so and may retry twice in a row
+before the run fails. It also reads the observed shapes, and closes containers left open — but
+never a string left open, so a command cut off mid-value is not run. The verbatim replies are test
+fixtures in `packages/core/tests/fixtures/unreadable-tool-calls.json`.
+
+Withdrawn as a result: the "stopped voluntarily" reading of Dataset F, the role-framing conclusion
+of the second-implementer control, and the `always-on → verified_full` quality effect. The
+`verified_full` vs staged comparison was always made on one executor and still stands.
+
 ### Does a specialist add verified value? (`benchmarks/specialist-value`)
+
+*Measured with the executor defect above; the interpretation in this section is withdrawn. The
+counts are kept as recorded.*
 
 Five authored repositories, one planted defect each, three repetitions, `deepseek-v4-flash`,
 verified-edit gate on. The task says only that the suite fails; locating the defect is the work.
@@ -906,10 +940,9 @@ to five of sixteen allowed model calls without trying to write anything.
 
 ### Replication on fresh fixtures (`benchmarks/staged-replication`)
 
-The first two tables below (this one and the `verified_full` ablation) were measured under the
-response parser before the array/XML/bare-call fix. All four arms were then rerun under the
-corrected parser; that rerun is the current measurement and is reported
-[at the end of this section](#rerun-under-the-corrected-parser-staged-replication-v2).
+The first three tables below were measured with the executor defect described above. All four arms
+were rerun on the fixed executor; that rerun is the current measurement and is reported
+[at the end of this section](#rerun-on-the-fixed-executor-staged-replication-v3).
 
 Ten new repositories, one per defect class (API contract, cross-file state, edge case, wrong
 algorithm, numeric precision, import interaction, stale cache, boundary, data transformation, error
@@ -950,6 +983,8 @@ identical, p = 1.0). One model, one provider, fixtures we authored, n = 30 cells
 
 ### Rerun under the corrected parser (`staged-replication-v2`)
 
+*Superseded by the next section: still measured with the unreadable-call defect.*
+
 The same ten fixtures, the same three repetitions and the same model (`deepseek/deepseek-v4-flash`
 on OpenRouter), run on 2026-09-30 with the corrected response parser, all four arms in one
 invocation: 120 runs, $0.33 estimated. Data in `benchmarks/experiments/staged-replication-v2`.
@@ -979,11 +1014,40 @@ invocation: 120 runs, $0.33 estimated. Data in `benchmarks/experiments/staged-re
   2.3× their old-parser wall-clock while costing less. Cost and tokens are the reliable efficiency
   comparison; the JCT column is not controlled across arms.
 
-The conclusions of the old-parser run stand under the corrected parser: verifier evidence gives the
-directional 27 → 30 quality effect, and conditional admission matches `verified_full` cell for cell
-at 44% lower cost and tokens.
+At the time this read as confirming the old-parser conclusions. It did not: 10 of the 11
+lone-implementer failures here ended on a misread call (see above).
 
-### Real repositories: post-fix primary reaches writes (`benchmarks/real-repo`)
+### Rerun on the fixed executor (`staged-replication-v3`)
+
+Same fixtures, repetitions, model and arms, run on 2026-10-01 with the unreadable-call fix: 120
+runs, $0.39 estimated. Data in `benchmarks/experiments/staged-replication-v3`.
+
+| arm | success | cost | tokens | stages |
+| --- | --- | --- | --- | --- |
+| implementer alone | 29/30 | $0.0020 | 14,783 | 1.00 |
+| always-on crew | 30/30 | $0.0044 | 33,254 | 3.00 |
+| `verified_full` | 30/30 | $0.0047 | 35,653 | 3.00 |
+| staged recovery | 30/30 | $0.0019 | 14,630 | 1.03 |
+
+- **No agent ended on a misread call.** The one lone-implementer failure ended on three empty
+  replies in a row, which now fails the run explicitly.
+- **Paired cells.** Always-on against `verified_full`: 30 both pass (p = 1.0) — the 27 → 30 effect
+  is gone. `verified_full` against staged: 30 both pass (p = 1.0). Implementer alone against
+  staged: 29 both pass, 1 staged only.
+- **Staged costs what the implementer alone costs** ($0.0019 vs $0.0020): the implementer passed
+  in 29 of 30 staged cells, the reviewer ran once and repaired that cell, and 59 of 60 specialist
+  stages were skipped. Against `verified_full` that is 59% less cost and tokens; against always-on,
+  56%.
+- **After a state that already verified PASS, `verified_full` entered 60 specialist stages; 60 of
+  60 wrote nothing**, with no rollbacks and no regressions.
+- Wall-clock is omitted: a real-repository benchmark shared the provider during these runs.
+
+What this supports is narrower than the earlier claims. Conditional admission is free when the
+first agent succeeds and costs well under half of an always-on crew. Whether a verifier-informed
+recovery stage improves outcomes cannot be read from a benchmark the first agent passes 29/30;
+answering that needs harder tasks.
+
+### Real repositories: the crew implementer resolves none (`benchmarks/real-repo`)
 
 The SWE-bench Lite harness uses locally available images, real issues, hidden tests, and the
 official pass criterion. Its old-parser smoke and probe datasets are labelled in their manifests.
@@ -1014,18 +1078,33 @@ remaining failures. The reference patch changes a branch in `expand_modules` ins
 10 of 16 available iterations and 79,637 of 100,000 budgeted tokens, so neither limit ended this
 run. Joule estimated $0.0299 for the rerun; the provider-billed amount is not captured. The two
 post-parser primary runs show that agents now reach real-repository writes, but neither solved this
-issue. Staged recovery and any real-repository success rate remain unmeasured. The authored-fixture
-comparison has been rerun under the corrected parser
-([above](#rerun-under-the-corrected-parser-staged-replication-v2)); the real-repository one has not.
+issue.
+
+**Full-pool primary baselines (2026-09-30/10-01, `deepseek/deepseek-v4-flash`, one run per issue).**
+
+| run | executor | per-agent tokens | resolved | how the runs ended | edit calls |
+| --- | --- | --- | --- | --- | --- |
+| `real-repo-primary-baseline` | before the unreadable-call fix | 100k | 0/13 | 11 misread call, 1 empty reply, 1 budget | 0 |
+| `real-repo-primary-baseline-v2` | fixed | 100k | 0/13 | 13 budget exhausted after 6–11 model calls | 0 |
+| `real-repo-primary-baseline-400k` | fixed | 400k | 0/13 | 11 hit the 16-turn cap, 1 unreadable ×3, 1 network reset | 1 |
+
+The 400k allowance (`REAL_REPO_BUDGET` in `real-repo/crews.ts`: every `high` limit ×4 except cost)
+was decided after the v2 run and before the 400k run. With it, the crew implementer reads and
+searches for 16 turns and does not commit to an edit; estimated $0.48 for the 13 issues.
+
+The same model resolved 44 of 95 SWE-bench Lite instances through the adaptive step agent
+(30 steps, its own prompt and action protocol, [above](#real-repositories-at-scale-95-swe-bench-lite-instances-2026-09-06)).
+On real repositories the gap is between Joule's two agent loops, not between models. Staged recovery
+cannot be compared on these issues until the crew's first stage resolves some of them.
 
 ### Reproducing
 
 ```bash
 npx tsx benchmarks/staged-replication/cli.ts selftest        # fixtures must fail as planted and pass with the reference fix
 npx tsx benchmarks/staged-replication/cli.ts run --seeds 3 --arms primary,full,full_verify,staged \
-  --out-dir benchmarks/experiments/staged-replication-v2    # 10 tasks x 4 arms x 3 reps
+  --out-dir benchmarks/experiments/staged-replication-v3    # 10 tasks x 4 arms x 3 reps
 npx tsx benchmarks/staged-replication/cli.ts analyze --arms primary,full,full_verify,staged \
-  --out-dir benchmarks/experiments/staged-replication-v2
+  --out-dir benchmarks/experiments/staged-replication-v3
 
 npx tsx benchmarks/real-repo/selftest.ts <instanceId ...>    # decides the pool; calls no model
 npx tsx benchmarks/real-repo/cli.ts pool
