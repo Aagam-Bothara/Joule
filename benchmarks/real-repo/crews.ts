@@ -12,7 +12,7 @@
  * This is a port, not a rewrite, and it is worth being explicit that it is not
  * a null change: the prompts name different tools than the authored-fixture
  * runs did. Both arms get exactly the same definitions, so the comparison
- * between them is unaffected — it is the comparison with the earlier datasets
+ * between them is unaffected â€” it is the comparison with the earlier datasets
  * that carries the caveat.
  */
 
@@ -22,33 +22,39 @@ import type { ComparisonArm } from '../specialist-value/crews.js';
 const TOOLS = ['repo_read', 'repo_write', 'repo_edit', 'repo_shell'];
 
 /**
- * Four times the `high` envelope, decided 2026-10-01 before any run under it.
+ * The escalation harness's SWE-bench allowance, per agent: 30 turns, 30
+ * minutes, 1.5M tokens (harness/workloads/swebench.ts). Same model, same
+ * container tools; the ladder resolved 44 of 95 instances with it.
  *
- * With the parser fixed, all 13 pool tasks ended "Budget exhausted" at 100k
- * tokens after 6-11 model calls, every one still reading and none having
- * attempted an edit (benchmarks/experiments/real-repo-primary-baseline-v2).
- * Each call resends the conversation, so a real repository spends the authored
- * fixtures' allowance in about eight turns. Every dimension is scaled so that
- * no other one becomes the new binding limit; cost keeps its $1 ceiling, which
- * 400k DeepSeek V4 Flash tokens stay far below. The authored benchmark keeps
- * `high` unchanged. Written out rather than derived from the preset so that the
- * recorded values cannot drift if `high` is ever retuned.
+ * History, each step decided before the run it governed:
+ * - `high` (100k tokens, 16 turns, 10 min): all 13 pool tasks ran out of tokens
+ *   after 6-11 calls, still reading (real-repo-primary-baseline-v2).
+ * - 400k tokens, `high` x4 otherwise: 11 of 13 hit the 16-turn cap, one edit in
+ *   all 13 (real-repo-primary-baseline-400k).
+ * - plus a 12k output cap per reply (it had been the provider's 1024): 4 of 13
+ *   resolved, 6 still hit the 16-turn cap (real-repo-primary-out12k-c).
+ * - now the ladder's turns, time and tokens together, so that raising one does
+ *   not make another the new binding limit.
+ *
+ * Cost keeps its $1 ceiling. Written out rather than derived from a preset so
+ * the recorded values cannot drift.
  */
 export const REAL_REPO_BUDGET: BudgetEnvelope = {
-  maxTokens: 400_000, // high: 100_000
+  maxTokens: 1_500_000, // high: 100_000
   maxToolCalls: 160, // high: 40
-  maxLatencyMs: 600_000, // high: 300_000; matches the agents' 10-minute wall clock
+  maxLatencyMs: 1_800_000, // high: 300_000; matches the agents' wall clock below
   maxEscalations: 5,
   costCeilingUsd: 1.0,
   maxEnergyWh: 2.0, // high: 0.5
   maxCarbonGrams: 0.8, // high: 0.2
 };
-const PRIMARY_ITERATIONS = 16;
-// The smoke runs hit 10 while still inspecting pytest/pylint. Match the
-// primary's 16 turns; the existing 100k-token and 10-minute caps still bound
-// each recovery attempt.
-const RECOVERY_ITERATIONS = 16;
-const STAGE_WALL_TIMEOUT_MS = 600_000;
+const PRIMARY_ITERATIONS = 30;
+const RECOVERY_ITERATIONS = 30;
+const STAGE_WALL_TIMEOUT_MS = 1_800_000;
+// The escalation harness's SWE-bench setting (harness/workloads/swebench.ts).
+// Before 2026-10-01 these agents ran at the provider default of 1024, which
+// cannot hold a real source file in one repo_write.
+const OUTPUT_TOKENS = 12_000;
 
 const PRIMARY: AgentDefinition = {
   id: 'implementer',
@@ -60,6 +66,7 @@ const PRIMARY: AgentDefinition = {
   allowedTools: TOOLS,
   maxIterations: PRIMARY_ITERATIONS,
   wallTimeoutMs: STAGE_WALL_TIMEOUT_MS,
+  maxOutputTokens: OUTPUT_TOKENS,
   maxRetries: 0,
 };
 
@@ -76,6 +83,7 @@ const RECOVERY_REVIEWER: AgentDefinition = {
   allowedTools: TOOLS,
   maxIterations: RECOVERY_ITERATIONS,
   wallTimeoutMs: STAGE_WALL_TIMEOUT_MS,
+  maxOutputTokens: OUTPUT_TOKENS,
   maxRetries: 0,
 };
 
@@ -90,6 +98,7 @@ const RECOVERY_TESTER: AgentDefinition = {
   allowedTools: TOOLS,
   maxIterations: RECOVERY_ITERATIONS,
   wallTimeoutMs: STAGE_WALL_TIMEOUT_MS,
+  maxOutputTokens: OUTPUT_TOKENS,
   maxRetries: 0,
 };
 
