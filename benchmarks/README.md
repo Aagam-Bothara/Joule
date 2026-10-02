@@ -1057,14 +1057,15 @@ The preselected self-tested pool admitted 13 of 15 candidate issues.
 
 The committed `agentResults[].tools` entries name the executed calls: none is `repo_write` or
 `repo_edit` in the old smoke and probe runs. That is an observation from named tools, not an
-inference from the host verified-edit gate's zero accepted writes; that gate does not snapshot
-container-side edits. Several old final replies contain unexecuted calls: a tagged bare JSON
+inference from the host verified-edit gate's zero accepted writes; at the time, that gate did not
+snapshot container-side edits. Several old final replies contain unexecuted calls: a tagged bare JSON
 array, XML tags, or a nested wrapper. A mock-provider replay shows that the direct executor
 treated the array and XML as final answers and dropped nested calls. Reviewers and testers also
 hit the old 10-iteration limit while still inspecting pylint/pytest.
 
 These old runs do not establish a model or navigation capability floor. The parser now handles the
-recorded shapes, and the recovery limit is 16. The first post-parser primary-only smoke run used
+recorded shapes. The recovery limit was raised to 16 iterations after these runs and is now 30 for
+every agent (see the allowance history below). The first post-parser primary-only smoke run used
 `gpt-4o-mini` on `pylint-dev__pylint-7114`. Its lifecycle records 14 model calls, 25 named tool
 calls (10 `repo_read`, 14 `repo_edit`, 1 `repo_write`), and 15 write attempts. Eleven write calls
 reported success; the container diff confirms `pylint/lint/expand_modules.py` changed. The run
@@ -1078,7 +1079,8 @@ file compiled, but the hidden verifier reported F2P 0/1 and P2P 56/56. The agent
 `get_python_path` with a condition equivalent to the original, then ended after acknowledging
 remaining failures. The reference patch changes a branch in `expand_modules` instead. It used
 10 of 16 available iterations and 79,637 of 100,000 budgeted tokens, so neither limit ended this
-run. Joule estimated $0.0299 for the rerun; the provider-billed amount is not captured. The two
+run. Joule estimated $0.0299 for the rerun; the provider-billed amount was not captured then
+(records now carry it as `billedCostUsd`). The two
 post-parser primary runs show that agents now reach real-repository writes, but neither solved this
 issue.
 
@@ -1116,8 +1118,34 @@ backslashes (`grep "a\|b"`) that are invalid JSON escapes and made a whole call 
 now read; the escape repair is in the JSON reader the step agent shares. The task text was not
 changed in either run above, so the gap closed without porting the ladder's instructions.
 
-With matching allowances the crew loop resolves 6 of 13 (46%); the ladder's rate was 46% (44/95).
-One run per issue: `pylint-7993` passed at 16 turns and failed at 30, `pytest-7373` the reverse.
+With matching allowances the crew loop resolves 6 of 13. This is *not* comparable to the ladder's
+44/95: these crew runs had hidden-test feedback (see the note below) and the ladder runs did not,
+and the pools differ. One run per issue: `pylint-7993` passed at 16 turns and failed at 30,
+`pytest-7373` the reverse.
+
+**Every real-repository crew run in this section had hidden-test access (found 2026-10-01).** The
+check that decided escalation was the SWE-bench checker in `real-repo/workload.ts`, and:
+
+- `install()` copies the hidden test patch and the checker into the agent's container at
+  `/tmp/test.patch` and `/tmp/check.py` for the whole run, despite the file's header comment
+  saying the hidden tests are never left where an agent could read them. Stored final replies
+  include `cat /tmp/test.patch` (staged pylint-7114 reviewer, staged pytest-8906 implementer) and
+  `cat /tmp/check.py`; tool arguments were not recorded, so earlier reads cannot be counted.
+- The verified-edit gate re-ran the checker after every write and appended the last 400 characters
+  of its output — including `still failing: <hidden test names>` — to the agent's tool result.
+- The staged-recovery handoff passed the checker's command and output to the next agent.
+- Each check ran the hidden tests in place, leaving compiled copies (`tests/__pycache__/*.pyc`) in
+  the container afterwards.
+
+The checker no longer lives in the container: it is piped in on stdin for each check, writes no
+bytecode, and removes the hidden test files it laid down (`real-repo/run-check.ts`,
+`real-repo/workload.ts`); records now keep each tool call's arguments for audit. What still reaches
+the agents is the check's *output* — that is an experiment-design choice for the next run, not a
+leak to fix. No real-repository run has been made with these changes yet.
+
+The escalation-ladder runs (`harness/workloads/swebench.ts`) pipe the test patch in only at final
+scoring and are not affected. Both crew arms had identical access, so the staged-vs-`verified_full`
+comparison below is internally fair; its absolute rates are oracle-assisted, not resolve rates.
 
 **Staged against verified_full (`real-repo-staged-v1`, 2026-10-01).** Same 13 issues, same model,
 same three agents and per-agent allowance as the ladder-limits run, one run per issue per arm:
@@ -1145,14 +1173,21 @@ same three agents and per-agent allowance as the ladder-limits run, one run per 
 | pytest-9359 | ✓ | ✓ | ✓ | 1 | implementer |
 
 - **Funnel (staged):** implementer 7/13; reviewer invoked 6 times, recovered 4; tester invoked
-  twice, recovered none. 18 of 26 specialist stages skipped.
+  twice, recovered none. 18 of 26 specialist stages skipped. Of the 6 implementer failures, 4 hit
+  the 30-turn cap (flask-4045, flask-5063, pylint-7228, pytest-8906) and 2 answered while the check
+  failed (pylint-7114, pytest-11148); the reviewer's 4 recoveries are 3 after a cap and 1
+  (pytest-11148) after a wrong "done". Whether the cap recoveries come from the evidence or from
+  30 more turns is untested.
 - **Paired:** 8 both, 3 staged only, 1 `verified_full` only, 1 neither — McNemar exact p = 0.63.
   The difference is not significant; staging did not lose outcomes and cost 22% less per issue.
 - **After a passing check**, `verified_full` entered 17 specialist stages: 16 made no edit; one —
   the tester on pytest-11148, after the reviewer's fix had passed — edited the repository and broke
-  it. The verified-edit gate recorded the rollback but cannot restore container-side files (it
-  snapshots host paths), so the issue ended failed. First regression from an always-on specialist
-  in any dataset here.
+  it. The verified-edit gate recorded the rollback but, in this run, could not restore
+  container-side files (it snapshotted host paths), so the issue ended failed. First regression
+  from an always-on specialist in any dataset here. The gate now snapshots and restores
+  container files through a workspace that the real-repo harness supplies
+  (`benchmarks/harness/workloads/repo-workspace.ts`). That is implemented and unit-tested, but
+  has not yet been measured in a real-repository run. This result predates it.
 - Each arm's implementer is a separate run, so per-issue outcomes also differ for reasons that
   have nothing to do with the policy: pytest-7220 was solved by the staged implementer alone and
   missed by `verified_full`'s.

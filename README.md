@@ -13,7 +13,7 @@ it hands the next agent the actual failure output, and it stops the moment the c
 
 ![CI](https://github.com/Aagam-Bothara/Joule/actions/workflows/test.yml/badge.svg)
 ![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)
-![Tests](https://img.shields.io/badge/tests-1456%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-1498%20passing-brightgreen)
 ![TypeScript](https://img.shields.io/badge/TypeScript-100%25-blue)
 ![Node.js](https://img.shields.io/badge/node-%3E%3D22-brightgreen)
 
@@ -106,10 +106,11 @@ Two mechanisms are at work:
 | **failure evidence** | the recovery agent receives the check's command and real output, not a summary |
 | **conditional admission** | a stage that is not needed is never started — no context built, no model called |
 
-On 13 real SWE-bench Lite issues, the reviewer — given the failing check's output — repaired 4 of
-the 6 issues the implementer left failing, and staged recovery reached 11/13 against 9/13 for a crew
-that runs every specialist every time, at 22% lower cost. One run per issue, so the difference
-between the two crews is not statistically significant; the recoveries themselves are observed.
+On 13 real SWE-bench Lite issues, staged recovery reached 11/13 against 9/13 for a crew that runs
+every specialist every time, at 22% lower estimated cost. **That check was the hidden SWE-bench test
+suite itself, and agents could see it** — so this shows how the policies compare given an oracle
+check, not what they achieve with a check a user would have. Measuring that is the next step
+([details](#real-repositories)).
 
 **Inside one task — the escalation ladder.** A small model executes, every step is verified, and a
 larger model is consulted or handed off only when the evidence says the small model is stuck. That
@@ -121,11 +122,21 @@ mechanism and its benchmarks are [further down](#escalating-inside-one-task).
 
 ### Real repositories
 
-**13 SWE-bench Lite issues (flask, pylint, pytest), each in its official container, scored by the
-hidden tests; `deepseek-v4-flash`, one run per issue per arm, 2026-10-01.** The pool was fixed by a
-self-test before any model ran (each issue fails at its base commit and passes with the upstream
-fix). Both crews have the same three agents, prompts, tools and per-agent allowance (30 turns,
-30 minutes, 1.5M tokens, 12k output tokens per reply); only the execution policy differs.
+**13 SWE-bench Lite issues (flask, pylint, pytest), each in its official container;
+`deepseek-v4-flash`, one run per issue per arm, 2026-10-01.** The pool was fixed by a self-test
+before any model ran (each issue fails at its base commit and passes with the upstream fix). Both
+crews have the same three agents, prompts, tools and per-agent allowance (30 turns, 30 minutes,
+1.5M tokens, 12k output tokens per reply); only the execution policy differs.
+
+> **These runs had hidden-test access — they are not SWE-bench resolve rates.** The check that
+> decided escalation, and that the verified-edit gate re-ran after every write, was the SWE-bench
+> hidden-test checker. Its output (including the names of the failing hidden tests) was returned to
+> the agents after their edits and handed to recovery agents, and the hidden test patch and checker
+> sat in each agent's container at `/tmp/test.patch` and `/tmp/check.py`, where agents could read
+> them — some runs ended on `cat /tmp/test.patch`. Both arms had identical access, so the comparison
+> *between* them is fair; the absolute numbers are not comparable to clean SWE-bench scores, and say
+> nothing yet about recovery with a check a user would actually have. Found by review on 2026-10-01;
+> a re-measurement without that access is planned.
 
 | arm | resolved | mean cost | mean stages |
 |---|---:|---:|---:|
@@ -150,12 +161,14 @@ fix). Both crews have the same three agents, prompts, tools and per-agent allowa
 
 What this shows, and what it does not:
 
-- **Recovery happens on real code.** In the staged arm the implementer resolved 7 of 13; the
-  reviewer, handed the failing check's output, resolved 4 of the remaining 6. The tester ran twice
-  and resolved neither.
+- **A second stage converted failures into passes.** In the staged arm the implementer resolved 7
+  of 13; the reviewer, handed the check's output, resolved 4 of the remaining 6; the tester ran
+  twice and resolved neither. But 3 of those 4 followed an implementer that had used all 30 turns —
+  they may be extra turns rather than evidence at work. Only one (pytest-11148) was the case this
+  project is about: an implementer that said it was done while the check failed.
 - **Staged did not lose quality to save cost.** 8 issues pass in both arms; 3 pass only in staged,
   1 only in `FULL_VERIFY` (McNemar exact p = 0.63 — not significant). Staged skipped 18 of 26
-  specialist stages and cost 22% less per issue.
+  specialist stages and cost 22% less per issue (Joule's token-based estimate, not billed cost).
 - **An always-on specialist broke a working fix.** On pytest-11148 the `FULL_VERIFY` reviewer
   repaired the issue and the check passed; the tester, run anyway, then edited the repository and
   the issue ended failed. Staged never started that tester. See
@@ -236,8 +249,10 @@ The same day, the crew executor turned out to be why real repositories looked ou
 no output limit, so the provider's default of 1,024 tokens per reply applied, and no edit to a real
 source file fits in that. With 12k-token replies, the model's native call markup read, shell
 backslashes (`grep "a\|b"`) no longer making whole calls unreadable, and the escalation harness's
-allowance of 30 turns, the lone crew implementer went from 0/13 to 6/13 on the real-repository pool
-— the same rate the escalation harness gets with this model. The step-by-step history is in
+allowance of 30 turns, the lone crew implementer went from 0/13 to 6/13 on the real-repository pool.
+That 6/13 was measured with the hidden-test feedback described [under Results](#real-repositories),
+which the escalation harness's clean 44/95 did not have, so the two rates are not comparable. The
+step-by-step history is in
 [benchmarks/README.md](benchmarks/README.md#staged-recovery-on-real-repositories-benchmarksreal-repo).
 
 ---
@@ -298,10 +313,17 @@ It was added after wider crews were observed destroying solutions that earlier a
 gotten working. It is a narrow safety net — a check-and-restore around writes, not a general
 transactional store. It does no patch merging, no conflict resolution and no branching.
 
-**It only protects files on the host.** It snapshots host paths, so edits an agent makes inside a
-container — every real-repository run above — are checked but cannot be restored. On pytest-11148
-the gate saw the tester's edit break a passing state and recorded a rollback, but the container's
-file was not put back and the issue ended failed. Restoring container-side edits is not built yet.
+**Container edits: fixed in code, not yet measured.** In the real-repository runs above, the gate
+snapshotted host paths, while the agents' `repo_write` / `repo_edit` calls changed files inside the
+container. On pytest-11148 the gate saw the tester's edit break a passing state and recorded a
+rollback, but the container's file was not put back and the issue ended failed. The gate now reads
+and restores files through a workspace on the policy (`VerifiedEditPolicy.workspace`). The default
+is the host filesystem, unchanged. The real-repository harness supplies a container workspace that
+snapshots and restores the same `/testbed` files the tools edit, through `docker exec`. A restore
+that fails is no longer reported as a rollback. The agent is told its change is still in place,
+and the write is counted under `restoreFailures`, not `rollbacks`. This is implemented and
+unit-tested without Docker. It has **not yet been measured in a real-repository
+run**, so the results above were all produced without it.
 
 ---
 
@@ -674,20 +696,28 @@ import type { AgentDefinition, CrewDefinition, Task } from '@joule/shared';
 const joule = new Joule();
 await joule.initialize();
 
-const tools = ['file_read', 'file_write', 'shell_exec'];
+// Repository edits need room. These are the limits the real-repository crews use: with 16 turns
+// and the 100k-token 'high' budget, a lone implementer resolved none of 13 real issues because runs
+// ended before an edit landed, and an edit carries file content, so replies must be long.
+const agentLimits = {
+  allowedTools: ['file_read', 'file_write', 'shell_exec'],
+  maxIterations: 30,
+  wallTimeoutMs: 30 * 60_000,
+  maxOutputTokens: 12_000,
+};
 
 const implementer: AgentDefinition = {
-  id: 'implementer', role: 'Implementer', allowedTools: tools, maxIterations: 16,
+  id: 'implementer', role: 'Implementer', ...agentLimits,
   instructions: 'Fix the repository so its tests pass. Read what you need, correct the source, then run the tests.',
 };
 const reviewer: AgentDefinition = {
-  id: 'reviewer', role: 'Reviewer', allowedTools: tools, maxIterations: 10,
+  id: 'reviewer', role: 'Reviewer', ...agentLimits,
   instructions:
     'The previous agent believes the task is complete, but verification shows the repository is still failing. '
     + 'Assume a concrete defect exists: find the specific cause and fix it rather than describing it.',
 };
 const tester: AgentDefinition = {
-  id: 'tester', role: 'Tester', allowedTools: tools, maxIterations: 10,
+  id: 'tester', role: 'Tester', ...agentLimits,
   instructions: 'Both earlier attempts failed verification. Use the failing evidence to isolate and repair the remaining defect.',
 };
 
@@ -695,7 +725,11 @@ const crew: CrewDefinition = {
   name: 'staged-debug',
   strategy: 'staged_recovery',   // 'verified_full' runs every stage but still verifies between them
   agents: [implementer, reviewer, tester],
-  budget: 'high',
+  // Per agent; written out in full because a partial budget is filled from the 'medium' preset.
+  budget: {
+    maxTokens: 1_500_000, maxToolCalls: 160, maxLatencyMs: 30 * 60_000, maxEscalations: 5,
+    costCeilingUsd: 1.0, maxEnergyWh: 2.0, maxCarbonGrams: 0.8,
+  },
   budgetMode: 'fixed_per_agent', // a recovery stage does not shrink the primary's budget
 };
 
@@ -703,7 +737,8 @@ const task: Task = {
   id: 'fix-failing-suite',
   description: 'The test suite in this repository fails. Find the cause and fix it.',
   createdAt: new Date().toISOString(),
-  // The external check. Exit code 0 means done; anything else escalates.
+  // The external check. Exit code 0 means done; anything else escalates. Recovery agents see its
+  // output and its command; set `label` to name the check instead of showing the command.
   verifiedEdit: { command: 'npm test', cwd: '/path/to/repo', timeoutMs: 120_000 },
 };
 
@@ -958,13 +993,18 @@ system_insights:
 
 What the staged-recovery evidence does **not** cover:
 
+- **The real-repository runs had hidden-test access.** The escalation check was the SWE-bench
+  hidden-test checker, its output reached the agents, and the hidden tests were readable in the
+  container. See [the note under Results](#real-repositories).
 - **The real-repository result is one run per issue on 13 issues.** Staged 11/13 against
   `FULL_VERIFY` 9/13 rests on 4 discordant issues (p = 0.63); it shows that staging did not cost
   quality and that recovery happens, not that staging is more accurate. Per-issue outcomes vary
   from run to run. Three repetitions over a larger pool are the next measurement.
 - **The pool is three Python projects.** flask, pylint and pytest, selected by a self-test that
   admitted 13 of 15 candidates; django and sympy were left out for test-runner and runtime reasons.
-- **The gate does not protect container edits.** See [verified edits](#safety-verified-edits).
+- **Container-edit restore is unmeasured.** Every real-repository result here ran with a gate that
+  could not restore container-side files. Restoring them is now implemented and unit-tested, but
+  no real-repository run has used it yet. See [verified edits](#safety-verified-edits).
 - **The authored benchmark is saturated.** With the executor fixed, the lone implementer passes
   29/30, so it shows what staging costs, not whether recovery helps.
 - **One model, one provider.** Every crew number is DeepSeek V4 Flash on OpenRouter. No multi-model
@@ -985,12 +1025,13 @@ are documented as wrong rather than deleted; the largest set is listed under
 
 ## Current Status
 
-**Research prototype / experimental runtime.** 1456 tests passing across 109 files. Active
+**Research prototype / experimental runtime.** 1498 tests passing across 112 files. Active
 development — expect API refinements.
 
-Supported, on real repositories (13 SWE-bench Lite issues, one run each):
-- a verifier-informed reviewer recovers real failures (4 of 6 in the staged arm)
-- staging matches or beats an always-on crew's outcomes at lower cost (11/13 vs 9/13, −22%)
+Observed on real repositories, **with an oracle check the agents could see** (13 SWE-bench Lite
+issues, one run each):
+- staging did not lose outcomes to an always-on crew and cost less (11/13 vs 9/13, −22% estimated)
+- a second stage converted 4 of 6 failures, 3 of them after the implementer ran out of turns
 - an always-on specialist can break a fix that already passed; staging never starts it
 
 Supported, on authored fixtures:
@@ -1001,6 +1042,8 @@ Withdrawn (executor bug, see [what changed](#what-changed-on-2026-10-01)):
 - the benefit comes from the recovery role's framing, not from a second attempt
 
 Not established:
+- any real-repository result with a check that is not the hidden tests
+- that recovery comes from the check's evidence rather than from extra turns
 - staging as *more accurate* than an always-on crew (not significant at this sample size)
 - multi-model generalization
 - production reliability
@@ -1050,7 +1093,7 @@ Known limitations:
 ```bash
 pnpm install       # install dependencies
 pnpm build         # build all 9 packages
-pnpm test          # 1456 tests across 109 files
+pnpm test          # 1498 tests across 112 files
 pnpm dev           # watch mode
 ```
 
