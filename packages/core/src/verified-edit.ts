@@ -10,6 +10,10 @@
  *   - what state is currently verified?   (`baseline`: the last check that passed)
  *   - should this write be kept?          (re-run the check; restore if it regressed)
  *
+ * Files are read and restored through the policy's `workspace`: the host
+ * filesystem by default, or whatever the harness supplies when its write tools
+ * act elsewhere (the real-repository harness edits files inside a container).
+ *
  * It is opt-in: without a policy on the task, nothing here runs and behaviour is
  * unchanged. It deliberately does not merge patches, track provenance or resolve
  * conflicts — no experiment has produced conflict data to design those against.
@@ -17,8 +21,23 @@
 
 import { execFile } from 'node:child_process';
 import { existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
-import type { VerifiedEditPolicy } from '@joule/shared';
+import type { EditWorkspace, VerifiedEditPolicy } from '@joule/shared';
 import type { TraceLogger } from './trace-logger.js';
+
+/**
+ * The host filesystem, read and written as the gate always has.
+ *
+ * This is the default. A policy names another workspace only when its write
+ * tools act somewhere the host path would not reach, such as a repository
+ * inside a container.
+ */
+export const hostEditWorkspace: EditWorkspace = {
+  read: path => (existsSync(path) ? readFileSync(path, 'utf8') : null),
+  write: (path, content) => writeFileSync(path, content),
+  remove: path => {
+    if (existsSync(path)) unlinkSync(path);
+  },
+};
 
 /** Outcome of running the policy's check command. */
 export interface CheckResult {
@@ -30,6 +49,8 @@ export interface CheckResult {
 export interface VerifiedEditStats {
   checks: number;
   rollbacks: number;
+  /** Regressions the gate tried to undo but could not; never counted as rollbacks */
+  restoreFailures: number;
   /** Writes the gate reviewed */
   proposed: number;
   /** Writes that left the workspace verifying */
@@ -99,6 +120,7 @@ export class VerifiedEditGate {
   /** Whether the check has ever passed; undefined means "not established yet" */
   private baselinePassed: boolean | undefined;
   private rollbacks = 0;
+  private restoreFailures = 0;
   private checks = 0;
   private proposed = 0;
   private accepted = 0;
@@ -121,6 +143,7 @@ export class VerifiedEditGate {
     return {
       checks: this.checks,
       rollbacks: this.rollbacks,
+      restoreFailures: this.restoreFailures,
       proposed: this.proposed,
       accepted: this.accepted,
       acceptanceRate: this.proposed > 0 ? this.accepted / this.proposed : 0,
@@ -135,11 +158,16 @@ export class VerifiedEditGate {
     return tools.includes(toolName) && pathsIn(input).length > 0;
   }
 
+  /** Where guarded files are read from and restored to. */
+  private get workspace(): EditWorkspace {
+    return this.policy.workspace ?? hostEditWorkspace;
+  }
+
   /** Contents of the files this call will touch, so they can be put back. */
   snapshot(input: Record<string, unknown>): Map<string, string | null> {
     const before = new Map<string, string | null>();
     for (const path of pathsIn(input)) {
-      before.set(path, existsSync(path) ? readFileSync(path, 'utf8') : null);
+      before.set(path, this.workspace.read(path));
     }
     return before;
   }
@@ -173,17 +201,42 @@ export class VerifiedEditGate {
       return {
         kept: true,
         rolledBack: false,
-        message: `Verification did not pass after this edit: ${result.output.slice(-400)}`,
+        message: `${this.verificationName} did not pass after this edit: ${result.output.slice(-400)}`,
       };
     }
 
+    // Put every file back, and know which ones did not go back: a write that
+    // could not be undone must never be reported, to the agent or in the
+    // counts, as rolled back.
+    const unrestored: string[] = [];
     for (const [path, content] of snapshot) {
-      if (content === null) {
-        if (existsSync(path)) unlinkSync(path);
-      } else {
-        writeFileSync(path, content);
+      try {
+        if (content === null) {
+          this.workspace.remove(path);
+        } else {
+          this.workspace.write(path, content);
+        }
+      } catch (err) {
+        unrestored.push(`${path} (${err instanceof Error ? err.message : String(err)})`);
       }
     }
+
+    if (unrestored.length > 0) {
+      this.restoreFailures++;
+      // The verified state is no longer in the workspace, so there is nothing
+      // to protect until a check passes again: further writes are the repair.
+      this.baselinePassed = false;
+      this.log('verified_edit_restore_failed', { toolName, author, unrestored, output: result.output.slice(0, 400) });
+      return {
+        kept: true,
+        rolledBack: false,
+        message:
+          `Your edit turned a passing state into a failing one, and restoring the previous version FAILED for `
+          + `${unrestored.join('; ')}. Your change is still in place and the workspace is failing: repair or undo it. `
+          + `${this.outputName}: ${result.output.slice(-400)}`,
+      };
+    }
+
     this.rollbacks++;
     tally.rolledBack++;
     this.log('verified_edit_rolled_back', { toolName, author, rollbacks: this.rollbacks, output: result.output.slice(0, 400) });
@@ -193,8 +246,21 @@ export class VerifiedEditGate {
       rolledBack: true,
       message:
         `Your edit was rolled back: it turned a passing state into a failing one. `
-        + `The previous working version has been restored. Check output: ${result.output.slice(-400)}`,
+        + `The previous working version has been restored. ${this.outputName}: ${result.output.slice(-400)}`,
     };
+  }
+
+  /**
+   * How messages name the check. A policy label replaces the generic wording,
+   * so the agent is told which check judged its edit without being shown the
+   * command; the check's output is reported the same either way.
+   */
+  private get verificationName(): string {
+    return this.policy.label ? `Verification (${this.policy.label})` : 'Verification';
+  }
+
+  private get outputName(): string {
+    return this.policy.label ? `Output of ${this.policy.label}` : 'Check output';
   }
 
   /** Establish whether the workspace is passing before any edits happen. */

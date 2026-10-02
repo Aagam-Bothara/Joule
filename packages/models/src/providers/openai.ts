@@ -115,6 +115,10 @@ export class OpenAIProvider extends ModelProvider {
     };
     const reported = (response.usage as { cost?: unknown } | undefined)?.cost;
     const costUsd = typeof reported === 'number' && reported > 0 ? reported : this.calculateCost(request.model, tokenUsage);
+    const billedCostUsd = typeof reported === 'number' && Number.isFinite(reported) && reported >= 0 ? reported : undefined;
+    // OpenRouter names the host that served the call; recorded, never acted on.
+    const host = (response as { provider?: unknown }).provider;
+    const upstreamProvider = typeof host === 'string' && host.trim().length > 0 ? host.trim() : undefined;
     const lps = (choice as { logprobs?: { content?: Array<{ logprob: number }> | null } | null } | undefined)?.logprobs?.content;
     const meanLogprob = lps && lps.length > 0 ? lps.reduce((a, t) => a + t.logprob, 0) / lps.length : undefined;
 
@@ -126,6 +130,8 @@ export class OpenAIProvider extends ModelProvider {
       tokenUsage,
       latencyMs,
       costUsd,
+      ...(billedCostUsd !== undefined ? { billedCostUsd } : {}),
+      ...(upstreamProvider !== undefined ? { upstreamProvider } : {}),
       finishReason: choice?.finish_reason === 'stop' ? 'stop' : 'length',
       ...(meanLogprob !== undefined ? { meanLogprob } : {}),
       energyWh: getModelEnergy(request.model, tokenUsage),

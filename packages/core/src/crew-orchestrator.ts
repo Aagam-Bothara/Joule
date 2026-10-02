@@ -421,11 +421,9 @@ export class CrewOrchestrator {
    * Run the first agent, check the task's external verifier, and start the next
    * agent only if that check failed.
    *
-   * Measured on five repositories with planted defects: a lone agent stopped
-   * believing it was finished in eight of ten failures, having used one to five
-   * of sixteen available model calls. The agent's own account of its work is
-   * therefore not evidence, so every escalation here is decided by running the
-   * task's check against the workspace.
+   * An agent reporting that it finished is not evidence that the task is done,
+   * so every escalation here is decided by running the task's check against
+   * the workspace, never by the agent's own account of its work.
    *
    * A stage that is never needed is not executed at all: no context is built,
    * no envelope is drawn, no model is called. It is reported as skipped rather
@@ -571,7 +569,11 @@ export class CrewOrchestrator {
     // than being handed an invented failure to chase.
     const passed = verification?.passed === true;
     sections.push(passed ? '[Verification result]' : '[Verification failure]');
-    sections.push(`Command: ${policy.command}${policy.cwd ? ` (in ${policy.cwd})` : ''}`);
+    // A labelled check is named, not shown: its command line can point at
+    // files the agent should not see. The output below is reported either way.
+    sections.push(policy.label
+      ? `Check: ${policy.label}`
+      : `Command: ${policy.command}${policy.cwd ? ` (in ${policy.cwd})` : ''}`);
     sections.push(passed ? 'Result: PASSED' : 'Result: FAILED');
     sections.push(verification ? asText(verification.output, MAX_EVIDENCE_CHARS) : '(no output captured)');
     sections.push('');
@@ -581,7 +583,9 @@ export class CrewOrchestrator {
       ? 'External verification currently passes. You are running because this configuration executes every '
         + 'stage. Inspect the repository as your role describes, and change it only if you identify a concrete defect.'
       : 'The previous agent stopped, but the check above still fails, so the work is not done. '
-        + 'Treat the repository as still defective, find the specific cause, correct it, and run the check again.');
+        + 'Treat the repository as still defective, find the specific cause, correct it, and '
+        // An agent cannot rerun a check it was only given the name of.
+        + (policy.label ? 'confirm the fix with the tests you can run.' : 'run the check again.'));
 
     return { ...task, description: sections.join('\n') };
   }

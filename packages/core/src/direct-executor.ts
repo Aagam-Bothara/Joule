@@ -126,6 +126,24 @@ function callSignature(toolName: string, args: Record<string, unknown>): string 
   return `${toolName}(${stable})`;
 }
 
+/** Longest tool-argument preview carried on a lifecycle event. */
+const TOOL_ARGS_PREVIEW_CHARS = 2_000;
+
+/**
+ * A tool call's arguments as bounded JSON for the lifecycle record. Bounded
+ * here so a large write does not bloat every result; not redacted here, so a
+ * consumer that persists it must redact it.
+ */
+function argsPreview(args: Record<string, unknown>): string {
+  let text: string;
+  try {
+    text = JSON.stringify(args) ?? '';
+  } catch {
+    text = '[unserializable arguments]';
+  }
+  return text.length > TOOL_ARGS_PREVIEW_CHARS ? `${text.slice(0, TOOL_ARGS_PREVIEW_CHARS)}…` : text;
+}
+
 /** Default wall-clock timeout for the entire execution loop (5 minutes). */
 const DEFAULT_WALL_TIMEOUT_MS = 5 * 60 * 1000;
 
@@ -241,6 +259,10 @@ export class DirectExecutor {
     ];
 
     let totalTokens = 0;
+    // What the provider said it billed, kept apart from the token-based
+    // estimate the budget uses; only calls that reported a cost contribute.
+    let billedCostUsd = 0;
+    let billedModelCalls = 0;
     let iteration = 0;
     let finalAnswer: string | undefined;
     let lastError: string | undefined;
@@ -335,7 +357,17 @@ export class DirectExecutor {
         lifecycle.fail(err, { iteration, phase: 'model' });
         break;
       }
-      lifecycle.modelEnd(response.model, { iteration, tier: decision.tier });
+      // The serving host, when a router names it: recorded so a run can be
+      // audited per host, never used to choose one.
+      lifecycle.modelEnd(response.model, {
+        iteration,
+        tier: decision.tier,
+        ...(response.upstreamProvider ? { host: response.upstreamProvider } : {}),
+      });
+      if (typeof response.billedCostUsd === 'number') {
+        billedCostUsd += response.billedCostUsd;
+        billedModelCalls++;
+      }
 
       const llmDuration = monotonicNow() - llmSpanStart;
       traceSpans.push({
@@ -433,17 +465,21 @@ export class DirectExecutor {
           const toolSpanStart = monotonicNow();
           // Only real tool work counts as waiting; the circuit-breaker and
           // argument checks above are in-memory and stay out of the timeline.
-          lifecycle.toolStart(toolCall.toolName, { iteration });
+          // The arguments, bounded, so an audit can see what was run or read and
+          // not only which tool. Consumers that persist them redact them first.
+          lifecycle.toolStart(toolCall.toolName, { iteration, args: argsPreview(sanitizedArgs) });
           // What the call did, reported on the closing lifecycle event. Without
           // it a record shows that an agent called `file_write` but not whether
           // the write landed — the difference between an agent that tried to
           // contribute and one that succeeded.
           const outcome: { ok?: boolean; rolledBack?: boolean; error?: string } = {};
-          // Opt-in: remember the file this write is about to replace, so a
-          // regression can be undone.
           const guarded = gate?.guards(toolCall.toolName, sanitizedArgs) === true;
-          const before = guarded ? gate!.snapshot(sanitizedArgs) : undefined;
           try {
+            // Opt-in: remember the file this write is about to replace, so a
+            // regression can be undone. Inside the try: a workspace that cannot
+            // be read (a stopped container) fails this call, unwritten, rather
+            // than the whole run.
+            const before = guarded ? gate!.snapshot(sanitizedArgs) : undefined;
             const result = await this.tools.invoke({
               toolName: toolCall.toolName,
               input: sanitizedArgs,
@@ -623,6 +659,7 @@ export class DirectExecutor {
       lifecycle: lifecycleEvents,
       lifecycleMetrics,
       ...(gate ? { verifiedEdits: gate.stats } : {}),
+      ...(billedModelCalls > 0 ? { billedCostUsd, billedModelCalls } : {}),
     };
   }
 

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { z } from 'zod';
@@ -10,7 +10,7 @@ import { ToolRegistry } from '../src/tool-registry.js';
 import { ModelProviderRegistry } from '@joule/models';
 import { fileWriteTool } from '@joule/tools';
 import { ModelTier, generateId } from '@joule/shared';
-import type { Task, RoutingConfig, AgentDefinition } from '@joule/shared';
+import type { Task, RoutingConfig, AgentDefinition, EditWorkspace } from '@joule/shared';
 
 // ---------------------------------------------------------------------------
 // Mock helpers
@@ -1083,6 +1083,181 @@ describe('DirectExecutor', () => {
       expect(closes[0].metadata).toMatchObject({ ok: true });
       // The reverted write is distinguishable from the one that stood.
       expect(closes[1].metadata).toMatchObject({ ok: false, rolledBack: true });
+    });
+
+    // A repository the write tool reaches but the host path does not: the
+    // real-repository harness edits files inside a container. Here the
+    // "container" is the temp dir, reached only through the tool and the
+    // workspace; the tool's relative path means nothing on the host.
+    describe('with a workspace the harness supplies', () => {
+      const repoWrite = () => ({
+        name: 'repo_write',
+        description: 'Write a file inside the repository',
+        inputSchema: z.object({ path: z.string(), content: z.string() }),
+        outputSchema: z.any(),
+        execute: async (input: { path: string; content: string }) => {
+          writeFileSync(join(dir, input.path), input.content);
+          return { repoPath: input.path };
+        },
+      });
+      const containerWorkspace = (): EditWorkspace => ({
+        read: p => (existsSync(join(dir, p)) ? readFileSync(join(dir, p), 'utf8') : null),
+        write: (p, c) => writeFileSync(join(dir, p), c),
+        remove: p => { if (existsSync(join(dir, p))) unlinkSync(join(dir, p)); },
+      });
+      const repoWriteCall = (content: string) =>
+        JSON.stringify({ tool_calls: [{ toolName: 'repo_write', toolArgs: { path: 'solution.py', content } }] });
+      const build = (responses: string[]) => {
+        const built = buildExecutor(responses);
+        built.tools.register(repoWrite(), 'builtin');
+        return built;
+      };
+
+      it('restores the repository file, not a host path, after a regression', async () => {
+        const { executor, envelope } = build([
+          repoWriteCall('# GOOD v1'),
+          repoWriteCall('# BROKEN by the tester'),
+          '{"answer": "done"}',
+        ]);
+
+        const result = await executor.execute(
+          { ...makeTask(), verifiedEdit: { ...policy(), workspace: containerWorkspace() } },
+          envelope, makeAgent({ allowedTools: ['repo_write'] }),
+        );
+
+        expect(readFileSync(join(dir, 'solution.py'), 'utf8')).toBe('# GOOD v1');
+        expect(result.verifiedEdits).toMatchObject({ rollbacks: 1, proposed: 2, accepted: 1, verified: true });
+        // Nothing was read from or written to the host path the tool was given.
+        expect(existsSync('solution.py')).toBe(false);
+      });
+
+      it('tells the agent its regression stands when the restore fails', async () => {
+        const { executor, envelope, provider } = build([
+          repoWriteCall('# GOOD v1'),
+          repoWriteCall('# BROKEN by the tester'),
+          '{"answer": "done"}',
+        ]);
+        const cannotRestore: EditWorkspace = {
+          ...containerWorkspace(),
+          write: () => { throw new Error('container is not running'); },
+        };
+
+        const result = await executor.execute(
+          { ...makeTask(), verifiedEdit: { ...policy(), workspace: cannotRestore } },
+          envelope, makeAgent({ allowedTools: ['repo_write'] }),
+        );
+
+        expect(readFileSync(join(dir, 'solution.py'), 'utf8')).toBe('# BROKEN by the tester');
+        expect(result.verifiedEdits).toMatchObject({ rollbacks: 0, restoreFailures: 1, proposed: 2, accepted: 1 });
+        const closes = (result.lifecycle ?? []).filter(e => e.from === 'tool_wait' && e.tool === 'repo_write');
+        expect(closes[1].metadata).toMatchObject({ ok: true, rolledBack: false });
+        // What the model was told after the second write.
+        const seen = JSON.stringify(provider.chat.mock.calls.at(-1));
+        expect(seen).toContain('restoring the previous version FAILED');
+        expect(seen).not.toContain('has been restored');
+      });
+
+      it('fails the write, unexecuted, when the workspace cannot be read', async () => {
+        const { executor, envelope } = build([
+          repoWriteCall('# GOOD v1'),
+          '{"answer": "done"}',
+        ]);
+        const unreachable: EditWorkspace = {
+          ...containerWorkspace(),
+          read: () => { throw new Error('container is not running'); },
+        };
+
+        const result = await executor.execute(
+          { ...makeTask(), verifiedEdit: { ...policy(), workspace: unreachable } },
+          envelope, makeAgent({ allowedTools: ['repo_write'] }),
+        );
+
+        // The run carries on; the write that could not be protected never ran.
+        expect(result.status).toBe('completed');
+        expect(existsSync(join(dir, 'solution.py'))).toBe(false);
+        expect(result.verifiedEdits).toMatchObject({ proposed: 0 });
+        const closes = (result.lifecycle ?? []).filter(e => e.from === 'tool_wait' && e.tool === 'repo_write');
+        expect(closes).toHaveLength(1);
+        expect(closes[0].metadata).toMatchObject({ ok: false, error: 'container is not running' });
+      });
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Audit data: what the provider billed, which host served each call, and
+  // what each tool call was asked to do.
+  // -------------------------------------------------------------------------
+
+  describe('audit data', () => {
+    /** Replies in order, each with the billing and host fields OpenRouter may add. */
+    const withBilling = (provider: ReturnType<typeof buildExecutor>['provider'], replies: Array<{ content: string; billed?: number; host?: string }>) => {
+      let i = 0;
+      provider.chat.mockImplementation(async () => {
+        const r = replies[Math.min(i++, replies.length - 1)];
+        return {
+          model: 'test-slm', provider: 'ollama', tier: ModelTier.SLM, content: r.content,
+          tokenUsage: { promptTokens: 100, completionTokens: 50, totalTokens: 150 },
+          latencyMs: 5, costUsd: 0.001, finishReason: 'stop' as const,
+          ...(r.billed !== undefined ? { billedCostUsd: r.billed } : {}),
+          ...(r.host !== undefined ? { upstreamProvider: r.host } : {}),
+        };
+      });
+    };
+
+    it('sums the billed cost apart from the estimate, counting only calls that reported one', async () => {
+      const { executor, envelope, provider } = buildExecutor([]);
+      withBilling(provider, [
+        { content: '{"tool_calls": [{"toolName": "test_tool", "toolArgs": {"query": "a"}}]}', billed: 0.002, host: 'StreamLake' },
+        { content: '{"tool_calls": [{"toolName": "test_tool", "toolArgs": {"query": "b"}}]}' },
+        { content: '{"answer": "done"}', billed: 0.0005, host: 'OpenInference' },
+      ]);
+
+      const result = await executor.execute(makeTask(), envelope, makeAgent({ allowedTools: ['test_tool'] }));
+
+      expect(result.billedCostUsd).toBeCloseTo(0.0025, 10);
+      expect(result.billedModelCalls).toBe(2);
+      expect(result.lifecycleMetrics?.modelCalls).toBe(3);
+      // The token-based estimate is untouched by what was billed.
+      expect(result.budgetUsed.costUsd).not.toBeCloseTo(0.0025, 10);
+    });
+
+    it('reports no billed cost when no call reported one', async () => {
+      const { executor, envelope } = buildExecutor(['{"answer": "done"}']);
+      const result = await executor.execute(makeTask(), envelope, makeAgent());
+      expect(result.billedCostUsd).toBeUndefined();
+      expect(result.billedModelCalls).toBeUndefined();
+    });
+
+    it('records the serving host on each model call that names one', async () => {
+      const { executor, envelope, provider } = buildExecutor([]);
+      withBilling(provider, [
+        { content: '{"tool_calls": [{"toolName": "test_tool", "toolArgs": {"query": "a"}}]}', host: 'StreamLake' },
+        { content: '{"answer": "done"}' },
+      ]);
+
+      const result = await executor.execute(makeTask(), envelope, makeAgent({ allowedTools: ['test_tool'] }));
+
+      const ends = (result.lifecycle ?? []).filter(e => e.from === 'model_running');
+      expect(ends).toHaveLength(2);
+      expect(ends[0].metadata).toMatchObject({ host: 'StreamLake' });
+      expect(ends[1].metadata?.host).toBeUndefined();
+    });
+
+    it('records a bounded copy of each tool call\'s arguments', async () => {
+      const long = 'x'.repeat(5_000);
+      const { executor, envelope } = buildExecutor([
+        '{"tool_calls": [{"toolName": "test_tool", "toolArgs": {"query": "cat /tmp/test.patch"}}]}',
+        `{"tool_calls": [{"toolName": "test_tool", "toolArgs": {"query": "${long}"}}]}`,
+        '{"answer": "done"}',
+      ]);
+
+      const result = await executor.execute(makeTask(), envelope, makeAgent({ allowedTools: ['test_tool'] }));
+
+      const starts = (result.lifecycle ?? []).filter(e => e.to === 'tool_wait');
+      expect(starts[0].metadata).toMatchObject({ args: '{"query":"cat /tmp/test.patch"}' });
+      const bounded = String(starts[1].metadata?.args);
+      expect(bounded.length).toBeLessThanOrEqual(2_001);
+      expect(bounded.endsWith('…')).toBe(true);
     });
   });
 

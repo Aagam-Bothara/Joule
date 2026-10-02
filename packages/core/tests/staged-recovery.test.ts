@@ -286,9 +286,35 @@ describe('staged recovery', { timeout: 60_000 }, () => {
 
     expect(prompt).toContain('[Verification failure]');
     expect(prompt).toContain('node check.js');
+    expect(prompt).toContain('run the check again');
     expect(prompt).toContain('[Previous agent: Implementer]');
     expect(prompt).toContain('I wrote the fix and it works');
     expect(prompt).toContain('[Current recovery objective]');
+  });
+
+  it('8a. names a labelled check instead of printing its command', async () => {
+    const { orchestrator, crew, provider } = build({
+      Implementer: ['{"answer": "I wrote the fix and it works"}'],
+      Reviewer: [write('GOOD'), '{"answer": "fixed"}'],
+    });
+
+    await run(orchestrator, crew, { verifiedEdit: { ...policy(), label: "the repository's check" } });
+
+    const reviewerCall = provider.chat.mock.calls.find(
+      c => ((c[0] as { system?: string }).system ?? '').includes('You are: Reviewer'),
+    );
+    const prompt = (reviewerCall![0] as { messages: Array<{ content: string }> }).messages
+      .map(m => m.content).join('\n');
+
+    expect(prompt).toContain('[Verification failure]');
+    expect(prompt).toContain("Check: the repository's check");
+    expect(prompt).toContain('Result: FAILED');
+    expect(prompt).not.toContain('node check.js');
+    expect(prompt).not.toContain('Command:');
+    expect(prompt).not.toContain(`(in ${dir})`);
+    // It cannot be told to rerun a check it was only given the name of.
+    expect(prompt).toContain('confirm the fix with the tests you can run');
+    expect(prompt).not.toContain('run the check again');
   });
 
   it('8b. does not paste the previous agent"s tool-call JSON into the next prompt', async () => {

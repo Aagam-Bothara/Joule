@@ -54,7 +54,19 @@ export interface ModelResponse {
   content: string;
   tokenUsage: TokenUsage;
   latencyMs: number;
+  /** Billed cost when the provider reports it, otherwise the local price-table estimate */
   costUsd: number;
+  /**
+   * The amount the provider says it billed for this call (OpenRouter's
+   * `usage.cost`). Absent when the provider did not report one, so a sum over
+   * calls can be told apart from an estimate.
+   */
+  billedCostUsd?: number;
+  /**
+   * The upstream host that actually served the call, when a router reports it
+   * (OpenRouter's top-level `provider`, e.g. "DeepInfra"). Recorded only.
+   */
+  upstreamProvider?: string;
   confidence?: number;
   finishReason: 'stop' | 'length' | 'error';
   /** Mean log-probability over the completion tokens, when the provider returns logprobs */

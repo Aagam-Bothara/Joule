@@ -39,9 +39,40 @@ export interface VerifiedEditPolicy {
   command: string;
   /** Directory to run it in */
   cwd?: string;
+  /**
+   * What agents are told the check is, in place of `command`, e.g. "the
+   * repository's check". Without it, messages show the command as before.
+   * It changes only how the check is named; its output is reported unchanged.
+   */
+  label?: string;
   timeoutMs?: number;
   /** Tools treated as writes; defaults to file_write / file_edit / repo_write / repo_edit */
   tools?: string[];
+  /**
+   * Where the files a guarded write names actually live, so the gate can read
+   * them before the write and put them back after a regression. Defaults to
+   * the host filesystem. A harness whose tools edit files somewhere else (for
+   * example inside a container) supplies its own. Runtime-only: it holds
+   * functions, so it does not survive serialization of the task.
+   */
+  workspace?: EditWorkspace;
+}
+
+/**
+ * The files the verified-edit gate snapshots and restores.
+ *
+ * Synchronous on purpose: the gate snapshots immediately before the tool runs
+ * and restores immediately after the check, with nothing in between that may
+ * interleave. Implementations throw when they cannot do what is asked; the
+ * gate never treats a failed restore as a rollback.
+ */
+export interface EditWorkspace {
+  /** Current content of `path`, or null when no such file exists */
+  read(path: string): string | null;
+  /** Replace the content of `path`, creating it if needed */
+  write(path: string, content: string): void;
+  /** Delete `path`; a missing file is not an error */
+  remove(path: string): void;
 }
 
 export type TaskStatus =
@@ -115,10 +146,20 @@ export interface TaskResult {
   lifecycle?: AgentLifecycleEvent[];
   /** Model / tool-wait timing rollup over `lifecycle` */
   lifecycleMetrics?: LifecycleMetrics;
+  /**
+   * Sum of what the provider reported it billed for this run's model calls
+   * (OpenRouter's `usage.cost`), kept apart from the token-based estimate in
+   * `budgetUsed.costUsd`. Absent when no call reported a billed cost.
+   */
+  billedCostUsd?: number;
+  /** How many model calls reported a billed cost; compare with lifecycleMetrics.modelCalls */
+  billedModelCalls?: number;
   /** Verified-edit gate activity, when a policy was set on the task */
   verifiedEdits?: {
     checks: number;
     rollbacks: number;
+    /** Regressions the gate could not undo (a restore failed); never counted as rollbacks */
+    restoreFailures?: number;
     /** Writes the gate reviewed */
     proposed: number;
     /** Writes that left the workspace verifying */
