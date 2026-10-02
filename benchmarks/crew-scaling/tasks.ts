@@ -97,8 +97,17 @@ export interface PreparedTask {
    * real repository's files live inside its container.
    */
   workspace?: EditWorkspace;
-  /** Rewrites the tests, runs them, and reports whether they all passed. */
-  verify(): { success: boolean; output: string };
+  /**
+   * Measurement after each staged stage (see `VerifiedEditPolicy.observeStage`):
+   * recorded on the stage report, never shown to an agent.
+   */
+  observeStage?: VerifiedEditPolicy['observeStage'];
+  /**
+   * Rewrites the tests, runs them, and reports whether they all passed.
+   * `record` is merged into the run's record as is (fields a workload adds,
+   * such as a hidden-test score).
+   */
+  verify(): { success: boolean; output: string; record?: object };
 }
 
 /**
@@ -116,6 +125,7 @@ export function gatePolicy(prepared: PreparedTask): VerifiedEditPolicy {
     timeoutMs: 900_000,
     ...(prepared.verifyLabel ? { label: prepared.verifyLabel } : {}),
     ...(prepared.workspace ? { workspace: prepared.workspace } : {}),
+    ...(prepared.observeStage ? { observeStage: prepared.observeStage } : {}),
   };
 }
 

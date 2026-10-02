@@ -126,6 +126,11 @@ export interface StageReport {
   costUsd?: number;
   /** The external check after this stage ran */
   verification?: { passed: boolean; output: string };
+  /**
+   * What the policy's `observeStage` recorded after this stage, for analysis
+   * only: nothing in the run reads it, and no agent sees it.
+   */
+  observation?: Record<string, unknown>;
 }
 
 /** What a staged-recovery crew did, and which stage settled it. */

@@ -105,6 +105,47 @@ const RECOVERY_TESTER: AgentDefinition = {
   maxRetries: 0,
 };
 
+/** The three roles, for experiments that run one of them on its own (branch points). */
+export const SWE_AGENTS = {
+  implementer: PRIMARY,
+  reviewer: RECOVERY_REVIEWER,
+  tester: RECOVERY_TESTER,
+} as const;
+
+/**
+ * Writes the reproduction test the `repro` check runs. It sees the issue and
+ * the repository and nothing else: no hidden test, no check, no other agent's
+ * work. Same tools and allowance as the implementer, so a repro test is never
+ * cut short by limits the implementer would not have had.
+ */
+export const REPRO_AUTHOR: AgentDefinition = {
+  id: 'repro-author',
+  role: 'Reproduction test author',
+  instructions:
+    'You write an automated test that reproduces a reported bug. You do not fix the bug. A good reproduction test '
+    + 'fails on the current code for exactly the reason the issue describes, and passes once the bug is fixed as the '
+    + 'issue asks. Read the relevant source with repo_read and repo_shell, write the test with repo_write, and run it '
+    + 'with repo_shell to confirm it fails for the right reason.',
+  allowedTools: TOOLS,
+  maxIterations: PRIMARY_ITERATIONS,
+  wallTimeoutMs: STAGE_WALL_TIMEOUT_MS,
+  maxOutputTokens: OUTPUT_TOKENS,
+  maxRetries: 0,
+};
+
+/** One agent on its own, with exactly the allowance it has inside the crews. */
+export function singleAgentCrew(agent: AgentDefinition, name: string): CrewDefinition {
+  return {
+    name,
+    description: `${agent.role} alone`,
+    strategy: 'sequential',
+    agents: [agent],
+    budget: REAL_REPO_BUDGET,
+    budgetMode: 'fixed_per_agent',
+    aggregation: 'last',
+  };
+}
+
 export function sweCrew(arm: ComparisonArm): CrewDefinition {
   const base = {
     budget: REAL_REPO_BUDGET,

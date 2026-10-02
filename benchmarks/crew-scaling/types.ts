@@ -149,6 +149,16 @@ export interface CrewScalingRecord {
   proposedWrites?: number;
   acceptedWrites?: number;
   rolledBackWrites?: number;
+  /**
+   * Real-repository runs: which check the gate and escalation used, and the
+   * hidden SWE-bench score of the final state, measured apart from that check
+   * (benchmarks/real-repo/workload.ts, `RealRepoRunRecord`).
+   */
+  checkMode?: 'oracle' | 'repro' | 'visible-f2p';
+  checkFaithful?: boolean;
+  hidden?: { resolved: boolean; f2pPassed: number; f2pTotal: number; p2pFailed: number; p2pTotal: number; error?: string };
+  checkFinalPassed?: boolean;
+  stage1Hidden?: { resolved: boolean; f2pPassed: number; f2pTotal: number; p2pFailed: number; p2pTotal: number; error?: string };
   agentResults: AgentContribution[];
 }
 

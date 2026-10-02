@@ -101,6 +101,23 @@ function registerProvider(joule: Joule, provider: string, model: string): void {
   }));
 }
 
+/**
+ * The same runtime `runCrewScaling` builds — routing, provider, tools — for
+ * experiments that run single agents outside it. Shut it down when done.
+ */
+export async function startRuntime(provider: string, model: string, tools: ToolDefinition[]): Promise<Joule> {
+  const joule = buildJoule(provider, model);
+  await joule.initialize();
+  try {
+    registerProvider(joule, provider, model);
+  } catch (err) {
+    await joule.shutdown();
+    throw err;
+  }
+  for (const tool of tools) joule.registerTool(tool);
+  return joule;
+}
+
 function toRecord(args: {
   runId: string;
   task: ScalingWorkload;
@@ -110,7 +127,7 @@ function toRecord(args: {
   joulTask: Task;
   crew: CrewResult;
   jctMs: number;
-  verdict: { success: boolean; output: string };
+  verdict: { success: boolean; output: string; record?: object };
 }): CrewScalingRecord {
   const contributions = args.crew.agentResults.map(contributionOf);
   const sum = (pick: (c: AgentContribution) => number): number => contributions.reduce((s, c) => s + pick(c), 0);
@@ -145,6 +162,8 @@ function toRecord(args: {
       acceptedWrites: sum(c => c.acceptedWrites ?? 0),
       rolledBackWrites: sum(c => c.rolledBackWrites ?? 0),
     } : {}),
+    // Fields the workload measured itself (a real repository's hidden score).
+    ...(args.verdict.record ?? {}),
     agentResults: contributions,
   };
 }

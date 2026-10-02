@@ -96,6 +96,69 @@ function asText(value: unknown, max: number): string {
   return truncate(text, max);
 }
 
+/** A check's result as a later stage is shown it. */
+export interface StageEvidence {
+  passed: boolean;
+  output: string;
+}
+
+/** The check's result, cut to what a recovery agent is handed. */
+export function stageEvidence(checked: { passed: boolean; output: string }): StageEvidence {
+  return { passed: checked.passed, output: truncate(checked.output, MAX_EVIDENCE_CHARS) };
+}
+
+/**
+ * The task, plus what the earlier stages did and why the check still fails.
+ *
+ * This is exactly what `staged_recovery` and `verified_full` hand a recovery
+ * stage; it is exported so an experiment can give a single agent the same
+ * evidence outside a crew. The blackboard already carries a short excerpt of
+ * each agent's answer, but a recovery agent needs the verifier's own output —
+ * the command that ran and what it printed — which is the part that says where
+ * to look. Everything is serialized explicitly, so a structured value never
+ * reaches an agent as "[object Object]".
+ */
+export function recoveryTask(
+  task: Task,
+  policy: VerifiedEditPolicy,
+  previous: readonly AgentResult[],
+  verification: StageEvidence | undefined,
+): Task {
+  const sections: string[] = [task.description, ''];
+
+  for (const result of previous) {
+    sections.push(`[Previous agent: ${result.role}]`);
+    sections.push(proseOnly(asText(result.taskResult.result, MAX_EVIDENCE_CHARS)));
+    if (result.taskResult.error) sections.push(`(this agent ended with an error: ${result.taskResult.error})`);
+    sections.push('');
+  }
+
+  // A passing check is reported as passing. An agent that is running only
+  // because this configuration runs every stage is told exactly that, rather
+  // than being handed an invented failure to chase.
+  const passed = verification?.passed === true;
+  sections.push(passed ? '[Verification result]' : '[Verification failure]');
+  // A labelled check is named, not shown: its command line can point at
+  // files the agent should not see. The output below is reported either way.
+  sections.push(policy.label
+    ? `Check: ${policy.label}`
+    : `Command: ${policy.command}${policy.cwd ? ` (in ${policy.cwd})` : ''}`);
+  sections.push(passed ? 'Result: PASSED' : 'Result: FAILED');
+  sections.push(verification ? asText(verification.output, MAX_EVIDENCE_CHARS) : '(no output captured)');
+  sections.push('');
+
+  sections.push(passed ? '[Current objective]' : '[Current recovery objective]');
+  sections.push(passed
+    ? 'External verification currently passes. You are running because this configuration executes every '
+      + 'stage. Inspect the repository as your role describes, and change it only if you identify a concrete defect.'
+    : 'The previous agent stopped, but the check above still fails, so the work is not done. '
+      + 'Treat the repository as still defective, find the specific cause, correct it, and '
+      // An agent cannot rerun a check it was only given the name of.
+      + (policy.label ? 'confirm the fix with the tests you can run.' : 'run the check again.'));
+
+  return { ...task, description: sections.join('\n') };
+}
+
 const MANAGER_DELEGATION_PROMPT = `You are the manager agent. Analyze the task and delegate to your workers.
 
 Available workers:
@@ -504,7 +567,7 @@ export class CrewOrchestrator {
 
       // The decision to stop belongs to the check, not to the agent.
       const checked = await runVerification(policy);
-      verification = { passed: checked.passed, output: truncate(checked.output, MAX_EVIDENCE_CHARS) };
+      verification = stageEvidence(checked);
 
       const metrics = agentResult.taskResult.lifecycleMetrics;
       const edits = agentResult.taskResult.verifiedEdits;
@@ -521,6 +584,16 @@ export class CrewOrchestrator {
       stage.tokensUsed = agentResult.budgetUsed?.tokensUsed;
       stage.costUsd = agentResult.budgetUsed?.costUsd;
       stage.verification = verification;
+
+      // Measurement only: recorded on the report, read by nothing in the run.
+      if (policy.observeStage) {
+        try {
+          const observed = await policy.observeStage({ stage: stage.stage, role: agent.role, passed: verification.passed });
+          if (observed !== undefined) stage.observation = observed;
+        } catch (err) {
+          stage.observation = { error: err instanceof Error ? err.message : String(err) };
+        }
+      }
 
       if (verification.passed && solvedAtStage === undefined) {
         solvedAtStage = stage.stage;
@@ -540,54 +613,14 @@ export class CrewOrchestrator {
     };
   }
 
-  /**
-   * The task, plus what the earlier stages did and why the check still fails.
-   *
-   * The blackboard already carries a short excerpt of each agent's answer, but
-   * a recovery agent needs the verifier's own output — the command that ran and
-   * what it printed — which is the part that says where to look. Everything is
-   * serialized explicitly, so a structured value never reaches an agent as
-   * "[object Object]".
-   */
+  /** See `recoveryTask`; kept as a method so the strategy reads as before. */
   private withRecoveryContext(
     task: Task,
     policy: VerifiedEditPolicy,
     previous: readonly AgentResult[],
-    verification: { passed: boolean; output: string } | undefined,
+    verification: StageEvidence | undefined,
   ): Task {
-    const sections: string[] = [task.description, ''];
-
-    for (const result of previous) {
-      sections.push(`[Previous agent: ${result.role}]`);
-      sections.push(proseOnly(asText(result.taskResult.result, MAX_EVIDENCE_CHARS)));
-      if (result.taskResult.error) sections.push(`(this agent ended with an error: ${result.taskResult.error})`);
-      sections.push('');
-    }
-
-    // A passing check is reported as passing. An agent that is running only
-    // because this configuration runs every stage is told exactly that, rather
-    // than being handed an invented failure to chase.
-    const passed = verification?.passed === true;
-    sections.push(passed ? '[Verification result]' : '[Verification failure]');
-    // A labelled check is named, not shown: its command line can point at
-    // files the agent should not see. The output below is reported either way.
-    sections.push(policy.label
-      ? `Check: ${policy.label}`
-      : `Command: ${policy.command}${policy.cwd ? ` (in ${policy.cwd})` : ''}`);
-    sections.push(passed ? 'Result: PASSED' : 'Result: FAILED');
-    sections.push(verification ? asText(verification.output, MAX_EVIDENCE_CHARS) : '(no output captured)');
-    sections.push('');
-
-    sections.push(passed ? '[Current objective]' : '[Current recovery objective]');
-    sections.push(passed
-      ? 'External verification currently passes. You are running because this configuration executes every '
-        + 'stage. Inspect the repository as your role describes, and change it only if you identify a concrete defect.'
-      : 'The previous agent stopped, but the check above still fails, so the work is not done. '
-        + 'Treat the repository as still defective, find the specific cause, correct it, and '
-        // An agent cannot rerun a check it was only given the name of.
-        + (policy.label ? 'confirm the fix with the tests you can run.' : 'run the check again.'));
-
-    return { ...task, description: sections.join('\n') };
+    return recoveryTask(task, policy, previous, verification);
   }
 
   // ---------------------------------------------------------------------------

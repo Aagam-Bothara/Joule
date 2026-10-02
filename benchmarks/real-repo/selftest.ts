@@ -12,11 +12,19 @@
  * task pool, and it runs before any money is spent.
  *
  *   npx tsx benchmarks/real-repo/selftest.ts [instanceId ...]
+ *   npx tsx benchmarks/real-repo/selftest.ts --django-local --out benchmarks/experiments/real-repo-heldout/selftest.json --cleanup
+ *
+ * `--django-local` takes every Django instance whose SWE-bench image is
+ * already present locally (nothing is pulled). Results are written after each
+ * instance, and `--resume` skips instances already in the output file, so a
+ * long run can be stopped and continued. `--cleanup` removes each selftest
+ * container once its instance is checked.
  */
 
-import { writeFileSync, mkdirSync } from 'node:fs';
-import { join, resolve } from 'node:path';
-import { inRepo, loadInstances, prepareInstance, type SweItem } from './workload.js';
+import { spawnSync } from 'node:child_process';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+import { containerFor, imageFor, inRepo, loadInstances, prepareInstance, type SweItem } from './workload.js';
 
 export interface InstanceCheck {
   instanceId: string;
@@ -28,11 +36,11 @@ export interface InstanceCheck {
   note?: string;
 }
 
-export function checkInstance(item: SweItem): InstanceCheck {
+export function checkInstance(item: SweItem, slot = 'selftest'): InstanceCheck {
   const started = Date.now();
   const base = { instanceId: item.instance_id, repo: item.repo };
   try {
-    const prepared = prepareInstance(item, 'selftest');
+    const prepared = prepareInstance(item, slot);
     const atBase = prepared.verify();
 
     const applied = inRepo(prepared.container, 'git apply --whitespace=nowarn -', 60_000, item.patch);
@@ -61,29 +69,62 @@ export function checkInstance(item: SweItem): InstanceCheck {
   }
 }
 
+/** Images present locally, as `repository:tag`. Nothing is pulled. */
+export function localImages(): Set<string> {
+  const r = spawnSync('docker', ['images', '--format', '{{.Repository}}:{{.Tag}}'], { encoding: 'utf8', windowsHide: true });
+  return new Set((r.stdout ?? '').split('\n').map(s => s.trim()).filter(Boolean));
+}
+
+/** Django instances whose image is already local, in instance-id order. */
+export function localDjangoCandidates(all: readonly SweItem[], images: ReadonlySet<string>): SweItem[] {
+  return all
+    .filter(i => i.repo === 'django/django' && images.has(imageFor(i.instance_id)))
+    .sort((a, b) => a.instance_id.localeCompare(b.instance_id));
+}
+
+function arg(name: string): string | undefined {
+  const i = process.argv.indexOf(name);
+  return i >= 0 ? process.argv[i + 1] : undefined;
+}
+
 function main(): void {
-  const ids = process.argv.slice(2);
+  const flagsWithValue = new Set(['--out', '--slot']);
+  const positional = process.argv.slice(2).filter((a, i, all) => !a.startsWith('--') && !flagsWithValue.has(all[i - 1] ?? ''));
   const all = loadInstances();
-  const items = ids.length > 0 ? all.filter(i => ids.includes(i.instance_id)) : [];
+  const items = process.argv.includes('--django-local')
+    ? localDjangoCandidates(all, localImages())
+    : all.filter(i => positional.includes(i.instance_id));
   if (items.length === 0) {
-    process.stderr.write('usage: selftest.ts <instanceId> [...]\n');
+    process.stderr.write('usage: selftest.ts <instanceId> [...] | --django-local [--out file] [--resume] [--cleanup]\n');
     process.exitCode = 1;
     return;
   }
 
-  const checks = items.map(item => {
-    const c = checkInstance(item);
+  const out = resolve(arg('--out') ?? 'benchmarks/experiments/real-repo-validation/selftest.json');
+  const slot = arg('--slot') ?? 'selftest';
+  const checks: InstanceCheck[] = process.argv.includes('--resume') && existsSync(out)
+    ? JSON.parse(readFileSync(out, 'utf8')) as InstanceCheck[]
+    : [];
+  const done = new Set(checks.map(c => c.instanceId));
+  mkdirSync(dirname(out), { recursive: true });
+  process.stdout.write(`${items.length} candidate(s), ${items.filter(i => done.has(i.instance_id)).length} already checked\n`);
+
+  for (const item of items) {
+    if (done.has(item.instance_id)) continue;
+    const c = checkInstance(item, slot);
+    checks.push(c);
+    writeFileSync(out, JSON.stringify(checks, null, 2));
     process.stdout.write(
       `${c.instanceId.padEnd(28)} base=${c.failsAtBase ? 'fails' : 'PASSES'}  gold=${c.passesWithGoldPatch ? 'passes' : 'FAILS'}  `
       + `${c.seconds}s  ${c.usable ? 'usable' : 'UNUSABLE'}${c.note ? ` — ${c.note}` : ''}\n`,
     );
-    return c;
-  });
+    if (process.argv.includes('--cleanup')) {
+      spawnSync('docker', ['rm', '-f', containerFor(item.instance_id, slot)], { windowsHide: true });
+    }
+  }
 
-  const dir = resolve('benchmarks/experiments/real-repo-validation');
-  mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, 'selftest.json'), JSON.stringify(checks, null, 2));
-  process.stdout.write(`\n${checks.filter(c => c.usable).length}/${checks.length} usable\n`);
+  process.stdout.write(`\n${checks.filter(c => c.usable).length}/${checks.length} usable, written to ${out}\n`);
 }
 
-main();
+// Run only as a script, so the selection helpers can be imported.
+if (process.argv[1] && /selftest\.ts$/.test(process.argv[1])) main();

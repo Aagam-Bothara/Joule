@@ -1192,6 +1192,68 @@ same three agents and per-agent allowance as the ladder-limits run, one run per 
   have nothing to do with the policy: pytest-7220 was solved by the staged implementer alone and
   missed by `verified_full`'s.
 
+### Pre-registration: real repositories without the oracle (draft, 2026-10-02)
+
+Written before any run of the experiments below. The rules are also code
+(`real-repo/prereg.ts`), so the analysis cannot drift from what is written here.
+
+**Questions.** (G1) Does staged recovery help on real repositories when the check is one a user
+could plausibly have, and the hidden SWE-bench tests are used only for final scoring? (G2) When a
+recovery stage succeeds, is it the check's evidence that helped, or just another allowance of
+turns? (G3) Does the result hold on issues it was not developed on?
+
+**Pools.** The development pool is the existing 13 self-tested flask/pylint/pytest issues. The
+held-out pool is fixed by `cli.ts pool --held-out`: the first 30 self-test-usable
+`django__django` instances in instance-id order, excluding the 13 development ids. Only instances
+whose SWE-bench image was already local were self-tested (none were pulled); self-test = the hidden
+checker fails at the base commit and passes with the upstream fix
+(`selftest.ts --django-local --out benchmarks/experiments/real-repo-heldout/selftest.json`).
+
+**Check modes** (`--check`, `real-repo/checks.ts`). In every mode the verified-edit gate and the
+escalation verifier run the same check, and its output is what agents see.
+
+- `oracle` — the hidden SWE-bench checker is the check: the setting of every run above. Kept for
+  comparison and labelled as an oracle in manifests.
+- `repro` — a reproduction test written per issue by a separate agent that sees only the issue
+  and the repository (`cli.ts repro-gen`, generated once per issue and reused across arms and
+  seeds), stored on the host and piped in at check time, plus up to three existing
+  `test_<module>.py` files for each non-test module changed since the base commit; an existing
+  test counts as a regression only if it passed with those modules at their base versions.
+  `cli.ts repro-fidelity` (no model) keeps a test only if it fails at the base commit and passes
+  with the upstream fix; only faithful tests are used, and each run records `checkFaithful`.
+- `visible-f2p` — the instance's FAIL_TO_PASS tests are applied from the start and named in the
+  task; the check passes when they all pass.
+
+**Scoring.** Outside `oracle`, every run is scored separately by the hidden tests (`hidden` in
+each record) on its final state; staged arms are also scored after every executed stage
+(`staged.stages[].observation.hidden`, and `stage1Hidden`) by a program that restores the
+repository exactly. No hidden result is ever shown to an agent or read by the run.
+
+**Decision rules.**
+
+- **Repro fallback:** if 5 or fewer of the 13 development reproduction tests are faithful, the
+  G1 and G2 runs use `visible-f2p` instead of `repro`.
+- **G1 confirmed** if, in the staged arm, staged resolves (hidden) at least 2 more issues than its
+  own paired stage-1 score, AND false passes (a stage whose check passed while the hidden tests
+  failed) are under 25% of check passes.
+- **G2 (evidence) confirmed** if, pooled over at least 15 branch points, the reviewer-with-evidence
+  control R has a hidden recovery rate at least 20 points above C0 (implementer prompt, task
+  only, same allowance) AND at least twice C0's. Fewer than 15 branch points: not decided. C1
+  (implementer prompt + the same evidence) separates the evidence from the reviewer framing; it
+  has no threshold of its own.
+- **G3:** G1 and G2 are evaluated on the held-out pool exactly as on the development pool; a
+  result that holds only on the development pool is reported as such.
+
+**Branch points** (`cli.ts branch`). The implementer runs alone; when the check then fails, the
+repository's diff from the base commit is saved. Each control replays that diff in a freshly reset
+container and runs one agent with the same allowance as in the crews. R gets exactly the context
+staged recovery builds for a recovery stage (`recoveryTask` in core), C0 the task alone, C1 the
+implementer prompt plus R's context. Each is scored by the check and by the hidden tests.
+
+Status: code and Docker checks in place; no model has been run under these rules yet. The Django
+self-test covered the 88 instances with a local image: 86 usable (django-13551 and django-13590
+fail with the upstream fix), so the held-out pool is django-10914 through django-12453, 30 issues
+(`benchmarks/experiments/real-repo-heldout/pool.json`).
 
 ### Reproducing
 
@@ -1205,6 +1267,16 @@ npx tsx benchmarks/staged-replication/cli.ts analyze --arms primary,full,full_ve
 npx tsx benchmarks/real-repo/selftest.ts <instanceId ...>    # decides the pool; calls no model
 npx tsx benchmarks/real-repo/cli.ts pool
 npx tsx benchmarks/real-repo/cli.ts run --arms primary --instances <id> --model <id>
+
+# Without the oracle (pre-registration above)
+npx tsx benchmarks/real-repo/selftest.ts --django-local --out benchmarks/experiments/real-repo-heldout/selftest.json --resume --cleanup
+npx tsx benchmarks/real-repo/cli.ts pool --held-out
+npx tsx benchmarks/real-repo/cli.ts repro-gen --pool dev --repro-dir <dir>          # model
+npx tsx benchmarks/real-repo/cli.ts repro-fidelity --repro-dir <dir>                # Docker only
+npx tsx benchmarks/real-repo/cli.ts run --check repro --repro-dir <dir> --arms staged --out-dir <out>
+npx tsx benchmarks/real-repo/cli.ts analyze --arms staged --out-dir <out>           # writes g1.json
+npx tsx benchmarks/real-repo/cli.ts branch --check repro --repro-dir <dir> --controls R,C0,C1 --out-dir <out>
+npx tsx benchmarks/real-repo/cli.ts analyze-branch --out-dir <out>                  # writes g2.json
 ```
 
 Datasets land in `benchmarks/experiments/` and are gitignored; the code that produces them is not.

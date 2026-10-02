@@ -8,7 +8,7 @@ import { TraceLogger } from '../src/trace-logger.js';
 import { ToolRegistry } from '../src/tool-registry.js';
 import { ModelRouter } from '../src/model-router.js';
 import { Planner } from '../src/planner.js';
-import { CrewOrchestrator } from '../src/crew-orchestrator.js';
+import { CrewOrchestrator, recoveryTask, stageEvidence } from '../src/crew-orchestrator.js';
 import { ModelProviderRegistry } from '@joule/models';
 import { fileWriteTool } from '@joule/tools';
 import { ModelTier, generateId } from '@joule/shared';
@@ -373,6 +373,74 @@ describe('staged recovery', { timeout: 60_000 }, () => {
       expect(handover).not.toContain('```json');
       expect(handover).not.toContain('toolName');
     }
+  });
+
+  it('8d. records what observeStage returns after each executed stage, and nothing else changes', async () => {
+    const script = {
+      Implementer: [write('still broken'), '{"answer": "I am done"}'],
+      Reviewer: [write('GOOD'), '{"answer": "fixed it"}'],
+    };
+    const seen: Array<{ stage: number; role: string; passed: boolean; content: string }> = [];
+    const observed = build(script);
+    const withObserver = await run(observed.orchestrator, observed.crew, {
+      verifiedEdit: {
+        ...policy(),
+        observeStage: async s => {
+          seen.push({ ...s, content: readFileSync(join(dir, 'work.txt'), 'utf8') });
+          return { hidden: { resolved: s.passed } };
+        },
+      },
+    });
+
+    // Called after each executed stage's check, before the next stage ran.
+    expect(seen).toEqual([
+      { stage: 1, role: 'Implementer', passed: false, content: 'still broken' },
+      { stage: 2, role: 'Reviewer', passed: true, content: 'GOOD' },
+    ]);
+    expect(withObserver.staged?.stages[0].observation).toEqual({ hidden: { resolved: false } });
+    expect(withObserver.staged?.stages[1].observation).toEqual({ hidden: { resolved: true } });
+    expect(withObserver.staged?.stages[2].observation).toBeUndefined();
+
+    // The same script without an observer takes the same path.
+    writeFileSync(join(dir, 'work.txt'), '');
+    const plain = build(script);
+    const without = await run(plain.orchestrator, plain.crew);
+    expect(plain.calls).toEqual(observed.calls);
+    expect(without.staged?.solvedAtStage).toBe(withObserver.staged?.solvedAtStage);
+    expect(without.staged?.stages[0].observation).toBeUndefined();
+  });
+
+  it('8e. records a throwing observer as an error and carries on', async () => {
+    const { orchestrator, crew, calls } = build({
+      Implementer: [write('still broken'), '{"answer": "I am done"}'],
+      Reviewer: [write('GOOD'), '{"answer": "fixed it"}'],
+    });
+    const result = await run(orchestrator, crew, {
+      verifiedEdit: { ...policy(), observeStage: () => { throw new Error('scorer unavailable'); } },
+    });
+    expect(result.staged?.stages[0].observation).toEqual({ error: 'scorer unavailable' });
+    expect(calls).toContain('Reviewer');
+    expect(result.staged?.solvedByRole).toBe('Reviewer');
+  });
+
+  it('8f. recoveryTask builds exactly the context the reviewer is handed', async () => {
+    const { orchestrator, crew, provider } = build({
+      Implementer: [write('still broken'), '{"answer": "I wrote the fix and it works"}'],
+      Reviewer: [write('GOOD'), '{"answer": "fixed"}'],
+    });
+    const task: Task = { id: 'task-x', description: 'Make the check pass', createdAt: new Date().toISOString(), verifiedEdit: policy() };
+    const envelope = budget.createEnvelope('high');
+    const traceId = generateId('trace');
+    tracer.createTrace(traceId, task.id, envelope.envelope);
+    const result = await orchestrator.executeCrew(crew, task, envelope, traceId);
+
+    const reviewerCall = provider.chat.mock.calls.find(
+      c => ((c[0] as { system?: string }).system ?? '').includes('You are: Reviewer'),
+    );
+    const prompt = (reviewerCall![0] as { messages: Array<{ content: string }> }).messages[0].content;
+    const stage1 = result.staged!.stages[0].verification!;
+    const expected = recoveryTask(task, task.verifiedEdit!, [result.agentResults[0]], stageEvidence(stage1)).description;
+    expect(prompt).toContain(expected);
   });
 
   it('9. never hands an agent a coerced object', async () => {

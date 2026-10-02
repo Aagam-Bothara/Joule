@@ -20,9 +20,14 @@
  * the test patch to /tmp in the agent's container, where any agent with
  * repo_shell could read them.
  *
- * Scope: pytest-driven repositories (pytest, pylint, flask). One log format,
- * one parser, and suites that finish in seconds rather than the minutes django
- * and sympy need — which is what makes a per-stage verifier affordable at all.
+ * Scope: pytest-driven repositories (pytest, pylint, flask) — the development
+ * pool — and Django, whose runtests.py runner and log format are ported from
+ * harness/workloads/swebench.ts for the held-out pool. sympy is not supported.
+ *
+ * What the gate and escalation run is the check mode's program (checks.ts):
+ * `oracle` (the hidden checker above, every earlier run's setting), `repro`
+ * or `visible-f2p`. Outside oracle mode the hidden tests only score runs
+ * (`scoreHidden`), and no agent sees that score.
  */
 
 import { spawnSync } from 'node:child_process';
@@ -31,6 +36,21 @@ import { join, resolve } from 'node:path';
 import type { PreparedTask } from '../crew-scaling/tasks.js';
 import type { ScalingWorkload } from '../crew-scaling/runner.js';
 import { containerWorkspace } from '../harness/workloads/repo-workspace.js';
+import {
+  CHECK_LABELS,
+  bytecodeCleanup,
+  hiddenScorerSource,
+  isDjango,
+  parseScore,
+  patchedFiles,
+  reproCheckSource,
+  shQuote,
+  testHint,
+  testProgram,
+  visibleF2pSource,
+  type CheckMode,
+  type HiddenScore,
+} from './checks.js';
 
 export interface SweItem {
   repo: string;
@@ -97,37 +117,18 @@ export function loadInstances(): SweItem[] {
   return JSON.parse(readFileSync(resolve('benchmarks/data/swebench-lite.json'), 'utf8')) as SweItem[];
 }
 
-const patchedFiles = (patch: string): string[] =>
-  [...patch.matchAll(/^diff --git a\/(\S+) b\/(\S+)/gm)].map(m => m[2]);
-
-const shQuote = (value: string): string => `'${value.replace(/'/g, "'\\''")}'`;
-
-/**
- * Bytecode pytest may have left for the hidden test files: compiled hidden
- * tests are hidden tests. Checks no longer write it; this removes what older
- * checks left in a reused container.
- */
-function bytecodeCleanup(files: readonly string[]): string {
-  return files
-    .filter(f => f.endsWith('.py'))
-    .map(f => {
-      const slash = f.lastIndexOf('/');
-      const dir = slash >= 0 ? f.slice(0, slash + 1) : '';
-      const stem = f.slice(slash + 1, -'.py'.length);
-      return `rm -f ${shQuote(`${dir}__pycache__/${stem}`)}.*.pyc`;
-    })
-    .join('; ');
-}
-
 /**
  * The checker, as a Python program read from stdin.
  *
  * It is the SWE-bench criterion made into an exit code. The test patch is
  * embedded in it and applied from memory (`git apply -`), so the check needs
  * no file of its own in the container, and it cleans up after itself: the
- * hidden tests are present only while they run.
+ * hidden tests are present only while they run. For pytest-driven repositories
+ * this is the exact program every earlier run used (pinned by a test); Django
+ * instances get the same program around Django's own test runner.
  */
 export function checkerSource(item: SweItem): string {
+  if (isDjango(item)) return testProgram(item, { judge: 'all', after: 'base' });
   const files = patchedFiles(item.test_patch);
   const cmd = `PYTHONDONTWRITEBYTECODE=1 python -m pytest -rA --tb=short -p no:cacheprovider ${files.map(f => shQuote(f)).join(' ')}`;
   return [
@@ -251,30 +252,69 @@ export function verifyCommand(container: string, checkerPath: string): string {
 const truncate = (s: string, cap: number): string =>
   s.length <= cap ? s : `${s.slice(0, Math.floor(cap * 0.6))}\n... [${s.length - cap} chars omitted] ...\n${s.slice(-Math.floor(cap * 0.4))}`;
 
+/**
+ * The hidden SWE-bench score for the repository as it stands.
+ *
+ * Runs the scoring program (hidden test patch, FAIL_TO_PASS and PASS_TO_PASS)
+ * and leaves the repository exactly as it found it, so scoring mid-run cannot
+ * change the run. Its result is for the record only: no agent is shown it.
+ * The program is written to `dir` on the host (default: the scoring area under
+ * ARTIFACT_ROOT) and piped in like every other check.
+ */
+export function scoreHidden(container: string, item: SweItem, opts: { docker?: DockerRun; dir?: string } = {}): HiddenScore {
+  const dir = opts.dir ?? join(ARTIFACT_ROOT, 'scoring', item.instance_id);
+  mkdirSync(dir, { recursive: true });
+  const scorer = join(dir, 'score.py');
+  writeFileSync(scorer, hiddenScorerSource(item));
+  const r = runCheck(container, scorer, opts.docker ?? realDocker);
+  return parseScore(r.status, `${r.stdout}${r.stderr}`);
+}
+
+/** A reproduction test to check against, as stored on the host by `repro-gen`. */
+export interface ReproCheck {
+  source: string;
+  /** Whether `repro-fidelity` found it failing at the base commit and passing with the gold patch */
+  faithful: boolean;
+}
+
 export interface PrepareOptions {
   /** Defaults to the real `docker` CLI */
   docker?: DockerRun;
   /** Where host-side checker files go; defaults to ARTIFACT_ROOT */
   root?: string;
+  /** What the gate and the escalation verifier run; defaults to `oracle` (the hidden tests) */
+  mode?: CheckMode;
+  /** Required with mode `repro` */
+  repro?: ReproCheck;
 }
 
-/**
- * One instance, laid out and ready to run.
- *
- * The description is the issue as reported, plus how to work in this
- * repository. It says nothing about which files are involved: locating that is
- * the task.
- */
-export function prepareInstance(item: SweItem, slot: string, opts: PrepareOptions = {}): PreparedTask & { container: string } {
-  const docker = opts.docker ?? realDocker;
-  const container = ensureContainer(item, slot, docker);
-  resetRepo(container, item, docker);
-  scrubContainer(container, item, docker);
-  activeContainer = container;
-  const dir = join(opts.root ?? ARTIFACT_ROOT, slot, item.instance_id);
-  const checker = install(item, dir);
+/** The repo-level fields a real-repo run adds to its record. */
+export interface RealRepoRunRecord {
+  checkMode: CheckMode;
+  /** repro mode: whether the reproduction test was found faithful */
+  checkFaithful?: boolean;
+  /** The hidden SWE-bench score of the final repository state (never shown to an agent) */
+  hidden: HiddenScore;
+  /** Outside oracle mode: whether the check itself passes on the final state */
+  checkFinalPassed?: boolean;
+  /** Staged arms outside oracle mode: the hidden score after stage 1, before any recovery stage ran */
+  stage1Hidden?: HiddenScore;
+}
 
-  const description = [
+export type PreparedInstance = PreparedTask & {
+  container: string;
+  mode: CheckMode;
+  /** repro mode: whether the reproduction test is faithful */
+  checkFaithful?: boolean;
+  /** Run the check once on the repository as it stands */
+  check(): { passed: boolean; output: string };
+};
+
+/** How many failing test names the visible-f2p task text lists before summarising. */
+const MAX_LISTED_TESTS = 30;
+
+function describeInstance(item: SweItem, mode: CheckMode): string {
+  const lines = [
     `Repository: ${item.repo} (a working copy is checked out at /testbed inside this environment)`,
     '',
     'Reported issue:',
@@ -283,30 +323,142 @@ export function prepareInstance(item: SweItem, slot: string, opts: PrepareOption
     'Fix the repository so the issue is resolved. Use repo_read to read files, repo_write to change them,',
     'and repo_shell to run commands (for example to search the tree or run tests). Paths are relative to /testbed.',
     'Change the source, not the tests.',
-  ].join('\n');
+  ];
+  // Django needs its own runner; the pytest-driven pool's text is unchanged.
+  if (isDjango(item)) lines.push(testHint(item));
+  if (mode === 'visible-f2p') {
+    const f2p = JSON.parse(item.FAIL_TO_PASS) as string[];
+    lines.push(
+      '',
+      'These tests fail now and must pass once the issue is fixed. They are already in the repository; do not change them:',
+      ...f2p.slice(0, MAX_LISTED_TESTS).map(t => `- ${t}`),
+      ...(f2p.length > MAX_LISTED_TESTS ? [`- … and ${f2p.length - MAX_LISTED_TESTS} more`] : []),
+      `They are in: ${patchedFiles(item.test_patch).join(', ')}`,
+    );
+    if (!isDjango(item)) lines.push(testHint(item));
+  }
+  return lines.join('\n');
+}
+
+/**
+ * One instance, laid out and ready to run.
+ *
+ * The description is the issue as reported, plus how to work in this
+ * repository. It says nothing about which files are involved: locating that is
+ * the task. In `oracle` mode everything an agent sees or runs is what every
+ * earlier real-repository run had.
+ */
+export function prepareInstance(item: SweItem, slot: string, opts: PrepareOptions = {}): PreparedInstance {
+  const docker = opts.docker ?? realDocker;
+  const mode = opts.mode ?? 'oracle';
+  if (mode === 'repro' && !opts.repro) throw new Error(`check mode repro needs a reproduction test for ${item.instance_id}`);
+  const container = ensureContainer(item, slot, docker);
+  resetRepo(container, item, docker);
+  scrubContainer(container, item, docker);
+  activeContainer = container;
+  const dir = join(opts.root ?? ARTIFACT_ROOT, slot, item.instance_id);
+  // check.py is the hidden checker in every mode; in oracle mode it is also the check.
+  const hiddenChecker = install(item, dir);
+
+  let checkPath = hiddenChecker;
+  if (mode === 'visible-f2p') {
+    checkPath = join(dir, 'check-visible-f2p.py');
+    writeFileSync(checkPath, visibleF2pSource(item));
+    // Visible from the start: the failing tests are part of the repository.
+    const applied = inRepo(container, 'git apply --whitespace=nowarn -', 60_000, item.test_patch, docker);
+    if (applied.status !== 0) throw new Error(`could not apply the visible tests for ${item.instance_id}: ${applied.stderr.trim().slice(0, 200)}`);
+  } else if (mode === 'repro') {
+    checkPath = join(dir, 'check-repro.py');
+    writeFileSync(checkPath, reproCheckSource(item, opts.repro!.source, { existing: true }));
+  }
+
+  const scoring = { docker, dir };
+  const check = (): { passed: boolean; output: string } => {
+    const r = runCheck(container, checkPath, docker);
+    return { passed: r.status === 0, output: `${r.stdout}${r.stderr}`.trim() };
+  };
+
+  // Outside oracle mode the hidden score is measured after every staged
+  // stage, for the record only; oracle runs stay exactly as they were.
+  const stageScores: Array<{ stage: number; hidden: HiddenScore }> = [];
+  const observeStage = mode === 'oracle'
+    ? undefined
+    : ({ stage }: { stage: number }) => {
+      const hidden = scoreHidden(container, item, scoring);
+      stageScores.push({ stage, hidden });
+      return { hidden };
+    };
 
   return {
     container,
     dir,
-    description,
+    mode,
+    ...(mode === 'repro' ? { checkFaithful: opts.repro!.faithful } : {}),
+    description: describeInstance(item, mode),
     // The runtime's per-stage verifier and the gate both run this on the host.
-    verifyCommand: verifyCommand(container, checker),
-    verifyLabel: CHECK_LABEL,
+    verifyCommand: verifyCommand(container, checkPath),
+    verifyLabel: CHECK_LABELS[mode],
     // The agents' writes land in the container, so the gate snapshots and
     // restores there: a regression after a passing check is undone in /testbed.
     workspace: containerWorkspace((command, timeoutMs, input) => inRepo(container, command, timeoutMs, input, docker)),
+    ...(observeStage ? { observeStage } : {}),
+    check,
     verify: () => {
-      const r = runCheck(container, checker, docker);
-      const out = `${r.stdout}${r.stderr}`.trim();
-      return { success: r.status === 0, output: out.slice(-600) };
+      if (mode === 'oracle') {
+        const r = runCheck(container, hiddenChecker, docker);
+        const out = `${r.stdout}${r.stderr}`.trim();
+        const record: RealRepoRunRecord = { checkMode: mode, hidden: parseScore(r.status, out) };
+        return { success: r.status === 0, output: out.slice(-600), record };
+      }
+      // Success is the hidden score; the check's own verdict is kept beside it.
+      const hidden = scoreHidden(container, item, scoring);
+      const final = check();
+      const stage1 = stageScores.find(s => s.stage === 1);
+      const record: RealRepoRunRecord = {
+        checkMode: mode,
+        ...(mode === 'repro' ? { checkFaithful: opts.repro!.faithful } : {}),
+        hidden,
+        checkFinalPassed: final.passed,
+        ...(stage1 ? { stage1Hidden: stage1.hidden } : {}),
+      };
+      const detail = `hidden: F2P ${hidden.f2pPassed}/${hidden.f2pTotal}, P2P failing ${hidden.p2pFailed}/${hidden.p2pTotal}${hidden.error ? ` (${hidden.error})` : ''}; check ${final.passed ? 'passes' : 'fails'}`;
+      return { success: hidden.resolved, output: detail, record };
     },
   };
 }
 
+/**
+ * The repository's changes since the base commit, as a binary diff that
+ * `restoreBranch` can replay. Untracked files are included (added to the index
+ * first); ignored files are not.
+ */
+export function captureDiff(container: string, item: SweItem, docker: DockerRun = realDocker): string {
+  const r = inRepo(container, `git add -A && git diff --cached --binary ${item.base_commit}`, 120_000, undefined, docker);
+  if (r.status !== 0) throw new Error(`could not capture the diff: ${r.stderr.trim().slice(0, 200)}`);
+  return r.stdout;
+}
+
+/** Back to the base commit, then the given diff on top: a branch point, replayed. */
+export function restoreBranch(container: string, item: SweItem, diff: string, docker: DockerRun = realDocker): void {
+  resetRepo(container, item, docker);
+  if (diff.trim().length === 0) return;
+  const r = inRepo(container, 'git apply --binary --whitespace=nowarn -', 120_000, diff, docker);
+  if (r.status !== 0) throw new Error(`could not replay the branch diff: ${r.stderr.trim().slice(0, 200)}`);
+}
+
+export interface WorkloadOptions {
+  mode?: CheckMode;
+  /** Reproduction tests by instance id; required for every item in repro mode */
+  repro?: ReadonlyMap<string, ReproCheck>;
+}
+
 /** SWE instances as workloads the existing comparison runner can execute. */
-export function sweWorkloads(items: readonly SweItem[], slot: string): ScalingWorkload[] {
+export function sweWorkloads(items: readonly SweItem[], slot: string, opts: WorkloadOptions = {}): ScalingWorkload[] {
   return items.map(item => ({
     workloadId: item.instance_id,
-    prepare: () => prepareInstance(item, slot),
+    prepare: () => prepareInstance(item, slot, {
+      ...(opts.mode ? { mode: opts.mode } : {}),
+      ...(opts.repro?.has(item.instance_id) ? { repro: opts.repro.get(item.instance_id)! } : {}),
+    }),
   }));
 }

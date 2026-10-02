@@ -1,0 +1,48 @@
+{
+  "pytest-dev__pytest-0001": {
+    "checker": "import re, subprocess, sys\nBASE = \"abc123\"\nFILES = [\"testing/test_existing.py\",\"testing/test_added.py\"]\nF2P = [\"testing/test_existing.py::test_hidden_regression\"]\nP2P = [\"testing/test_added.py::test_hidden_new\"]\nPATCH = \"diff --git a/testing/test_existing.py b/testing/test_existing.py\\n--- a/testing/test_existing.py\\n+++ b/testing/test_existing.py\\n@@ -1 +1,2 @@\\n import pytest\\n+def test_hidden_regression(): assert \\\"naïve\\\" == \\\"naïve\\\"\\ndiff --git a/testing/test_added.py b/testing/test_added.py\\nnew file mode 100644\\n--- /dev/null\\n+++ b/testing/test_added.py\\n@@ -0,0 +1 @@\\n+def test_hidden_new(): assert 'it''s'\\n\"\nBYTECODE_CLEANUP = \"rm -f 'testing/__pycache__/test_existing'.*.pyc; rm -f 'testing/__pycache__/test_added'.*.pyc\"\n\ndef q(s):\n    return \"'\" + s.replace(\"'\", \"'\\\\''\") + \"'\"\n\ndef sh(c, data=None, **kw):\n    io = {\"input\": data} if data is not None else {\"stdin\": subprocess.DEVNULL}\n    return subprocess.run([\"bash\", \"-lc\", c], capture_output=True, encoding=\"utf-8\", errors=\"replace\", cwd=\"/testbed\", **io, **kw)\n\ndef restore():\n    # Each hidden-test file back to the base commit; one the patch added is removed.\n    for f in FILES:\n        if sh(\"git cat-file -e %s\" % q(BASE + \":\" + f)).returncode == 0:\n            sh(\"git checkout -q %s -- %s\" % (BASE, q(f)))\n        else:\n            sh(\"rm -f -- %s\" % q(f))\n    if BYTECODE_CLEANUP:\n        sh(BYTECODE_CLEANUP)\n\n# Lay the hidden tests over whatever the agent has done.\nrestore()\napplied = sh(\"git apply --whitespace=nowarn -\", data=PATCH)\nif applied.returncode != 0:\n    restore()\n    print(\"VERIFY: test patch did not apply\"); sys.exit(2)\n\ntry:\n    run = sh(\"source /opt/miniconda3/bin/activate testbed >/dev/null 2>&1; PYTHONDONTWRITEBYTECODE=1 python -m pytest -rA --tb=short -p no:cacheprovider 'testing/test_existing.py' 'testing/test_added.py' 2>&1\", timeout=900)\n    log = run.stdout + run.stderr\nexcept subprocess.TimeoutExpired:\n    log = \"VERIFY: the tests timed out\"\nrestore()\n\nstatus = {}\nfor line in log.splitlines():\n    m = re.match(r\"^(PASSED|FAILED|ERROR)\\s+(\\S+)\", line.strip())\n    if m:\n        status[m.group(2)] = m.group(1) == \"PASSED\"\n\nf2p_bad = [t for t in F2P if status.get(t) is not True]\np2p_bad = [t for t in P2P if status.get(t) is not True]\nprint(\"VERIFY: F2P %d/%d, P2P %d/%d\" % (len(F2P) - len(f2p_bad), len(F2P), len(P2P) - len(p2p_bad), len(P2P)))\nif f2p_bad:\n    print(\"still failing: \" + \", \".join(f2p_bad[:6]))\nif p2p_bad:\n    print(\"regressed: \" + \", \".join(p2p_bad[:6]))\nif not f2p_bad and not p2p_bad:\n    print(\"ALL REQUIRED TESTS PASS\")\n    sys.exit(0)\ntail = [l for l in log.splitlines() if l.strip()][-12:]\nprint(\"\\n\".join(tail))\nsys.exit(1)\n",
+    "description": "Repository: pytest-dev/pytest (a working copy is checked out at /testbed inside this environment)\n\nReported issue:\nSomething is broken.\n\nFix the repository so the issue is resolved. Use repo_read to read files, repo_write to change them,\nand repo_shell to run commands (for example to search the tree or run tests). Paths are relative to /testbed.\nChange the source, not the tests.",
+    "command": "node \"<TSX>\" \"<RUN_CHECK>\" \"joule-rr-unit-pytest-dev__pytest-0001\" \"<ROOT>\\unit\\pytest-dev__pytest-0001\\check.py\"",
+    "label": "the repository's check",
+    "timeoutMs": 900000,
+    "policyKeys": [
+      "command",
+      "label",
+      "timeoutMs",
+      "workspace"
+    ],
+    "execs": [
+      "git config --global --add safe.directory /testbed; git config core.fileMode false",
+      "git checkout -q abc123 -- . && git checkout -q -- . && git clean -fdq",
+      "rm -f /tmp/test.patch /tmp/check.py; rm -f 'testing/__pycache__/test_existing'.*.pyc; rm -f 'testing/__pycache__/test_added'.*.pyc",
+      "python -"
+    ],
+    "verdict": {
+      "success": false,
+      "output": "VERIFY: F2P 0/1, P2P 1/1\nstill failing: testing/test_existing.py::test_hidden_regression"
+    }
+  },
+  "pallets__flask-0002": {
+    "checker": "import re, subprocess, sys\nBASE = \"def456\"\nFILES = [\"tests/test_blueprints.py\"]\nF2P = [\"tests/test_blueprints.py::test_dotted_name\"]\nP2P = [\"tests/test_blueprints.py::test_blueprint_specific_error_handling\"]\nPATCH = \"diff --git a/tests/test_blueprints.py b/tests/test_blueprints.py\\n--- a/tests/test_blueprints.py\\n+++ b/tests/test_blueprints.py\\n@@ -1 +1,2 @@\\n import flask\\n+def test_dotted_name(): pass\\n\"\nBYTECODE_CLEANUP = \"rm -f 'tests/__pycache__/test_blueprints'.*.pyc\"\n\ndef q(s):\n    return \"'\" + s.replace(\"'\", \"'\\\\''\") + \"'\"\n\ndef sh(c, data=None, **kw):\n    io = {\"input\": data} if data is not None else {\"stdin\": subprocess.DEVNULL}\n    return subprocess.run([\"bash\", \"-lc\", c], capture_output=True, encoding=\"utf-8\", errors=\"replace\", cwd=\"/testbed\", **io, **kw)\n\ndef restore():\n    # Each hidden-test file back to the base commit; one the patch added is removed.\n    for f in FILES:\n        if sh(\"git cat-file -e %s\" % q(BASE + \":\" + f)).returncode == 0:\n            sh(\"git checkout -q %s -- %s\" % (BASE, q(f)))\n        else:\n            sh(\"rm -f -- %s\" % q(f))\n    if BYTECODE_CLEANUP:\n        sh(BYTECODE_CLEANUP)\n\n# Lay the hidden tests over whatever the agent has done.\nrestore()\napplied = sh(\"git apply --whitespace=nowarn -\", data=PATCH)\nif applied.returncode != 0:\n    restore()\n    print(\"VERIFY: test patch did not apply\"); sys.exit(2)\n\ntry:\n    run = sh(\"source /opt/miniconda3/bin/activate testbed >/dev/null 2>&1; PYTHONDONTWRITEBYTECODE=1 python -m pytest -rA --tb=short -p no:cacheprovider 'tests/test_blueprints.py' 2>&1\", timeout=900)\n    log = run.stdout + run.stderr\nexcept subprocess.TimeoutExpired:\n    log = \"VERIFY: the tests timed out\"\nrestore()\n\nstatus = {}\nfor line in log.splitlines():\n    m = re.match(r\"^(PASSED|FAILED|ERROR)\\s+(\\S+)\", line.strip())\n    if m:\n        status[m.group(2)] = m.group(1) == \"PASSED\"\n\nf2p_bad = [t for t in F2P if status.get(t) is not True]\np2p_bad = [t for t in P2P if status.get(t) is not True]\nprint(\"VERIFY: F2P %d/%d, P2P %d/%d\" % (len(F2P) - len(f2p_bad), len(F2P), len(P2P) - len(p2p_bad), len(P2P)))\nif f2p_bad:\n    print(\"still failing: \" + \", \".join(f2p_bad[:6]))\nif p2p_bad:\n    print(\"regressed: \" + \", \".join(p2p_bad[:6]))\nif not f2p_bad and not p2p_bad:\n    print(\"ALL REQUIRED TESTS PASS\")\n    sys.exit(0)\ntail = [l for l in log.splitlines() if l.strip()][-12:]\nprint(\"\\n\".join(tail))\nsys.exit(1)\n",
+    "description": "Repository: pallets/flask (a working copy is checked out at /testbed inside this environment)\n\nReported issue:\nRaise error when blueprint name contains a dot\n\nFix the repository so the issue is resolved. Use repo_read to read files, repo_write to change them,\nand repo_shell to run commands (for example to search the tree or run tests). Paths are relative to /testbed.\nChange the source, not the tests.",
+    "command": "node \"<TSX>\" \"<RUN_CHECK>\" \"joule-rr-unit-pallets__flask-0002\" \"<ROOT>\\unit\\pallets__flask-0002\\check.py\"",
+    "label": "the repository's check",
+    "timeoutMs": 900000,
+    "policyKeys": [
+      "command",
+      "label",
+      "timeoutMs",
+      "workspace"
+    ],
+    "execs": [
+      "git config --global --add safe.directory /testbed; git config core.fileMode false",
+      "git checkout -q def456 -- . && git checkout -q -- . && git clean -fdq",
+      "rm -f /tmp/test.patch /tmp/check.py; rm -f 'tests/__pycache__/test_blueprints'.*.pyc",
+      "python -"
+    ],
+    "verdict": {
+      "success": false,
+      "output": "VERIFY: F2P 0/1, P2P 1/1\nstill failing: testing/test_existing.py::test_hidden_regression"
+    }
+  }
+}

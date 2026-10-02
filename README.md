@@ -13,7 +13,7 @@ it hands the next agent the actual failure output, and it stops the moment the c
 
 ![CI](https://github.com/Aagam-Bothara/Joule/actions/workflows/test.yml/badge.svg)
 ![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)
-![Tests](https://img.shields.io/badge/tests-1498%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-1531%20passing-brightgreen)
 ![TypeScript](https://img.shields.io/badge/TypeScript-100%25-blue)
 ![Node.js](https://img.shields.io/badge/node-%3E%3D22-brightgreen)
 
@@ -1025,7 +1025,7 @@ are documented as wrong rather than deleted; the largest set is listed under
 
 ## Current Status
 
-**Research prototype / experimental runtime.** 1498 tests passing across 112 files. Active
+**Research prototype / experimental runtime.** 1531 tests passing across 116 files. Active
 development — expect API refinements.
 
 Observed on real repositories, **with an oracle check the agents could see** (13 SWE-bench Lite
@@ -1093,7 +1093,7 @@ Known limitations:
 ```bash
 pnpm install       # install dependencies
 pnpm build         # build all 9 packages
-pnpm test          # 1498 tests across 112 files
+pnpm test          # 1531 tests across 116 files
 pnpm dev           # watch mode
 ```
 

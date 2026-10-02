@@ -56,7 +56,26 @@ export interface VerifiedEditPolicy {
    * functions, so it does not survive serialization of the task.
    */
   workspace?: EditWorkspace;
+  /**
+   * Called by staged strategies after each executed stage's check, before the
+   * next stage starts. Whatever it returns is stored on that stage's report as
+   * `observation` and used for nothing else: it cannot change the run, and no
+   * agent sees it. For measurement — e.g. scoring the repository against held-
+   * out tests at each stage. A throw is recorded as `{ error }`. Runtime-only.
+   */
+  observeStage?: (stage: StageObservationInput) => StageObservation | Promise<StageObservation>;
 }
+
+/** What `observeStage` is told about the stage that just ran. */
+export interface StageObservationInput {
+  /** 1-based stage */
+  stage: number;
+  role: string;
+  /** The check's verdict after this stage */
+  passed: boolean;
+}
+
+export type StageObservation = Record<string, unknown> | undefined;
 
 /**
  * The files the verified-edit gate snapshots and restores.
