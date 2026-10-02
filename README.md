@@ -13,7 +13,7 @@ it hands the next agent the actual failure output, and it stops the moment the c
 
 ![CI](https://github.com/Aagam-Bothara/Joule/actions/workflows/test.yml/badge.svg)
 ![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)
-![Tests](https://img.shields.io/badge/tests-1442%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-1456%20passing-brightgreen)
 ![TypeScript](https://img.shields.io/badge/TypeScript-100%25-blue)
 ![Node.js](https://img.shields.io/badge/node-%3E%3D22-brightgreen)
 
@@ -106,9 +106,10 @@ Two mechanisms are at work:
 | **failure evidence** | the recovery agent receives the check's command and real output, not a summary |
 | **conditional admission** | a stage that is not needed is never started — no context built, no model called |
 
-Conditional admission is what the current measurements support: it makes a crew cost what a single
-agent costs when the single agent succeeds. Whether failure evidence improves recovery is open —
-with the executor fixed, the benchmark below has too few failures to tell.
+On 13 real SWE-bench Lite issues, the reviewer — given the failing check's output — repaired 4 of
+the 6 issues the implementer left failing, and staged recovery reached 11/13 against 9/13 for a crew
+that runs every specialist every time, at 22% lower cost. One run per issue, so the difference
+between the two crews is not statistically significant; the recoveries themselves are observed.
 
 **Inside one task — the escalation ladder.** A small model executes, every step is verified, and a
 larger model is consulted or handed off only when the evidence says the small model is stuck. That
@@ -117,6 +118,55 @@ mechanism and its benchmarks are [further down](#escalating-inside-one-task).
 ---
 
 ## Results
+
+### Real repositories
+
+**13 SWE-bench Lite issues (flask, pylint, pytest), each in its official container, scored by the
+hidden tests; `deepseek-v4-flash`, one run per issue per arm, 2026-10-01.** The pool was fixed by a
+self-test before any model ran (each issue fails at its base commit and passes with the upstream
+fix). Both crews have the same three agents, prompts, tools and per-agent allowance (30 turns,
+30 minutes, 1.5M tokens, 12k output tokens per reply); only the execution policy differs.
+
+| arm | resolved | mean cost | mean stages |
+|---|---:|---:|---:|
+| `FULL_VERIFY` — all three, verified between stages | 9/13 | $0.077 | 3.00 |
+| `STAGED` — escalate only on failure | **11/13** | **$0.060** | **1.62** |
+
+| issue | `FULL_VERIFY` | `STAGED` | solved by (staged) |
+|---|:---:|:---:|---|
+| flask-4045 | ✓ | ✓ | reviewer |
+| flask-5063 | ✓ | ✓ | reviewer |
+| pylint-7114 | ✗ | ✗ | — |
+| pylint-7228 | ✓ | ✗ | — |
+| pylint-7993 | ✓ | ✓ | implementer |
+| pytest-11143 | ✓ | ✓ | implementer |
+| pytest-11148 | ✗ | ✓ | reviewer |
+| pytest-7168 | ✓ | ✓ | implementer |
+| pytest-7220 | ✗ | ✓ | implementer |
+| pytest-7373 | ✓ | ✓ | implementer |
+| pytest-7432 | ✓ | ✓ | implementer |
+| pytest-8906 | ✗ | ✓ | reviewer |
+| pytest-9359 | ✓ | ✓ | implementer |
+
+What this shows, and what it does not:
+
+- **Recovery happens on real code.** In the staged arm the implementer resolved 7 of 13; the
+  reviewer, handed the failing check's output, resolved 4 of the remaining 6. The tester ran twice
+  and resolved neither.
+- **Staged did not lose quality to save cost.** 8 issues pass in both arms; 3 pass only in staged,
+  1 only in `FULL_VERIFY` (McNemar exact p = 0.63 — not significant). Staged skipped 18 of 26
+  specialist stages and cost 22% less per issue.
+- **An always-on specialist broke a working fix.** On pytest-11148 the `FULL_VERIFY` reviewer
+  repaired the issue and the check passed; the tester, run anyway, then edited the repository and
+  the issue ended failed. Staged never started that tester. See
+  [after the check passes](#what-happens-after-the-check-already-passes).
+- One run per issue, one model, 13 issues. Per-issue outcomes vary between runs (pytest-7220
+  passed with the staged implementer alone and failed under `FULL_VERIFY`'s); treat the totals as
+  a first measurement, not a rate.
+- Getting the crew to solve real issues at all took fixes to the runtime — see
+  [what changed](#what-changed-on-2026-10-01).
+
+### Authored repositories
 
 **Authored repository-debugging benchmark: 10 repositories with one planted defect each, 3
 repetitions, 30 cells per arm, `deepseek-v4-flash`, verified-edit gate on.** Each task gives the
@@ -139,15 +189,15 @@ What this shows, and what it does not:
 - **Specialists after a passing check did nothing.** `FULL_VERIFY` ran 60 specialist stages on
   repositories that had already passed; all 60 made no edit, with no rollbacks and no regressions.
   That is the case for conditional admission: on this workload the skipped work was pure cost.
-- **This benchmark no longer measures recovery.** With one failure in 30, it cannot say whether
-  verifier evidence or the reviewer's framing helps. `FULL` and `FULL_VERIFY` are identical on all
-  30 paired cells; the 27 → 30 gap the old runs reported came from the executor bug.
+- **This benchmark no longer measures recovery.** With one failure in 30 it cannot say whether
+  verifier evidence or the reviewer's framing helps — the real-repository runs above are where
+  recovery shows. `FULL` and `FULL_VERIFY` are identical on all 30 paired cells; the 27 → 30 gap
+  the old runs reported came from the executor bug.
 - Wall-clock is not reported: two benchmarks shared the provider during these runs.
 
 Scoped claim: *on a 30-cell authored repository-debugging benchmark with DeepSeek V4 Flash, STAGED
 reached 30/30 at the cost of the lone implementer (29/30) and at 56–59% less cost than always-on
-crews.* It is not a claim about your repository, your model, or agents in general, and it is not
-evidence that staged recovery rescues hard tasks — this benchmark is now too easy for that model.
+crews.* It is not a claim about your repository, your model, or agents in general.
 
 ---
 
@@ -178,25 +228,36 @@ What that withdraws:
   does not isolate role framing and is withdrawn.
 - **"Verifier evidence buys recovery quality."** The 27 → 30 effect disappears with the fix.
 
-What stands: `STAGED` and `FULL_VERIFY` were always compared on the same executor, and they have
-matched cell for cell in every run, old or new; specialists entered after a passing check have
-never once made an edit. The fix, with the verbatim broken replies as tests, is in
-[`direct-executor.ts`](packages/core/src/direct-executor.ts).
+What stands: `STAGED` and `FULL_VERIFY` were always compared on the same executor, and on the
+authored fixtures they have matched cell for cell in every run, old or new. The fix, with the
+verbatim broken replies as tests, is in [`direct-executor.ts`](packages/core/src/direct-executor.ts).
+
+The same day, the crew executor turned out to be why real repositories looked out of reach: it set
+no output limit, so the provider's default of 1,024 tokens per reply applied, and no edit to a real
+source file fits in that. With 12k-token replies, the model's native call markup read, shell
+backslashes (`grep "a\|b"`) no longer making whole calls unreadable, and the escalation harness's
+allowance of 30 turns, the lone crew implementer went from 0/13 to 6/13 on the real-repository pool
+— the same rate the escalation harness gets with this model. The step-by-step history is in
+[benchmarks/README.md](benchmarks/README.md#staged-recovery-on-real-repositories-benchmarksreal-repo).
 
 ---
 
 ## Recovery funnel
 
-Across the 30 `STAGED` cells:
+Across the 13 real-repository `STAGED` runs:
 
 ```
-30 runs
-├── 29  solved by the implementer            → 97% stop after one agent
-└──  1  failed verification
-     └──  1  recovered by the reviewer       →  3% reach the reviewer
+13 issues
+├──  7  solved by the implementer            → 54% stop after one agent
+└──  6  failed verification
+     ├──  4  recovered by the reviewer       → 46% reach the reviewer
+     └──  2  still failing
+          └── 0  recovered by the tester     → 15% reach the tester
 
-final: 30/30
+final: 11/13
 ```
+
+On the authored fixtures the implementer alone solves 29 of 30, and the reviewer ran once.
 
 ---
 
@@ -206,20 +267,19 @@ final: 30/30
 have **already passed** verification:
 
 ```
-60  specialist stages entered after a passing check
-60  made no edit at all
- 0  accepted improvements
- 0  rollbacks
- 0  regressions
+                              authored (30 cells)   real repositories (13 issues)
+specialist stages entered     60                    17
+made no edit                  60                    16
+accepted improvements          0                     0
+regressions                    0                     1
 ```
 
-On this workload and model, once external verification passed, continuing to run specialists
-produced no measured benefit — and no measured harm either. It was simply cost. That is the direct
-empirical justification for conditional admission, and the reason `STAGED` can skip 59 of
-`FULL_VERIFY`'s 60 specialist stages without losing a single outcome.
-
-We do not generalize this to all agents, models or tasks. A more eager specialist would turn that
-pure cost into real regression risk — which is what the gate below is for.
+Once external verification passed, continuing to run specialists never improved anything. On the
+authored fixtures it was pure cost. On real repositories it once did harm: on pytest-11148 the
+reviewer had fixed the issue and the check passed, and the tester — run only because the policy
+runs everyone — then edited the repository and the issue ended failed. That is the direct case for
+conditional admission: the stage that is not needed is not started, so it can neither cost nor
+break anything.
 
 ---
 
@@ -236,9 +296,12 @@ A passing state exists →  a later edit is checked
 
 It was added after wider crews were observed destroying solutions that earlier agents had already
 gotten working. It is a narrow safety net — a check-and-restore around writes, not a general
-transactional store. It does no patch merging, no conflict resolution and no branching. Across the
-runs above it recorded zero rollbacks, which is consistent with specialists that abstain rather
-than meddle.
+transactional store. It does no patch merging, no conflict resolution and no branching.
+
+**It only protects files on the host.** It snapshots host paths, so edits an agent makes inside a
+container — every real-repository run above — are checked but cannot be restored. On pytest-11148
+the gate saw the tester's edit break a passing state and recorded a rollback, but the container's
+file was not put back and the issue ended failed. Restoring container-side edits is not built yet.
 
 ---
 
@@ -895,19 +958,15 @@ system_insights:
 
 What the staged-recovery evidence does **not** cover:
 
-- **Staged recovery on real repositories is unmeasured, because the crew agent solves none of
-  them.** On the 13 self-tested SWE-bench Lite issues (flask, pylint, pytest), the lone crew
-  implementer with DeepSeek V4 Flash resolved 0/13 on the fixed executor. At the authored
-  benchmark's 100k-token allowance every run ran out of tokens while still reading; with the
-  allowance raised to 400k (decided before the run), 11 of 13 reached the 16-turn cap still
-  reading, and one edit was attempted across all 13. Staged recovery cannot be compared on real
-  repositories until the first stage solves some of them.
-- **The crew loop is the weak link there, not the model.** The same model resolved 44 of 95
-  SWE-bench Lite instances through Joule's adaptive step agent (30 steps, a different prompt and
-  action protocol; see [the escalation results](#results-the-escalation-ladder)). Closing that gap
-  in the crew executor is the next piece of work.
+- **The real-repository result is one run per issue on 13 issues.** Staged 11/13 against
+  `FULL_VERIFY` 9/13 rests on 4 discordant issues (p = 0.63); it shows that staging did not cost
+  quality and that recovery happens, not that staging is more accurate. Per-issue outcomes vary
+  from run to run. Three repetitions over a larger pool are the next measurement.
+- **The pool is three Python projects.** flask, pylint and pytest, selected by a self-test that
+  admitted 13 of 15 candidates; django and sympy were left out for test-runner and runtime reasons.
+- **The gate does not protect container edits.** See [verified edits](#safety-verified-edits).
 - **The authored benchmark is saturated.** With the executor fixed, the lone implementer passes
-  29/30, so it can no longer show whether a recovery stage improves outcomes — only what it costs.
+  29/30, so it shows what staging costs, not whether recovery helps.
 - **One model, one provider.** Every crew number is DeepSeek V4 Flash on OpenRouter. No multi-model
   generalization has been shown.
 - **The verifier is as good as your check.** Joule's guarantee is only ever "this command exited
@@ -926,19 +985,23 @@ are documented as wrong rather than deleted; the largest set is listed under
 
 ## Current Status
 
-**Research prototype / experimental runtime.** 1442 tests passing across 109 files. Active
+**Research prototype / experimental runtime.** 1456 tests passing across 109 files. Active
 development — expect API refinements.
 
-Supported by authored-fixture evidence:
-- verification-triggered staging costs what a single agent costs when that agent succeeds, and
-  avoids specialist work that measurably contributes nothing
+Supported, on real repositories (13 SWE-bench Lite issues, one run each):
+- a verifier-informed reviewer recovers real failures (4 of 6 in the staged arm)
+- staging matches or beats an always-on crew's outcomes at lower cost (11/13 vs 9/13, −22%)
+- an always-on specialist can break a fix that already passed; staging never starts it
+
+Supported, on authored fixtures:
+- staging costs what a single agent costs when that agent succeeds
 
 Withdrawn (executor bug, see [what changed](#what-changed-on-2026-10-01)):
-- verifier-informed handoff improves recovery quality
+- the authored-fixture "verifier evidence improves recovery" effect (27 → 30)
 - the benefit comes from the recovery role's framing, not from a second attempt
 
 Not established:
-- any real-repository result for crews
+- staging as *more accurate* than an always-on crew (not significant at this sample size)
 - multi-model generalization
 - production reliability
 
@@ -987,7 +1050,7 @@ Known limitations:
 ```bash
 pnpm install       # install dependencies
 pnpm build         # build all 9 packages
-pnpm test          # 1442 tests across 109 files
+pnpm test          # 1456 tests across 109 files
 pnpm dev           # watch mode
 ```
 

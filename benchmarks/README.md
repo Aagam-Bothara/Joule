@@ -1020,7 +1020,9 @@ lone-implementer failures here ended on a misread call (see above).
 ### Rerun on the fixed executor (`staged-replication-v3`)
 
 Same fixtures, repetitions, model and arms, run on 2026-10-01 with the unreadable-call fix: 120
-runs, $0.39 estimated. Data in `benchmarks/experiments/staged-replication-v3`.
+runs, $0.39 estimated. Data in `benchmarks/experiments/staged-replication-v3`. These runs used the
+provider's default output cap of 1024 tokens per reply; direct-mode agents now default to 4096
+(`AgentDefinition.maxOutputTokens`), and these cells have not been rerun at that setting.
 
 | arm | success | cost | tokens | stages |
 | --- | --- | --- | --- | --- |
@@ -1047,7 +1049,7 @@ first agent succeeds and costs well under half of an always-on crew. Whether a v
 recovery stage improves outcomes cannot be read from a benchmark the first agent passes 29/30;
 answering that needs harder tasks.
 
-### Real repositories: the crew implementer resolves none (`benchmarks/real-repo`)
+### Staged recovery on real repositories (`benchmarks/real-repo`)
 
 The SWE-bench Lite harness uses locally available images, real issues, hidden tests, and the
 official pass criterion. Its old-parser smoke and probe datasets are labelled in their manifests.
@@ -1087,15 +1089,74 @@ issue.
 | `real-repo-primary-baseline` | before the unreadable-call fix | 100k | 0/13 | 11 misread call, 1 empty reply, 1 budget | 0 |
 | `real-repo-primary-baseline-v2` | fixed | 100k | 0/13 | 13 budget exhausted after 6–11 model calls | 0 |
 | `real-repo-primary-baseline-400k` | fixed | 400k | 0/13 | 11 hit the 16-turn cap, 1 unreadable ×3, 1 network reset | 1 |
+| `real-repo-primary-out12k-c` | + 12k output per reply, native formats | 400k | **4/13** | 6 hit the 16-turn cap, 2 answered but failed, 1 empty ×3 | 9 |
+| `real-repo-primary-ladder-limits-b` | + escape repair, shell-block retry | 1.5M, 30 turns, 30 min | **6/13** | 6 hit the 30-turn cap, 1 answered but failed | 18 |
 
-The 400k allowance (`REAL_REPO_BUDGET` in `real-repo/crews.ts`: every `high` limit ×4 except cost)
-was decided after the v2 run and before the 400k run. With it, the crew implementer reads and
-searches for 16 turns and does not commit to an edit; estimated $0.48 for the 13 issues.
+Every allowance change was decided after the run before it and before the run it governed; the
+history is in the comment on `REAL_REPO_BUDGET` in `real-repo/crews.ts`.
 
-The same model resolved 44 of 95 SWE-bench Lite instances through the adaptive step agent
-(30 steps, its own prompt and action protocol, [above](#real-repositories-at-scale-95-swe-bench-lite-instances-2026-09-06)).
-On real repositories the gap is between Joule's two agent loops, not between models. Staged recovery
-cannot be compared on these issues until the crew's first stage resolves some of them.
+**Why the crew loop solved nothing, and the ladder's loop did.** The same model resolved 44 of 95
+SWE-bench Lite instances through the adaptive step agent
+([above](#real-repositories-at-scale-95-swe-bench-lite-instances-2026-09-06)). Comparing the two
+configurations side by side:
+
+| | escalation harness (step agent) | crew (direct executor), before |
+| --- | --- | --- |
+| output tokens per reply | 12,000 | 1,024 — nothing was set, so the provider default applied |
+| turns / time / tokens | 30 / 30 min / 1.5M | 16 / 10 min / 100k |
+| task text | step-by-step, `repo_edit` for changes | one line, `repo_write` to change files |
+
+The output cap was the blocker: an edit carries the file content in the reply, a whole-file
+`repo_write` of any real source file exceeds 1,024 tokens, and DeepSeek's reasoning spends part of
+the cap first. Direct-mode agents now default to 4,096 output tokens (`AgentDefinition.maxOutputTokens`;
+the real-repo crews set 12,000), and a reply cut off at the limit is answered with a request for a
+smaller edit. Raising the cap also surfaced the model's native call markup — `<｜DSML｜toolName>`
+tags, `<｜DSML｜invoke name="...">` with `<｜DSML｜parameter>` children, `ll_func:` tags — and shell
+backslashes (`grep "a\|b"`) that are invalid JSON escapes and made a whole call unreadable. All are
+now read; the escape repair is in the JSON reader the step agent shares. The task text was not
+changed in either run above, so the gap closed without porting the ladder's instructions.
+
+With matching allowances the crew loop resolves 6 of 13 (46%); the ladder's rate was 46% (44/95).
+One run per issue: `pylint-7993` passed at 16 turns and failed at 30, `pytest-7373` the reverse.
+
+**Staged against verified_full (`real-repo-staged-v1`, 2026-10-01).** Same 13 issues, same model,
+same three agents and per-agent allowance as the ladder-limits run, one run per issue per arm:
+26 runs, $1.77 estimated by Joule, about $0.70 billed by OpenRouter.
+
+| arm | resolved | mean cost | mean tokens | mean stages |
+| --- | --- | --- | --- | --- |
+| `verified_full` | 9/13 | $0.077 | 579,513 | 3.00 |
+| staged | 11/13 | $0.060 | 450,975 | 1.62 |
+
+| issue | lone implementer (ladder-limits-b) | `verified_full` | staged | staged stages | staged solved by |
+| --- | --- | --- | --- | --- | --- |
+| flask-4045 | ✗ | ✓ | ✓ | 2 | reviewer |
+| flask-5063 | ✗ | ✓ | ✓ | 2 | reviewer |
+| pylint-7114 | ✗ | ✗ | ✗ | 3 | — |
+| pylint-7228 | ✗ | ✓ | ✗ | 3 | — |
+| pylint-7993 | ✗ | ✓ | ✓ | 1 | implementer |
+| pytest-11143 | ✓ | ✓ | ✓ | 1 | implementer |
+| pytest-11148 | ✓ | ✗ | ✓ | 2 | reviewer |
+| pytest-7168 | ✓ | ✓ | ✓ | 1 | implementer |
+| pytest-7220 | ✗ | ✗ | ✓ | 1 | implementer |
+| pytest-7373 | ✓ | ✓ | ✓ | 1 | implementer |
+| pytest-7432 | ✓ | ✓ | ✓ | 1 | implementer |
+| pytest-8906 | ✗ | ✗ | ✓ | 2 | reviewer |
+| pytest-9359 | ✓ | ✓ | ✓ | 1 | implementer |
+
+- **Funnel (staged):** implementer 7/13; reviewer invoked 6 times, recovered 4; tester invoked
+  twice, recovered none. 18 of 26 specialist stages skipped.
+- **Paired:** 8 both, 3 staged only, 1 `verified_full` only, 1 neither — McNemar exact p = 0.63.
+  The difference is not significant; staging did not lose outcomes and cost 22% less per issue.
+- **After a passing check**, `verified_full` entered 17 specialist stages: 16 made no edit; one —
+  the tester on pytest-11148, after the reviewer's fix had passed — edited the repository and broke
+  it. The verified-edit gate recorded the rollback but cannot restore container-side files (it
+  snapshots host paths), so the issue ended failed. First regression from an always-on specialist
+  in any dataset here.
+- Each arm's implementer is a separate run, so per-issue outcomes also differ for reasons that
+  have nothing to do with the policy: pytest-7220 was solved by the staged implementer alone and
+  missed by `verified_full`'s.
+
 
 ### Reproducing
 
