@@ -11,8 +11,56 @@
  */
 
 import type { AgentResult } from '@joule/shared';
-import { failureStage, sanitizeAnswer, sanitizeFailure, toolCallSequence } from '../lifecycle/record.js';
-import type { AgentContribution } from './types.js';
+import { failureStage, modelHostCounts, sanitizeAnswer, sanitizeFailure, toolCallSequence } from '../lifecycle/record.js';
+import type { AgentContribution, CrewScalingRecord } from './types.js';
+
+/** Sum several per-key counts; undefined when there is nothing to count. */
+export function mergeCounts(all: ReadonlyArray<Record<string, number> | undefined>): Record<string, number> | undefined {
+  const out: Record<string, number> = {};
+  for (const counts of all) {
+    for (const [key, n] of Object.entries(counts ?? {})) out[key] = (out[key] ?? 0) + n;
+  }
+  return Object.keys(out).length > 0
+    ? Object.fromEntries(Object.entries(out).sort(([a], [b]) => a.localeCompare(b)))
+    : undefined;
+}
+
+/**
+ * A crew run's billed cost and serving hosts, from its agents. Fields are
+ * absent when no agent reported them, so "not reported" never reads as zero.
+ */
+export function crewBilling(
+  contributions: readonly AgentContribution[],
+): Pick<CrewScalingRecord, 'totalBilledCostUsd' | 'billedModelCalls' | 'modelHosts'> {
+  const billed = contributions.filter(c => typeof c.billedCostUsd === 'number');
+  const hosts = mergeCounts(contributions.map(c => c.modelHosts));
+  return {
+    ...(billed.length > 0 ? {
+      totalBilledCostUsd: billed.reduce((s, c) => s + (c.billedCostUsd ?? 0), 0),
+      billedModelCalls: billed.reduce((s, c) => s + (c.billedModelCalls ?? 0), 0),
+    } : {}),
+    ...(hosts ? { modelHosts: hosts } : {}),
+  };
+}
+
+/**
+ * Billed-cost totals for a manifest, next to the estimate it sits beside. The
+ * call counts say how much of the run the billed figure covers.
+ */
+export function manifestBilling(records: readonly CrewScalingRecord[]): {
+  totalBilledCostUsd: number | null;
+  billedModelCalls: number;
+  modelCalls: number;
+  modelHosts: Record<string, number>;
+} {
+  const billed = records.filter(r => typeof r.totalBilledCostUsd === 'number');
+  return {
+    totalBilledCostUsd: billed.length > 0 ? billed.reduce((s, r) => s + (r.totalBilledCostUsd ?? 0), 0) : null,
+    billedModelCalls: records.reduce((s, r) => s + (r.billedModelCalls ?? 0), 0),
+    modelCalls: records.reduce((s, r) => s + (r.modelCalls ?? 0), 0),
+    modelHosts: mergeCounts(records.map(r => r.modelHosts)) ?? {},
+  };
+}
 
 /** Per-agent work, from the lifecycle instrumentation the result already carries. */
 export function contributionOf(agentResult: AgentResult): AgentContribution {
@@ -25,12 +73,14 @@ export function contributionOf(agentResult: AgentResult): AgentContribution {
   const tools = toolCallSequence(events);
 
   const answer = sanitizeAnswer(result.result);
+  const hosts = modelHostCounts(events);
 
   return {
     ...(edits ? {
       proposedWrites: edits.proposed,
       acceptedWrites: edits.accepted,
       rolledBackWrites: edits.rollbacks,
+      ...(edits.restoreFailures ? { restoreFailedWrites: edits.restoreFailures } : {}),
       ...(edits.verified !== undefined ? { verified: edits.verified } : {}),
     } : {}),
     agentId: agentResult.agentId,
@@ -40,6 +90,9 @@ export function contributionOf(agentResult: AgentResult): AgentContribution {
     ...(error ? { error } : {}),
     ...(stage ? { failedFrom: stage } : {}),
     costUsd: agentResult.budgetUsed?.costUsd,
+    ...(typeof result.billedCostUsd === 'number' ? { billedCostUsd: result.billedCostUsd } : {}),
+    ...(typeof result.billedModelCalls === 'number' ? { billedModelCalls: result.billedModelCalls } : {}),
+    ...(hosts ? { modelHosts: hosts } : {}),
     tokens: agentResult.budgetUsed?.tokensUsed,
     modelCalls: metrics?.modelCalls ?? 0,
     toolCalls: metrics?.toolCalls ?? 0,

@@ -20,7 +20,8 @@ import { sweCrew } from './crews.js';
 import { observedRepoTools } from './record.js';
 import { compareStaged, renderStagedComparison } from '../specialist-value/staged-analyze.js';
 import { repoTools } from '../harness/workloads/swebench.js';
-import { ARTIFACT_ROOT, currentContainer, loadInstances, sweWorkloads, type SweItem } from './workload.js';
+import { manifestBilling } from '../crew-scaling/record.js';
+import { ARTIFACT_ROOT, CHECK_LABEL, currentContainer, loadInstances, sweWorkloads, type SweItem } from './workload.js';
 
 const DEFAULT_DIR = join('benchmarks', 'experiments', 'real-repo-validation');
 const TOOLS_NOTE = 'repo_read, repo_write, repo_edit, repo_shell (container-side; the authored fixtures used host file/shell tools)';
@@ -111,7 +112,7 @@ async function main(): Promise<void> {
       responseParser: 'array-xml-bare-alias-v1',
       toolOutputPolicy: 'repo_read 16000 chars, repo_shell 10000 chars, other tools 1000 chars',
       containerPythonEditGuard: 'repo_write/repo_edit compile .py and .pyi after writing; restore previous content or remove a new file on failure',
-      costAccounting: 'Joule budget estimate from total tokens and the local model price table; provider billed amount is not captured',
+      costAccounting: 'totalCostUsd is Joule\'s budget estimate from total tokens and the local model price table; billing.totalBilledCostUsd is what the provider reported it billed (OpenRouter usage.cost), covering billing.billedModelCalls of billing.modelCalls; billing.modelHosts counts calls per upstream host OpenRouter reported (recorded, not pinned)',
       benchmark: 'SWE-bench Lite (princeton-nlp/SWE-bench_Lite, test split)',
       selectionRule: 'image present locally AND repo is pytest-driven (pytest/pylint/flask) AND self-test passes (fails at base commit, passes with the upstream fix)',
       model, provider, arms,
@@ -120,13 +121,17 @@ async function main(): Promise<void> {
       repetitions: seeds,
       budgetMode: sweCrew('staged').budgetMode,
       perAgentBudget: sweCrew('staged').budget,
-      verificationPolicy: 'SWE-bench criterion in-container: hidden test patch applied over the agent\'s work, FAIL_TO_PASS and PASS_TO_PASS must all pass, test files restored afterwards',
-      verifiedEditGate: 'enabled, but inert for container-side edits (it snapshots host paths)',
+      verificationPolicy: 'SWE-bench criterion in-container: hidden test patch applied over the agent\'s work, FAIL_TO_PASS and PASS_TO_PASS must all pass, test files restored to the base commit (files the patch added removed) afterwards, tests run with PYTHONDONTWRITEBYTECODE=1',
+      checkerPlacement: 'checker (with the test patch embedded) kept on the host under the artifact directory and piped into the container on stdin for each check (benchmarks/real-repo/run-check.ts); nothing of it is written in the container; /tmp/test.patch and /tmp/check.py left by older runs, and hidden-test bytecode, are removed when an instance is prepared',
+      checkFeedback: `agents are told the check by name ("${CHECK_LABEL}"), never its command; its output (F2P/P2P counts, failing test names, a log tail) is shown unchanged: last 400 chars in gate messages, up to 1200 chars in the staged-recovery handoff`,
+      verifiedEditGate: 'enabled; snapshots and restores container-side files (repo_write/repo_edit paths under /testbed, read and written via docker exec) and rolls back an edit that turns a passing check into a failing one; a restore that fails is reported to the agent as not restored and counted as restoreFailedWrites, never as a rollback',
+      toolArgumentRecording: 'agentResults[].tools[].args: call arguments as JSON, secrets redacted, truncated to 300 chars',
       tools: TOOLS_NOTE,
       observedTools,
       toolLoopSemantics: 'identical-call repeat blocked (tool + arguments); no tool is ever disabled',
       runs: results.reduce((n, r) => n + r.records.length, 0),
       totalCostUsd: results.reduce((s, r) => s + r.records.reduce((x, y) => x + (y.totalCostUsd ?? 0), 0), 0),
+      billing: manifestBilling(results.flatMap(r => r.records)),
     }, null, 2));
 
     const spend = results.reduce((s, r) => s + r.records.reduce((x, y) => x + (y.totalCostUsd ?? 0), 0), 0);

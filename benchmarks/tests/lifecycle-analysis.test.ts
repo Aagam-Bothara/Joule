@@ -4,9 +4,11 @@ import {
   activeInterval,
   failureStage,
   intervalsInState,
+  modelHostCounts,
   parseJsonl,
   recordsFromHarnessReport,
   sanitizeFailure,
+  sanitizeToolArgs,
   toJsonl,
   toLifecycleRecord,
   toolCallSequence,
@@ -197,6 +199,62 @@ describe('experiment records', () => {
     expect(toolCallSequence(events('a', [
       { to: 'tool_wait', at: 0, tool: 'shell_exec' },
     ]))).toEqual([{ tool: 'shell_exec', durationMs: 0, ok: false }]);
+  });
+
+  it('keeps what each tool call was asked to do, redacted and truncated', () => {
+    const long = `{"path":"src/a.py","content":"${'y'.repeat(600)}"}`;
+    const r = record('agent_tester', [
+      { to: 'tool_wait', at: 0, tool: 'repo_shell', metadata: { iteration: 1, args: '{"command":"cat /tmp/test.patch"}' } },
+      { to: 'ready', at: 10, tool: 'repo_shell', metadata: { ok: true } },
+      { to: 'tool_wait', at: 20, tool: 'repo_shell', metadata: { args: '{"command":"curl -H \\"Authorization: Bearer abcdefghijklmnopqrst\\" https://x"}' } },
+      { to: 'ready', at: 30, tool: 'repo_shell', metadata: { ok: true } },
+      { to: 'tool_wait', at: 40, tool: 'repo_write', metadata: { args: long } },
+      { to: 'ready', at: 50, tool: 'repo_write', metadata: { ok: true } },
+      { to: 'completed', at: 60 },
+    ]);
+
+    const tools = r.tools ?? [];
+    // The audit question: did an agent read the hidden tests?
+    expect(tools[0].args).toBe('{"command":"cat /tmp/test.patch"}');
+    expect(tools[1].args).toContain('Bearer [redacted]');
+    expect(tools[1].args).not.toContain('abcdefghijklmnopqrst');
+    expect(tools[2].args).toHaveLength(301);
+    expect(tools[2].args?.endsWith('…')).toBe(true);
+
+    // The raw events kept beside them carry the same redacted, bounded text.
+    const stored = r.lifecycleEvents.filter(e => e.to === 'tool_wait').map(e => e.metadata?.args);
+    expect(stored).toEqual(tools.map(t => t.args));
+    expect(r.lifecycleEvents[0].metadata?.iteration).toBe(1);
+  });
+
+  it('leaves args off records whose events carry none', () => {
+    const tools = toolCallSequence(events('a', [
+      { to: 'tool_wait', at: 0, tool: 'file_read' },
+      { to: 'ready', at: 5, tool: 'file_read', metadata: { ok: true } },
+    ]));
+    expect(tools).toEqual([{ tool: 'file_read', durationMs: 5, ok: true }]);
+    expect(sanitizeToolArgs({ command: 'ls' })).toBe('{"command":"ls"}');
+    expect(sanitizeToolArgs(undefined)).toBeUndefined();
+  });
+
+  it('counts model calls by the host that served them', () => {
+    const evs = events('a', [
+      { to: 'model_running', at: 0 },
+      { to: 'ready', at: 10, metadata: { host: 'StreamLake' } },
+      { to: 'model_running', at: 20 },
+      { to: 'ready', at: 30, metadata: { host: 'OpenInference' } },
+      { to: 'model_running', at: 40 },
+      { to: 'ready', at: 50, metadata: { host: 'StreamLake' } },
+      { to: 'model_running', at: 60 },
+      { to: 'ready', at: 70 },
+      { to: 'completed', at: 80 },
+    ]);
+    expect(modelHostCounts(evs)).toEqual({ StreamLake: 2, OpenInference: 1 });
+    expect(modelHostCounts(events('a', AGENT_STEPS))).toBeUndefined();
+
+    const r = toLifecycleRecord({ taskId: 't', status: 'completed', lifecycle: evs, lifecycleMetrics: metricsFrom(evs) }, { runId: 'r' })!;
+    expect(r.modelHosts).toEqual({ StreamLake: 2, OpenInference: 1 });
+    expect(record('agent_ok', AGENT_STEPS).modelHosts).toBeUndefined();
   });
 
   it('keeps why a run failed and how far it got', () => {

@@ -5,14 +5,17 @@
  * on the host. A SWE-bench instance lives inside its own container, so the
  * tools are `repo_read`, `repo_write`, `repo_edit` and `repo_shell` instead.
  * The roles are otherwise carried over word for word: same responsibility, same
- * adversarial framing for the recovery stages, same wall-clock ceilings and
- * budget mode. Recovery has 16 iterations because the 10-iteration authored
- * fixture limit ended real-repository inspection mid-task.
+ * adversarial framing for the recovery stages and budget mode. The limits are
+ * not carried over: every agent, primary and recovery alike, gets 30
+ * iterations, 30 minutes, 1.5M tokens and 12k output tokens per reply (the
+ * escalation harness's SWE-bench allowance; history on `REAL_REPO_BUDGET`
+ * below), because the authored-fixture limits ended real-repository work
+ * before an edit landed.
  *
  * This is a port, not a rewrite, and it is worth being explicit that it is not
  * a null change: the prompts name different tools than the authored-fixture
  * runs did. Both arms get exactly the same definitions, so the comparison
- * between them is unaffected â€” it is the comparison with the earlier datasets
+ * between them is unaffected — it is the comparison with the earlier datasets
  * that carries the caveat.
  */
 

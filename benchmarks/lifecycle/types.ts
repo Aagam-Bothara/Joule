@@ -31,6 +31,12 @@ export interface ToolCallRecord {
   rolledBack?: boolean;
   /** Failure message, first line only */
   error?: string;
+  /**
+   * The call's arguments as JSON, secrets redacted, truncated. What the tool
+   * was asked to do: whether an agent read a file or ran a command is only
+   * visible here. Absent on records written before arguments were recorded.
+   */
+  args?: string;
 }
 
 /** One agent run. The unit of the experiment. */
@@ -78,7 +84,13 @@ export interface AgentLifecycleRecord {
    * Absent on records written before tool identity was recorded.
    */
   tools?: ToolCallRecord[];
+  /**
+   * Model calls per upstream host that served them, when the provider named
+   * one (OpenRouter does). Absent when no call reported a host.
+   */
+  modelHosts?: Record<string, number>;
 
+  /** The raw transitions; tool arguments in them are redacted and truncated like `tools[].args` */
   lifecycleEvents: AgentLifecycleEvent[];
 }
 

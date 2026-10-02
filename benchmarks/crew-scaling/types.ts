@@ -27,7 +27,17 @@ export interface AgentContribution {
   error?: string;
   /** Lifecycle state the run failed from; `ready` means it never started work */
   failedFrom?: string;
+  /** Joule's token-based estimate (local price table) */
   costUsd?: number;
+  /**
+   * What the provider reported it billed for this agent's model calls, summed.
+   * Absent when no call reported a cost; covers `billedModelCalls` of
+   * `modelCalls` calls, so a partial sum is visible as one.
+   */
+  billedCostUsd?: number;
+  billedModelCalls?: number;
+  /** Model calls per upstream host that served them, when the provider named one */
+  modelHosts?: Record<string, number>;
   tokens?: number;
   modelCalls: number;
   toolCalls: number;
@@ -54,6 +64,11 @@ export interface AgentContribution {
   proposedWrites?: number;
   acceptedWrites?: number;
   rolledBackWrites?: number;
+  /**
+   * Regressions the gate tried to undo but could not (the restore failed).
+   * Present only when non-zero; never included in `rolledBackWrites`.
+   */
+  restoreFailedWrites?: number;
 }
 
 export interface CrewScalingRecord {
@@ -96,7 +111,18 @@ export interface CrewScalingRecord {
    */
   workflowJctMs?: number;
 
+  /** Joule's token-based cost estimate */
   totalCostUsd?: number;
+  /**
+   * Sum of what the provider reported it billed, across the crew's agents.
+   * Absent when nothing was reported. It covers `billedModelCalls` of
+   * `modelCalls`; a model call made outside the agents (a `custom` crew
+   * aggregation) is not included.
+   */
+  totalBilledCostUsd?: number;
+  billedModelCalls?: number;
+  /** Model calls per upstream host, across the crew's agents */
+  modelHosts?: Record<string, number>;
   totalTokens?: number;
   /**
    * Prompt/completion split is not tracked per agent on the direct execution

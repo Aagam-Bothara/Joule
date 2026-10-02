@@ -16,8 +16,8 @@ import { generateId } from '@joule/shared';
 import type { CrewDefinition, CrewResult, ModelProviderName, Task, ToolDefinition } from '@joule/shared';
 import { sanitizeFailure } from '../lifecycle/record.js';
 import { crewForWidth, roleNames } from './crews.js';
-import { contributionOf } from './record.js';
-import { loadScalingTasks, prepareTask, type PreparedTask, type ScalingTask } from './tasks.js';
+import { contributionOf, crewBilling, manifestBilling } from './record.js';
+import { gatePolicy, loadScalingTasks, prepareTask, type PreparedTask, type ScalingTask } from './tasks.js';
 import type { AgentContribution, CrewScalingRecord, CrewWidth } from './types.js';
 
 /**
@@ -131,6 +131,7 @@ function toRecord(args: {
     ...(sanitizeFailure(args.crew.error) ? { crewError: sanitizeFailure(args.crew.error) } : {}),
     workflowJctMs: args.jctMs,
     totalCostUsd: args.crew.budgetUsed?.costUsd ?? sum(c => c.costUsd ?? 0),
+    ...crewBilling(contributions),
     totalTokens: args.crew.budgetUsed?.tokensUsed ?? sum(c => c.tokens ?? 0),
     modelCalls: sum(c => c.modelCalls),
     toolCalls: sum(c => c.toolCalls),
@@ -224,13 +225,7 @@ export async function runCrewScaling(opts: RunnerOptions): Promise<CrewScalingRe
           id: generateId('scaling-task'),
           description: prepared.description,
           createdAt: new Date().toISOString(),
-          ...(opts.verifiedEdit
-            ? {
-              verifiedEdit: prepared.verifyCommand !== undefined
-                ? { command: prepared.verifyCommand, timeoutMs: 900_000 }
-                : { command: 'python run_tests.py', cwd: prepared.dir, timeoutMs: 30_000 },
-            }
-            : {}),
+          ...(opts.verifiedEdit ? { verifiedEdit: gatePolicy(prepared) } : {}),
         };
         process.stderr.write(`${task.workloadId} w${width} s${seed}: `);
         const began = Date.now();
@@ -283,6 +278,7 @@ export async function runCrewScaling(opts: RunnerOptions): Promise<CrewScalingRe
     taskOffset: opts.offset,
     runs: records.length,
     totalCostUsd: records.reduce((s, r) => s + (r.totalCostUsd ?? 0), 0),
+    billing: manifestBilling(records),
     seeds,
     notes: seeds > 1
       ? `${seeds} repetitions per (task, width); repetitions differ only through provider sampling.`

@@ -11,8 +11,8 @@ import {
   renderRepeatability,
   repeatability,
 } from '../crew-scaling/analyze.js';
-import { contributionOf } from '../crew-scaling/record.js';
-import type { CrewScalingRecord, CrewWidth } from '../crew-scaling/types.js';
+import { contributionOf, crewBilling, manifestBilling } from '../crew-scaling/record.js';
+import type { AgentContribution, CrewScalingRecord, CrewWidth } from '../crew-scaling/types.js';
 import type { AgentLifecycleEvent, AgentLifecycleState, AgentResult, LifecycleMetrics } from '@joule/shared';
 
 /** A record with sane defaults; every test overrides only what it asserts on. */
@@ -426,5 +426,71 @@ describe('agent contribution records', () => {
     expect(row.failedFrom).toBeUndefined();
     expect(row.tools).toBeUndefined();
     expect(row.status).toBe('completed');
+  });
+
+  it('keeps a failed restore apart from a rollback', () => {
+    const withEdits = (verifiedEdits: Record<string, unknown>) => {
+      const r = agentResult({ status: 'completed' });
+      (r.taskResult as unknown as Record<string, unknown>).verifiedEdits = verifiedEdits;
+      return contributionOf(r);
+    };
+    const base = { checks: 3, proposed: 2, accepted: 1, acceptanceRate: 0.5, byAuthor: {} };
+
+    const failed = withEdits({ ...base, rollbacks: 0, restoreFailures: 1, verified: false });
+    expect(failed).toMatchObject({ proposedWrites: 2, acceptedWrites: 1, rolledBackWrites: 0, restoreFailedWrites: 1 });
+
+    // Rows from runs without a failed restore keep their old shape.
+    const restored = withEdits({ ...base, rollbacks: 1, restoreFailures: 0, verified: true });
+    expect(restored.rolledBackWrites).toBe(1);
+    expect('restoreFailedWrites' in restored).toBe(false);
+  });
+
+  it('keeps the billed cost and serving hosts apart from the estimate', () => {
+    const r = agentResult({
+      status: 'completed',
+      metrics: { modelCalls: 3 },
+      lifecycle: [
+        evt('ready', 'model_running', 0),
+        evt('model_running', 'ready', 10, { metadata: { host: 'StreamLake' } }),
+        evt('ready', 'model_running', 20),
+        evt('model_running', 'ready', 30, { metadata: { host: 'StreamLake' } }),
+        evt('ready', 'model_running', 40),
+        evt('model_running', 'ready', 50),
+        evt('ready', 'completed', 60),
+      ],
+    });
+    Object.assign(r.taskResult, { billedCostUsd: 0.0031, billedModelCalls: 2 });
+    const row = contributionOf(r);
+
+    expect(row).toMatchObject({ costUsd: 0, billedCostUsd: 0.0031, billedModelCalls: 2, modelHosts: { StreamLake: 2 } });
+
+    // Nothing reported: the fields are absent, never zero.
+    const plain = contributionOf(agentResult({ status: 'completed' }));
+    expect('billedCostUsd' in plain).toBe(false);
+    expect('modelHosts' in plain).toBe(false);
+  });
+});
+
+describe('billed cost totals', () => {
+  const contribution = (o: Partial<AgentContribution>): AgentContribution => ({ agentId: 'a', modelCalls: 1, toolCalls: 0, ...o });
+
+  it('sums a crew\'s billed cost and hosts, and leaves them off when nothing was reported', () => {
+    const totals = crewBilling([
+      contribution({ billedCostUsd: 0.002, billedModelCalls: 2, modelHosts: { B: 1, A: 1 } }),
+      contribution({ modelHosts: { A: 2 } }),
+      contribution({ billedCostUsd: 0.001, billedModelCalls: 1 }),
+    ]);
+    expect(totals.totalBilledCostUsd).toBeCloseTo(0.003, 12);
+    expect(totals).toMatchObject({ billedModelCalls: 3, modelHosts: { A: 3, B: 1 } });
+    expect(crewBilling([contribution({}), contribution({})])).toEqual({});
+  });
+
+  it('totals a manifest with the call coverage beside it', () => {
+    const records = [
+      rec('t1', 1, { modelCalls: 4, totalBilledCostUsd: 0.01, billedModelCalls: 4, modelHosts: { A: 4 } }),
+      rec('t2', 1, { modelCalls: 2 }),
+    ];
+    expect(manifestBilling(records)).toEqual({ totalBilledCostUsd: 0.01, billedModelCalls: 4, modelCalls: 6, modelHosts: { A: 4 } });
+    expect(manifestBilling([rec('t3', 1, { modelCalls: 2 })]).totalBilledCostUsd).toBeNull();
   });
 });

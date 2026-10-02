@@ -13,6 +13,8 @@ import type { AgentExecutionMode, AgentLifecycleRecord, LifecycleInterval, ToolC
 const MAX_ERROR_CHARS = 300;
 /** Longest agent answer kept in an experiment artifact. */
 const MAX_ANSWER_CHARS = 800;
+/** Longest tool-argument text kept in an experiment artifact. */
+const MAX_ARGS_CHARS = 300;
 
 /** Strip anything shaped like a credential, in case a provider echoed a request back. */
 function redactSecrets(text: string): string {
@@ -53,6 +55,42 @@ export function sanitizeAnswer(value: unknown): string | undefined {
 }
 
 /**
+ * A tool call's arguments as kept in an artifact: JSON text, redacted before it
+ * is cut, so a credential cannot survive by straddling the cut.
+ */
+export function sanitizeToolArgs(value: unknown): string | undefined {
+  if (value === undefined || value === null) return undefined;
+  let text: string;
+  if (typeof value === 'string') text = value;
+  else {
+    try { text = JSON.stringify(value) ?? ''; } catch { return undefined; }
+  }
+  const redacted = redactSecrets(text);
+  if (redacted.length === 0) return undefined;
+  return redacted.length > MAX_ARGS_CHARS ? `${redacted.slice(0, MAX_ARGS_CHARS)}…` : redacted;
+}
+
+/** Model calls per upstream host, from the `host` the executor put on each model_end. */
+export function modelHostCounts(events: readonly AgentLifecycleEvent[]): Record<string, number> | undefined {
+  const counts: Record<string, number> = {};
+  for (const e of events) {
+    const host = e.from === 'model_running' ? e.metadata?.host : undefined;
+    if (typeof host === 'string' && host.length > 0) counts[host] = (counts[host] ?? 0) + 1;
+  }
+  return Object.keys(counts).length > 0 ? counts : undefined;
+}
+
+/** The events with any tool arguments in them redacted and truncated, for storage. */
+export function redactEventArgs(events: readonly AgentLifecycleEvent[]): AgentLifecycleEvent[] {
+  return events.map(e => {
+    if (e.metadata?.args === undefined) return e;
+    const args = sanitizeToolArgs(e.metadata.args);
+    const { args: _raw, ...rest } = e.metadata;
+    return { ...e, metadata: { ...rest, ...(args !== undefined ? { args } : {}) } };
+  });
+}
+
+/**
  * Every tool call in order, with the outcome the executor reported.
  *
  * A window is opened by the transition into `tool_wait` and closed by the
@@ -63,11 +101,12 @@ export function sanitizeAnswer(value: unknown): string | undefined {
  */
 export function toolCallSequence(events: readonly AgentLifecycleEvent[]): ToolCallRecord[] {
   const out: ToolCallRecord[] = [];
-  let open: { tool: string; start: number } | undefined;
+  let open: { tool: string; start: number; args?: string } | undefined;
 
   for (const e of events) {
     if (e.to === 'tool_wait') {
-      open = { tool: e.tool ?? 'unknown', start: e.timestamp };
+      const args = sanitizeToolArgs(e.metadata?.args);
+      open = { tool: e.tool ?? 'unknown', start: e.timestamp, ...(args !== undefined ? { args } : {}) };
       continue;
     }
     if (open !== undefined && e.from === 'tool_wait') {
@@ -78,6 +117,7 @@ export function toolCallSequence(events: readonly AgentLifecycleEvent[]): ToolCa
         ...(typeof meta.ok === 'boolean' ? { ok: meta.ok } : {}),
         ...(meta.rolledBack === true ? { rolledBack: true } : {}),
         ...(meta.error !== undefined ? { error: sanitizeFailure(meta.error) } : {}),
+        ...(open.args !== undefined ? { args: open.args } : {}),
       });
       open = undefined;
     }
@@ -85,7 +125,7 @@ export function toolCallSequence(events: readonly AgentLifecycleEvent[]): ToolCa
 
   // A call still in flight when the events stop has no measured end and never
   // returned, so it is listed with no duration and as not having succeeded.
-  if (open !== undefined) out.push({ tool: open.tool, durationMs: 0, ok: false });
+  if (open !== undefined) out.push({ tool: open.tool, durationMs: 0, ok: false, ...(open.args !== undefined ? { args: open.args } : {}) });
   return out;
 }
 
@@ -186,8 +226,9 @@ export function toLifecycleRecord(result: LifecycleSource, opts: RecordOptions):
     minToolWaitMs: waits.length > 0 ? Math.min(...waits) : 0,
     toolWaitDurationsMs: waits,
     tools: toolCallSequence(events),
+    ...(modelHostCounts(events) ? { modelHosts: modelHostCounts(events) } : {}),
 
-    lifecycleEvents: [...events],
+    lifecycleEvents: redactEventArgs(events),
   };
 }
 

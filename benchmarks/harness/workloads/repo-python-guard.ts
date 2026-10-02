@@ -6,7 +6,8 @@ export interface RepoCommandResult {
 
 export type RepoCommand = (command: string, timeoutMs: number, input?: string) => RepoCommandResult;
 
-const quote = (value: string): string => `'${value.replace(/'/g, "'\\''")}'`;
+/** Single-quote a value for bash. */
+export const quote = (value: string): string => `'${value.replace(/'/g, "'\\''")}'`;
 const isPython = (path: string): boolean => /\.pyi?$/i.test(path);
 
 /** Keep Python files parseable after each container-side write. */

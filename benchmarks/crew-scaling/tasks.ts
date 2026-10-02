@@ -11,6 +11,7 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+import type { EditWorkspace, VerifiedEditPolicy } from '@joule/shared';
 import type { CrewWidth } from './types.js';
 
 const DATA = resolve('benchmarks/data/sanitized-mbpp.json');
@@ -85,8 +86,37 @@ export interface PreparedTask {
    * runs inside its container rather than in this directory.
    */
   verifyCommand?: string;
+  /**
+   * What agents are told the check is, instead of its command line. Only
+   * used with `verifyCommand`; without it the command is shown as before.
+   */
+  verifyLabel?: string;
+  /**
+   * Where the agents' write tools put files, when that is not the host
+   * filesystem. The verified-edit gate snapshots and restores through it; a
+   * real repository's files live inside its container.
+   */
+  workspace?: EditWorkspace;
   /** Rewrites the tests, runs them, and reports whether they all passed. */
   verify(): { success: boolean; output: string };
+}
+
+/**
+ * The verified-edit policy a prepared task runs under.
+ *
+ * Without a workload-supplied command this is the policy every authored
+ * benchmark used: run the task's tests in its directory, guard host files.
+ */
+export function gatePolicy(prepared: PreparedTask): VerifiedEditPolicy {
+  if (prepared.verifyCommand === undefined) {
+    return { command: 'python run_tests.py', cwd: prepared.dir, timeoutMs: 30_000 };
+  }
+  return {
+    command: prepared.verifyCommand,
+    timeoutMs: 900_000,
+    ...(prepared.verifyLabel ? { label: prepared.verifyLabel } : {}),
+    ...(prepared.workspace ? { workspace: prepared.workspace } : {}),
+  };
 }
 
 /**

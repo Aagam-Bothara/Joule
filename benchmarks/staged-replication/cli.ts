@@ -16,6 +16,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { parseJsonl } from '../lifecycle/record.js';
 import type { CrewScalingRecord } from '../crew-scaling/types.js';
+import { manifestBilling } from '../crew-scaling/record.js';
 import { renderSelfTest, selfTestAll } from '../specialist-value/selftest.js';
 import { runStagedComparison } from '../specialist-value/runner.js';
 import { COMPARISON_ARMS, comparisonCrew, type ComparisonArm } from '../specialist-value/crews.js';
@@ -113,6 +114,8 @@ async function main(): Promise<void> {
       toolLoopSemantics: 'identical-call repeat blocked (tool + arguments); no tool is ever disabled',
       runs: byArm.reduce((n, a) => n + a.records.length, 0),
       totalCostUsd: byArm.reduce((s, a) => s + a.records.reduce((x, r) => x + (r.totalCostUsd ?? 0), 0), 0),
+      costAccounting: 'totalCostUsd is Joule\'s estimate from tokens and the local price table; billing.totalBilledCostUsd is what the provider reported it billed (OpenRouter usage.cost), covering billing.billedModelCalls of billing.modelCalls',
+      billing: manifestBilling(byArm.flatMap(a => a.records)),
     }, null, 2));
 
     const spend = byArm.reduce((s, a) => s + a.records.reduce((x, r) => x + (r.totalCostUsd ?? 0), 0), 0);
