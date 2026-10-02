@@ -1254,6 +1254,112 @@ Status: code and Docker checks in place; no model has been run under these rules
 self-test covered the 88 instances with a local image: 86 usable (django-13551 and django-13590
 fail with the upstream fix), so the held-out pool is django-10914 through django-12453, 30 issues
 (`benchmarks/experiments/real-repo-heldout/pool.json`).
+2026-10-02: reproduction-test generation ran on the 13 development issues and stored 11 tests over
+two passes (8 with prompt v1, 3 more when the 5 missing were retried with prompt v2; about $0.254
+billed including an aborted first invocation), `repro-fidelity` found 5 of the 13 faithful, so the
+pre-registered fallback applies and
+G1 and G2 run with `visible-f2p` (Amendment 1 below); repro-gen for the held-out pool was skipped.
+
+#### Amendment 1 (2026-10-02, after commit ff01479, before any G1/G2 run)
+
+Nothing here changes a threshold, a decision rule, or anything an agent sees (task text, check
+labels, prompts, allowances and the recovery handoff are pinned by tests at their ff01479 values).
+It records how the fallback was triggered, fixes the run counts, and adds reporting.
+
+**(a) The repro fallback applied.** `repro-fidelity` finished at 10:43 on 2026-10-02: 5 of the 13
+development issues have a faithful reproduction test (pallets__flask-4045, pytest-dev__pytest-11143,
+pytest-11148, pytest-7432, pytest-8906). Two issues have no stored test, and all 6 unfaithful
+tests fail both at the base commit and with the upstream fix. 5 is "5 or fewer", so G1 and G2 run
+with `--check visible-f2p` on the development pool, and on the held-out pool too, for which
+repro-gen was therefore skipped. Timeline: the "5 or fewer" rule was already in the draft
+pre-registration when it was read at about 00:50 on 2026-10-02, before repro-gen started at 01:27;
+the fidelity result (10:43) came before commit ff01479 (10:51), which committed the rule as
+drafted. No G1 or G2 run has happened. (All times 2026-10-02, UTC−5, the commit's own zone.)
+
+What repro-gen ran and cost, in full. A first invocation started at 01:27:57. It finished
+pallets__flask-4045 with no test (the author agent failed after 4 model calls, about $0.0022
+billed, and the record did not keep the agent's error), and was stopped at about 01:31 to add
+error and tool-call recording; its output directory was deleted, and generation restarted from
+scratch at 01:32 (flask-4045 was regenerated, and is one of the 5 faithful). Billed by OpenRouter:
+about $0.0022 for the aborted invocation, $0.2213 for pass 1 (prompt v1, 13 issues, 8 stored) and
+$0.0308 for the retry (prompt v2, the 5 missing, 3 stored) — about $0.254 in all, from the two
+manifests plus the aborted run. An earlier figure of about $0.31 was an arithmetic error (it added
+the retry pass's `repro.jsonl` total, which also counts the 8 records the retry kept from pass 1).
+None of this changes a decision: even with flask-4045 not counted, 4 faithful is still "5 or
+fewer".
+
+**(b) What `visible-f2p` measures.** It is a test-given (TDD) setting: the visible tests are the
+upstream fix's own FAIL_TO_PASS tests, with expectations specific to that fix's implementation.
+G1 therefore answers "does staged recovery help when the user already has the right failing
+tests?", not "does it help with a check a user would write". The visible FAIL_TO_PASS set is the
+hidden FAIL_TO_PASS set, so, apart from flaky tests or timeouts, a false pass (check passes,
+hidden tests fail) can only be a PASS_TO_PASS regression.
+
+**(c) Run counts, fixed now.** G1: one staged run per issue per pool (13 development, 30
+held-out). G2: 3 seeds per development issue, 1 per held-out issue. No further seeds are added
+after any result has been seen. Fewer than 15 branch points is still "not decided". The constants
+are `G1_RUNS_PER_ISSUE` and `G2_SEEDS` in `real-repo/prereg.ts`; `run` and `branch` record
+`seedsMatchPrereg` in their manifests and warn on a mismatch.
+
+**(d) Added reporting — no thresholds, no change to any decision.**
+- G2 by how stage 1 ended (`answered`, `turn_cap`, `wall_clock`, `budget`, `unreadable`,
+  `error`): branch points and R/C0/C1 recovery rates per stratum (`g2.json` `strata`).
+- G1 recoveries by how the stage before the solving stage ended (`g1.json` `report`).
+- Tokens, provider-billed cost and hidden recoveries per billed dollar, per control (`g2.json`
+  `cost`, and billing per control in the branch manifest) and per arm (`analyze`). The direct
+  executor now also records prompt, completion and cached prompt tokens; recording them changes
+  no model request (a golden test pins the request sequence).
+- A secondary regression score on every non-oracle run (`secondary`): the repository's own
+  tests for the changed non-test modules, matched by file name only (`test_<stem>.py`,
+  `<stem>_test.py`, `unittest_<stem>.py`, at most 5 files, test-patch files excluded), run now and
+  with those modules at their base versions; a regression is a test that passed at base and fails
+  now, or a test file that no longer collects (pytest's `ERROR <file>`, Django's `_FailedTest`)
+  when tests from it passed at base. Name matching makes coverage partial, especially for Django,
+  and `files: 0` is reported as "nothing matched", not read as clean. Staged arms score it after
+  every stage whose check passed. Each of its two test runs is killed inside the container after
+  420 s (its whole process session), the modules are always put back, and the host waits longer
+  than both runs can take; a run that hit the bound is reported (`timedOut`).
+- Extended false passes: check-passing stages where the hidden tests failed, or the secondary
+  score found a regression, or the diff audit flagged the change.
+- A diff audit on the same states (`audit`), read-only. It scans two things: the tracked files'
+  diff from the base commit (`git diff --no-color -U0 <base>`), and the untracked files
+  (`git ls-files --others --exclude-standard`), reading the first 64 KiB of up to 50 new non-test
+  `.py` files. It flags changed test infrastructure (test directories, conftest.py, pytest.ini,
+  tox.ini, setup.cfg, pyproject.toml, sitecustomize.py, usercustomize.py, `.pth` files, Django's
+  runner files, test-named files, and test files deleted or renamed away — a removed test counts
+  even if it is re-added elsewhere), and source lines (added lines of tracked files, every line of
+  new source files) that name a FAIL_TO_PASS test or detect a test run (`PYTEST_CURRENT_TEST`,
+  `'pytest' in sys.modules`, `sys.modules.get('pytest')`). New test files are listed, not flagged.
+  In `visible-f2p` the test-patch files are left out, since the check lays them again.
+
+None of these is shown to an agent; no rule reads them.
+
+**(e) Interpretation notes.**
+- Every control sees the check's output: the gate appends it to the agent's observation after a
+  write that leaves the check failing, and the `visible-f2p` task names the failing tests. So G2
+  compares evidence handed over (plus, for R, the reviewer framing) against evidence the agent
+  finds for itself — not access to evidence against none.
+- Contamination: DeepSeek V4 Flash has very likely seen these public SWE-bench issues and their
+  fixes in training. The held-out pool is held out from Joule's development, not from the model's
+  training data.
+- The hidden tests are incomplete, so measured false passes are a lower bound.
+- Timeouts. A host-side timeout ends only `docker exec`, not the program running in the
+  container, and on the Python 3.6 images `subprocess.run(..., timeout=)` does not return until
+  every grandchild holding its pipe has exited. The secondary score (new here) is bounded against
+  both. The pre-registered check and hidden-scorer programs have the same weakness under
+  timeouts and were deliberately left unchanged — byte-identical to ff01479 — so the
+  pre-registered procedure is unaltered; any timeout that occurs in a check or a hidden score
+  will be reported with the results.
+
+**(f) Considered and not adopted.**
+- A "resume the same implementer" control: it needs a transcript-resume hook in core and about
+  30% more spend, and C0 already matches the allowance of turns.
+- A placebo-evidence control: evidence cannot be withheld or replaced, because the gate echoes
+  the check's output to every agent.
+- Tagging branch points by evidence type: too few branch points to stratify further.
+- Repro-gen v3 (pass-then-invert, candidate selection): the development pool's fidelity has
+  already been seen, so tuning on it now would not be pre-registered; deferred to a separately
+  pre-registered follow-up.
 
 ### Reproducing
 
@@ -1277,6 +1383,10 @@ npx tsx benchmarks/real-repo/cli.ts run --check repro --repro-dir <dir> --arms s
 npx tsx benchmarks/real-repo/cli.ts analyze --arms staged --out-dir <out>           # writes g1.json
 npx tsx benchmarks/real-repo/cli.ts branch --check repro --repro-dir <dir> --controls R,C0,C1 --out-dir <out>
 npx tsx benchmarks/real-repo/cli.ts analyze-branch --out-dir <out>                  # writes g2.json
+# As amended (Amendment 1): visible-f2p, G1 one staged run per issue, G2 3 seeds dev / 1 held-out
+npx tsx benchmarks/real-repo/cli.ts run --check visible-f2p --arms staged --seeds 1 [--pool held-out] --out-dir <out>
+npx tsx benchmarks/real-repo/cli.ts branch --check visible-f2p --controls R,C0,C1 --seeds 3 --out-dir <out>
+npx tsx benchmarks/real-repo/cli.ts branch --check visible-f2p --controls R,C0,C1 --seeds 1 --pool held-out --out-dir <out>
 ```
 
 Datasets land in `benchmarks/experiments/` and are gitignored; the code that produces them is not.

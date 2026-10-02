@@ -33,16 +33,30 @@ import { compareStaged, renderStagedComparison } from '../specialist-value/stage
 import { repoTools } from '../harness/workloads/swebench.js';
 import { containerWorkspace } from '../harness/workloads/repo-workspace.js';
 import { manifestBilling } from '../crew-scaling/record.js';
-import { CHECK_DESCRIPTIONS, CHECK_LABELS, CHECK_MODES, type CheckMode } from './checks.js';
-import { CONTROL_DESCRIPTIONS, parseControls, runBranchPoint, type BranchRecord } from './branch.js';
+import { MAX_SCANNED_BYTES, MAX_SCANNED_UNTRACKED } from './audit.js';
+import {
+  CHECK_DESCRIPTIONS,
+  CHECK_LABELS,
+  CHECK_MODES,
+  MAX_SECONDARY_TEST_FILES,
+  SECONDARY_HOST_TIMEOUT_MS,
+  SECONDARY_RUN_TIMEOUT_S,
+  type CheckMode,
+} from './checks.js';
+import { CONTROL_DESCRIPTIONS, billingByControl, parseControls, runBranchPoint, type BranchRecord } from './branch.js';
 import {
   DEV_SELFTEST,
+  G1_RUNS_PER_ISSUE,
+  G2_SEEDS,
   HELD_OUT_DIR,
   HELD_OUT_SIZE,
+  PREREG_AMENDMENTS,
+  describeG1,
   devPoolIds,
   evaluateG1,
   evaluateG2,
   heldOutPoolIds,
+  renderG2Report,
   reproFallback,
   selectReproItems,
   type SelftestRow,
@@ -62,12 +76,14 @@ import {
   CHECK_LABEL,
   captureDiff,
   currentContainer,
+  diffAuditOf,
   inRepo,
   loadInstances,
   prepareInstance,
   restoreBranch,
   runCheck,
   scoreHidden,
+  scoreSecondary,
   sweWorkloads,
   type ReproCheck,
   type SweItem,
@@ -76,6 +92,15 @@ import {
 const DEFAULT_DIR = join('benchmarks', 'experiments', 'real-repo-validation');
 const TOOLS_NOTE = 'repo_read, repo_write, repo_edit, repo_shell (container-side; the authored fixtures used host file/shell tools)';
 const HIDDEN_SCORING = 'hidden SWE-bench criterion (instance test patch over the final state, FAIL_TO_PASS and PASS_TO_PASS) run by a separate host-side program that restores the repository exactly afterwards; recorded as `hidden`, never shown to an agent outside oracle mode';
+const SECONDARY_SCORING = `reporting only (Amendment 1; never shown to an agent, no decision reads it): recorded as \`secondary\` on the final state of every run and, in staged arms, after every stage whose check passed (staged.stages[].observation.secondary); branch outcomes carry it when their check passed. Changed non-test modules since the base commit (the repro check's rule, also excluding the test patch's files); their tracked test files matched BY FILE NAME ONLY (test_<stem>.py, <stem>_test.py, unittest_<stem>.py under the test directory, minus test-patch files, at most ${MAX_SECONDARY_TEST_FILES}); run now and again with the changed modules at their base versions; a regression is a test that passed at base and fails now, or a test file that no longer collects (pytest ERROR <file>, Django _FailedTest) when tests from it passed at base. Each test run is killed inside the container after ${SECONDARY_RUN_TIMEOUT_S} s (timeout -s KILL, then the whole process session), the base swap is always put back, and the host waits ${SECONDARY_HOST_TIMEOUT_MS / 1000} s, longer than both runs can take; runs that hit the bound are listed in \`timedOut\`. Matching by file name makes coverage partial, especially for Django (tests live in tests.py), and \`files: 0\` is reported as no test matched, not read as clean. No bytecode written; repository left byte-identical.`;
+const DIFF_AUDIT = `reporting only (Amendment 1): recorded as \`audit\` next to every \`secondary\` and after every staged stage; read-only: the tracked diff (\`git diff --no-color -U0 <base>\`), the untracked list (\`git ls-files --others --exclude-standard\`) and the first ${MAX_SCANNED_BYTES} bytes of up to ${MAX_SCANNED_UNTRACKED} untracked non-test .py files (head -c; no git add); visible-f2p test-patch files and the reproduction test excluded; flags test infrastructure changes (incl. sitecustomize.py, usercustomize.py, .pth, and test files deleted or renamed away) and source lines (added tracked lines, every line of new source files) naming a FAIL_TO_PASS test or detecting a test run (PYTEST_CURRENT_TEST, 'pytest' in sys.modules, sys.modules.get('pytest')); lists new test files without flagging them`;
+
+/** Whether --seeds is what Amendment 1 fixed; a mismatch is warned about, not blocked. */
+function seedsCheck(seeds: number, expected: number, what: string): boolean {
+  const matches = seeds === expected;
+  if (!matches) process.stderr.write(`WARNING: --seeds ${seeds} differs from the pre-registered ${expected} for ${what} (Amendment 1); the manifest records seedsMatchPrereg: false\n`);
+  return matches;
+}
 
 function arg(name: string, fallback?: string): string | undefined {
   const i = process.argv.indexOf(name);
@@ -157,7 +182,12 @@ function modeManifest(mode: CheckMode, repro: Map<string, ReproCheck> | undefine
     checkDescription: CHECK_DESCRIPTIONS[mode],
     checkLabel: CHECK_LABELS[mode],
     hiddenScoring: HIDDEN_SCORING,
-    ...(mode === 'oracle' ? {} : { stageScoring: 'staged arms: hidden score after every executed stage, stored as staged.stages[].observation.hidden; stage 1 also as stage1Hidden' }),
+    ...(mode === 'oracle' ? {} : {
+      stageScoring: 'staged arms: hidden score after every executed stage, stored as staged.stages[].observation.hidden; stage 1 also as stage1Hidden',
+      secondaryScoring: SECONDARY_SCORING,
+      diffAudit: DIFF_AUDIT,
+      preregAmendments: PREREG_AMENDMENTS,
+    }),
     ...(repro ? {
       reproDir: arg('--repro-dir'),
       reproPromptVersion: REPRO_PROMPT_VERSION,
@@ -203,6 +233,10 @@ async function main(): Promise<void> {
     const mode = parseMode();
     const picked = pickItems();
     const { items, repro, skipped } = forMode(mode, picked.items);
+    // G1 is a staged arm outside oracle mode: one run per issue (Amendment 1).
+    const seedsMatchPrereg = mode !== 'oracle' && arms.includes('staged')
+      ? seedsCheck(seeds, G1_RUNS_PER_ISSUE, 'G1 staged runs per issue')
+      : undefined;
 
     process.stderr.write(`${items.length * arms.length * seeds} run(s): ${items.length} real issue(s) x ${arms.length} arm(s) x ${seeds} rep(s), ${model}, check ${mode}\n`);
     const started = new Date().toISOString();
@@ -246,6 +280,7 @@ async function main(): Promise<void> {
       taskIds: items.map(i => i.instance_id),
       repositories: [...new Set(items.map(i => i.repo))],
       repetitions: seeds,
+      ...(seedsMatchPrereg !== undefined ? { seedsMatchPrereg, preregisteredRunsPerIssue: G1_RUNS_PER_ISSUE } : {}),
       budgetMode: sweCrew('staged').budgetMode,
       perAgentBudget: sweCrew('staged').budget,
       ...modeManifest(mode, repro, skipped),
@@ -355,6 +390,8 @@ async function main(): Promise<void> {
     const seeds = Number(arg('--seeds', '1'));
     const picked = pickItems();
     const { items, repro, skipped } = forMode(mode, picked.items);
+    const preregSeeds = picked.pool === 'held-out' ? G2_SEEDS['held-out'] : G2_SEEDS.dev;
+    const seedsMatchPrereg = mode !== 'oracle' ? seedsCheck(seeds, preregSeeds, `G2 seeds on the ${picked.pool} pool`) : undefined;
     const diffs = join(outDir, 'diffs');
     mkdirSync(diffs, { recursive: true });
     const started = new Date().toISOString();
@@ -370,6 +407,8 @@ async function main(): Promise<void> {
             verify: policy => runVerification(policy),
             recoveryTask: (task, policy, previous, checked) => recoveryTask(task, policy, previous, stageEvidence(checked)),
             scoreHidden: (container, it) => scoreHidden(container, it),
+            scoreSecondary: (container, it) => scoreSecondary(container, it),
+            auditDiff: (container, it, m) => diffAuditOf(container, it, m),
             captureDiff: (container, it) => captureDiff(container, it),
             restoreBranch: (container, it, diff) => restoreBranch(container, it, diff),
             saveDiff: (it, s, diff) => {
@@ -397,11 +436,14 @@ async function main(): Promise<void> {
       selectionRule: picked.selectionRule,
       taskIds: items.map(i => i.instance_id),
       seeds,
+      ...(seedsMatchPrereg !== undefined ? { seedsMatchPrereg, preregisteredSeeds: preregSeeds } : {}),
       controls: Object.fromEntries(controls.map(c => [c, CONTROL_DESCRIPTIONS[c]])),
       design: 'implementer alone; when the check fails, the repository diff against the base commit is the branch point; each control replays it in a freshly reset container and runs one agent with the same allowance as in the crews',
       perAgentBudget: singleAgentCrew(SWE_AGENTS.implementer, 'x').budget,
       ...modeManifest(mode, repro, skipped),
       branchPoints: records.filter(r => r.branched).length,
+      costAccounting: 'tokens are Joule\'s count; totalBilledCostUsd is what the provider reported it billed (OpenRouter usage.cost), over billedRuns of runs; null when no run of that kind reported one',
+      billingByControl: billingByControl(records),
       g2: evaluateG2(records),
     }, null, 2));
     process.stderr.write(`${records.filter(r => r.branched).length} branch point(s) of ${records.length} run(s), written under ${outDir}\n`);
@@ -422,12 +464,28 @@ async function main(): Promise<void> {
     const comparison = compareStaged(byArm);
     writeFileSync(join(outDir, 'summary.json'), JSON.stringify(comparison, null, 2));
     process.stdout.write(renderStagedComparison(comparison) + '\n');
+    // Provider-billed cost per arm (reporting only): what OpenRouter said it billed.
+    process.stdout.write('\nBilled cost per arm (provider-reported):\n');
+    for (const { arm, records } of byArm) {
+      const billed = records.filter(r => typeof r.totalBilledCostUsd === 'number');
+      const total = billed.reduce((s, r) => s + (r.totalBilledCostUsd ?? 0), 0);
+      // Resolved by the hidden score where there is one; per billed dollar over the runs that reported a bill.
+      const resolvedOf = (rs: readonly CrewScalingRecord[]) => rs.filter(r => (r.hidden ? r.hidden.resolved : r.success)).length;
+      process.stdout.write(billed.length === 0
+        ? `  ${arm}: nothing billed was reported (${records.length} run(s))\n`
+        : `  ${arm}: $${total.toFixed(4)} over ${billed.length} of ${records.length} run(s), mean $${(total / billed.length).toFixed(4)}; ${resolvedOf(records)} resolved${total > 0 ? `, ${(resolvedOf(billed) / total).toFixed(1)} per billed dollar` : ''}\n`);
+    }
     // G1, when the staged arm carries the separate hidden score.
     const staged = byArm.find(a => a.arm === 'staged');
     if (staged && staged.records.some(r => r.stage1Hidden)) {
       const g1 = evaluateG1(staged.records);
-      writeFileSync(join(outDir, 'g1.json'), JSON.stringify(g1, null, 2));
+      const report = describeG1(staged.records);
+      writeFileSync(join(outDir, 'g1.json'), JSON.stringify({ ...g1, report }, null, 2));
       process.stdout.write(`\nG1 (hidden): staged ${g1.stagedResolved}/${g1.runs} vs its own stage 1 ${g1.stage1Resolved}/${g1.runs}; false passes ${g1.falsePasses}/${g1.checkPasses} check passes -> ${g1.confirmed ? 'CONFIRMED' : 'not confirmed'}\n`);
+      const ends = Object.entries(report.recoveriesByPrecedingEnd).map(([e, n]) => `${e} ${n}`).join(', ') || 'none';
+      const x = report.extendedFalsePasses;
+      process.stdout.write(`G1 report (no threshold): ${report.recoveries} recover(ies) after stage 1, by how the preceding stage ended: ${ends}${report.unattributedRecoveries ? `; ${report.unattributedRecoveries} unattributed` : ''}\n`);
+      process.stdout.write(`  extended false passes: ${x.flagged}/${x.checkPasses} check passes flagged (hidden failed ${x.hiddenFailed}, secondary regression ${x.secondaryRegressed}, test infrastructure changed ${x.testInfraChanged}, suspicious lines ${x.suspicious}); secondary matched no test file after ${x.secondaryNoFiles}\n`);
     }
     return;
   }
@@ -437,7 +495,8 @@ async function main(): Promise<void> {
     if (!existsSync(file)) throw new Error(`no ${file}`);
     const g2 = evaluateG2(parseJsonl<BranchRecord>(readFileSync(file, 'utf8')));
     writeFileSync(join(outDir, 'g2.json'), JSON.stringify(g2, null, 2));
-    process.stdout.write(`${JSON.stringify(g2, null, 2)}\n`);
+    process.stdout.write(`G2: ${g2.branchPoints} branch point(s); R ${g2.rateR ?? '—'}, C0 ${g2.rateC0 ?? '—'}, C1 ${g2.rateC1 ?? '—'} -> ${g2.powered ? (g2.confirmed ? 'CONFIRMED' : 'not confirmed') : 'not decided (fewer than the pre-registered branch points)'}\n\n`);
+    process.stdout.write(`${renderG2Report(g2)}\n`);
     return;
   }
 

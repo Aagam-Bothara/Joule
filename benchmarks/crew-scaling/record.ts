@@ -62,6 +62,20 @@ export function manifestBilling(records: readonly CrewScalingRecord[]): {
   };
 }
 
+/**
+ * Input/output token split over the agents that reported one; absent when
+ * none did, so "not recorded" never reads as zero. Measurement only.
+ */
+export function tokenSplit(contributions: readonly AgentContribution[]): Pick<CrewScalingRecord, 'inputTokens' | 'outputTokens' | 'cachedInputTokens'> {
+  const split = contributions.filter(c => typeof c.promptTokens === 'number' || typeof c.completionTokens === 'number');
+  if (split.length === 0) return {};
+  return {
+    inputTokens: split.reduce((s, c) => s + (c.promptTokens ?? 0), 0),
+    outputTokens: split.reduce((s, c) => s + (c.completionTokens ?? 0), 0),
+    cachedInputTokens: split.reduce((s, c) => s + (c.cachedPromptTokens ?? 0), 0),
+  };
+}
+
 /** Per-agent work, from the lifecycle instrumentation the result already carries. */
 export function contributionOf(agentResult: AgentResult): AgentContribution {
   const result = agentResult.taskResult;
@@ -94,6 +108,9 @@ export function contributionOf(agentResult: AgentResult): AgentContribution {
     ...(typeof result.billedModelCalls === 'number' ? { billedModelCalls: result.billedModelCalls } : {}),
     ...(hosts ? { modelHosts: hosts } : {}),
     tokens: agentResult.budgetUsed?.tokensUsed,
+    ...(typeof result.promptTokens === 'number' ? { promptTokens: result.promptTokens } : {}),
+    ...(typeof result.completionTokens === 'number' ? { completionTokens: result.completionTokens } : {}),
+    ...(typeof result.cachedPromptTokens === 'number' ? { cachedPromptTokens: result.cachedPromptTokens } : {}),
     modelCalls: metrics?.modelCalls ?? 0,
     toolCalls: metrics?.toolCalls ?? 0,
     ...(tools.length > 0 ? { tools } : {}),

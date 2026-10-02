@@ -13,7 +13,7 @@ it hands the next agent the actual failure output, and it stops the moment the c
 
 ![CI](https://github.com/Aagam-Bothara/Joule/actions/workflows/test.yml/badge.svg)
 ![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)
-![Tests](https://img.shields.io/badge/tests-1531%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-1585%20passing-brightgreen)
 ![TypeScript](https://img.shields.io/badge/TypeScript-100%25-blue)
 ![Node.js](https://img.shields.io/badge/node-%3E%3D22-brightgreen)
 
@@ -136,7 +136,11 @@ crews have the same three agents, prompts, tools and per-agent allowance (30 tur
 > them — some runs ended on `cat /tmp/test.patch`. Both arms had identical access, so the comparison
 > *between* them is fair; the absolute numbers are not comparable to clean SWE-bench scores, and say
 > nothing yet about recovery with a check a user would actually have. Found by review on 2026-10-01;
-> a re-measurement without that access is planned.
+> a re-measurement without that access is
+> [pre-registered](benchmarks/README.md#pre-registration-real-repositories-without-the-oracle-draft-2026-10-02)
+> and, after agent-written reproduction tests turned out faithful for only 5 of 13 issues, will run
+> with the upstream fix's failing tests visible to the agents (a test-given setting) and the hidden tests
+> used only for scoring.
 
 | arm | resolved | mean cost | mean stages |
 |---|---:|---:|---:|
@@ -1009,6 +1013,9 @@ What the staged-recovery evidence does **not** cover:
   29/30, so it shows what staging costs, not whether recovery helps.
 - **One model, one provider.** Every crew number is DeepSeek V4 Flash on OpenRouter. No multi-model
   generalization has been shown.
+- **Contamination.** SWE-bench issues and their fixes are public, and DeepSeek V4 Flash has very
+  likely seen them in training. The held-out Django pool is held out from Joule's development,
+  not from the model's training data.
 - **The verifier is as good as your check.** Joule's guarantee is only ever "this command exited
   0". A weak test suite gives a weak signal, and the gate inherits that.
 - **The gate is narrow.** Check-and-restore around writes — no patch merging, no conflict
@@ -1025,7 +1032,7 @@ are documented as wrong rather than deleted; the largest set is listed under
 
 ## Current Status
 
-**Research prototype / experimental runtime.** 1531 tests passing across 116 files. Active
+**Research prototype / experimental runtime.** 1585 tests passing across 119 files. Active
 development — expect API refinements.
 
 Observed on real repositories, **with an oracle check the agents could see** (13 SWE-bench Lite
@@ -1093,7 +1100,7 @@ Known limitations:
 ```bash
 pnpm install       # install dependencies
 pnpm build         # build all 9 packages
-pnpm test          # 1531 tests across 116 files
+pnpm test          # 1585 tests across 119 files
 pnpm dev           # watch mode
 ```
 

@@ -3,27 +3,41 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { gatePolicy } from '../crew-scaling/tasks.js';
-import { CHECK_LABELS, hiddenScorerSource, reproCheckSource, visibleF2pSource } from '../real-repo/checks.js';
+import {
+  CHECK_LABELS,
+  SECONDARY_HOST_TIMEOUT_MS,
+  SECONDARY_KILL_GRACE_S,
+  SECONDARY_RUN_TIMEOUT_S,
+  hiddenScorerSource,
+  regressionScoreSource,
+  reproCheckSource,
+  visibleF2pSource,
+} from '../real-repo/checks.js';
 import {
   CHECK_LABEL,
   captureDiff,
   checkerSource,
+  diffAuditOf,
   prepareInstance,
   restoreBranch,
   runCheck,
   scoreHidden,
+  scoreSecondary,
+  type DockerRun,
   type RealRepoRunRecord,
 } from '../real-repo/workload.js';
 import { DJANGO_ITEM, FLASK_ITEM, ITEM, TEST_PATCH, fakeDocker } from './real-repo-fixtures.js';
 
 let root: string;
+const NO_CHANGES = { changedFiles: [], testInfraChanged: [], testFilesAdded: [], suspicious: [] };
 beforeEach(() => { root = mkdtempSync(join(tmpdir(), 'joule-rr-workload-')); });
 afterEach(() => rmSync(root, { recursive: true, force: true }));
 
-/** A docker stand-in whose piped programs answer by kind: score, check, or anything else. */
-function scriptedDocker(answers: { score?: string; scoreStatus?: number; check?: string; checkStatus?: number }) {
+/** A docker stand-in whose piped programs answer by kind: score, secondary score, check, or anything else. */
+function scriptedDocker(answers: { score?: string; scoreStatus?: number; check?: string; checkStatus?: number; secondary?: string }) {
   return fakeDocker([], program => {
     if (program.includes('AFTER = "snapshot"')) return { stdout: answers.score ?? 'VERIFY: F2P 1/1, P2P 1/1\nALL REQUIRED TESTS PASS\n', status: answers.scoreStatus ?? 0 };
+    if (program.includes('SECONDARY: files')) return { stdout: answers.secondary ?? 'SECONDARY: files 1, regressed 0\n', status: 0 };
     return { stdout: answers.check ?? 'CHECK: reproduction test PASSED (1 passed, 0 failed)\n', status: answers.checkStatus ?? 0 };
   });
 }
@@ -175,7 +189,11 @@ describe('check modes', () => {
     // Staged stage observations: the hidden score, for the record only.
     expect(policy.observeStage).toBeDefined();
     const observed = await policy.observeStage!({ stage: 1, role: 'Implementer', passed: true });
-    expect(observed).toEqual({ hidden: { resolved: false, f2pPassed: 0, f2pTotal: 1, p2pFailed: 0, p2pTotal: 1 } });
+    expect(observed).toEqual({
+      hidden: { resolved: false, f2pPassed: 0, f2pTotal: 1, p2pFailed: 0, p2pTotal: 1 },
+      audit: NO_CHANGES,
+      secondary: { files: 1, regressed: 0 },
+    });
 
     const verdict = prepared.verify();
     // The check passes but the hidden tests do not: a false pass, kept visible.
@@ -186,6 +204,8 @@ describe('check modes', () => {
       hidden: { resolved: false, f2pPassed: 0, f2pTotal: 1, p2pFailed: 0, p2pTotal: 1 },
       checkFinalPassed: true,
       stage1Hidden: { resolved: false, f2pPassed: 0, f2pTotal: 1, p2pFailed: 0, p2pTotal: 1 },
+      secondary: { files: 1, regressed: 0 },
+      audit: NO_CHANGES,
     });
   });
 
@@ -215,5 +235,146 @@ describe('branch points', () => {
     expect(docker.inputs.find(i => i.command === 'git apply --binary --whitespace=nowarn -')?.input).toBe('diff --git a/x b/x\n');
     // An empty branch is just the base commit.
     expect(docker.execs.slice(3)).toEqual(['git checkout -q abc123 -- . && git checkout -q -- . && git clean -fdq']);
+  });
+});
+
+describe('secondary score and diff audit (reporting only)', () => {
+  /** Wraps a docker stand-in so `git diff` / `git ls-files --others` return a scripted repository state. */
+  function withRepoState(base: ReturnType<typeof scriptedDocker>, state: { diff: string; untracked: string }): DockerRun {
+    return (args, opts) => {
+      const r = base.run(args, opts);
+      const command = args[args.length - 1].split('cd /testbed && ')[1] ?? '';
+      if (command.startsWith('git diff --no-color -U0 ')) return { ...r, stdout: state.diff };
+      if (command === 'git ls-files --others --exclude-standard') return { ...r, stdout: state.untracked };
+      return r;
+    };
+  }
+
+  /** Commands that could change the index, the working tree or the test files. */
+  const MUTATING = /git (add|checkout|apply|stash|reset|clean|rm|commit)\b/;
+
+  it('observeStage scores the secondary tests only after a passing check; the audit after every stage', async () => {
+    const docker = scriptedDocker({ score: 'VERIFY: F2P 1/1\n', check: 'VERIFY: F2P 1/1\n' });
+    const prepared = prepareInstance(ITEM, 'unit', { docker: docker.run, root, mode: 'visible-f2p' });
+    const policy = gatePolicy(prepared);
+    const before = docker.piped.length;
+
+    const failing = await policy.observeStage!({ stage: 1, role: 'Implementer', passed: false });
+    expect(failing).toEqual({ hidden: expect.objectContaining({ f2pTotal: 1 }), audit: NO_CHANGES });
+    expect(docker.piped.slice(before).some(p => p.includes('SECONDARY: files'))).toBe(false);
+
+    const passing = await policy.observeStage!({ stage: 2, role: 'Reviewer', passed: true });
+    expect(passing).toMatchObject({ audit: NO_CHANGES, secondary: { files: 1, regressed: 0 } });
+    const secondaryRuns = docker.piped.slice(before).filter(p => p.includes('SECONDARY: files'));
+    expect(secondaryRuns).toEqual([regressionScoreSource(ITEM)]);
+  });
+
+  it('the diff audit only reads: no git add, no checkout, nothing piped in', () => {
+    const docker = scriptedDocker({});
+    const run = withRepoState(docker, {
+      diff: 'diff --git a/src/x.py b/src/x.py\n--- a/src/x.py\n+++ b/src/x.py\n@@ -1,0 +2 @@\n+if "PYTEST_CURRENT_TEST" in os.environ: pass\n',
+      untracked: 'testing/test_mine.py\n',
+    });
+    const audit = diffAuditOf('c1', ITEM, 'visible-f2p', run);
+    expect(audit).toEqual({
+      changedFiles: ['src/x.py', 'testing/test_mine.py'],
+      testInfraChanged: [],
+      testFilesAdded: ['testing/test_mine.py'],
+      suspicious: [{ file: 'src/x.py', reason: 'reads PYTEST_CURRENT_TEST', line: 'if "PYTEST_CURRENT_TEST" in os.environ: pass' }],
+    });
+    expect(docker.execs).toEqual(['git diff --no-color -U0 abc123', 'git ls-files --others --exclude-standard']);
+    expect(docker.execs.some(c => MUTATING.test(c))).toBe(false);
+    expect(docker.inputs).toEqual([]);
+  });
+
+  it('the diff audit reads new untracked source files (capped, read-only) and scans them', () => {
+    const docker = scriptedDocker({});
+    const base = withRepoState(docker, { diff: '', untracked: 'src/_pytest/shim.py\ntesting/test_mine.py\n' });
+    const seen: string[] = [];
+    const run: DockerRun = (args, opts) => {
+      const command = args[args.length - 1].split('cd /testbed && ')[1] ?? '';
+      seen.push(command);
+      if (command.startsWith('head -c ')) return { stdout: 'import sys\nif "PYTEST_CURRENT_TEST" in os.environ: pass\n', stderr: '', status: 0 };
+      return base(args, opts);
+    };
+    const audit = diffAuditOf('c1', ITEM, 'repro', run);
+    expect(audit.suspicious).toEqual([{ file: 'src/_pytest/shim.py', reason: 'reads PYTEST_CURRENT_TEST', line: 'if "PYTEST_CURRENT_TEST" in os.environ: pass' }]);
+    // Only the source file is read, and only its first 64 KiB; the test file is listed, not read.
+    expect(seen).toEqual([
+      'git diff --no-color -U0 abc123',
+      'git ls-files --others --exclude-standard',
+      "head -c 65536 -- 'src/_pytest/shim.py'",
+    ]);
+    expect(seen.some(c => MUTATING.test(c))).toBe(false);
+  });
+
+  it('gives the secondary program a host timeout longer than both of its bounded runs', () => {
+    const timeouts: number[] = [];
+    const docker = scriptedDocker({});
+    const run: DockerRun = (args, opts) => {
+      if (opts?.input?.includes('SECONDARY: files')) timeouts.push(opts.timeoutMs ?? -1);
+      return docker.run(args, opts);
+    };
+    scoreSecondary('c1', ITEM, { docker: run, dir: root });
+    expect(timeouts).toEqual([SECONDARY_HOST_TIMEOUT_MS]);
+    expect(SECONDARY_HOST_TIMEOUT_MS).toBeGreaterThan(2 * (SECONDARY_RUN_TIMEOUT_S + SECONDARY_KILL_GRACE_S + 10) * 1000);
+  });
+
+  it('a non-oracle verify adds the secondary score and the audit, and runs nothing that mutates the repository', () => {
+    const docker = scriptedDocker({ score: 'VERIFY: F2P 1/1, P2P 1/1\n', check: 'VERIFY: F2P 1/1\n', secondary: 'SECONDARY: files 2, regressed 1\nregressed: testing/test_main.py::test_a\n' });
+    const prepared = prepareInstance(ITEM, 'unit', { docker: docker.run, root, mode: 'visible-f2p' });
+    const setup = docker.execs.length;
+    const verdict = prepared.verify();
+    expect(verdict.record).toMatchObject({
+      checkMode: 'visible-f2p',
+      secondary: { files: 2, regressed: 1, regressedTests: ['testing/test_main.py::test_a'] },
+      audit: NO_CHANGES,
+    });
+    // After setup: only piped programs and the two read-only git commands.
+    const after = docker.execs.slice(setup);
+    expect(after.filter(c => c !== 'python -')).toEqual(['git diff --no-color -U0 abc123', 'git ls-files --others --exclude-standard']);
+    expect(after.some(c => MUTATING.test(c))).toBe(false);
+    // The secondary program is written on the host and piped in, like the hidden scorer.
+    expect(readFileSync(join(root, 'unit', ITEM.instance_id, 'secondary.py'), 'utf8')).toBe(regressionScoreSource(ITEM));
+  });
+
+  it('scoreSecondary pipes the program in and reads its line; a broken run is an error, not a clean score', () => {
+    const docker = scriptedDocker({ secondary: 'SECONDARY: files 0, regressed 0\n' });
+    expect(scoreSecondary('c1', DJANGO_ITEM, { docker: docker.run, dir: root })).toEqual({ files: 0, regressed: 0 });
+    expect(docker.piped).toEqual([regressionScoreSource(DJANGO_ITEM)]);
+    const exec = docker.calls.find(a => a[0] === 'exec')!;
+    expect(exec.slice(0, 3)).toEqual(['exec', '-i', 'c1']);
+
+    const dead = fakeDocker([], () => ({ stdout: '', status: 137 }));
+    expect(scoreSecondary('c1', ITEM, { docker: dead.run, dir: root })).toEqual({ files: 0, regressed: 0, error: 'no SECONDARY line' });
+  });
+
+  it('a failing measurement is recorded, never thrown: the stage keeps its hidden score and the run its record', async () => {
+    const docker = scriptedDocker({ score: 'VERIFY: F2P 1/1, P2P 1/1\n', check: 'VERIFY: F2P 1/1\n' });
+    const run: DockerRun = (args, opts) => {
+      const command = args[args.length - 1];
+      if (command.includes('git diff --no-color')) throw new Error('docker went away');
+      if (opts?.input?.includes('SECONDARY: files')) throw new Error('docker went away again');
+      return docker.run(args, opts);
+    };
+    const prepared = prepareInstance(ITEM, 'unit', { docker: run, root, mode: 'visible-f2p' });
+    const observed = await gatePolicy(prepared).observeStage!({ stage: 1, role: 'Implementer', passed: true });
+    expect(observed).toEqual({
+      hidden: { resolved: true, f2pPassed: 1, f2pTotal: 1, p2pFailed: 0, p2pTotal: 1 },
+      audit: { ...NO_CHANGES, error: 'docker went away' },
+      secondary: { files: 0, regressed: 0, error: 'docker went away again' },
+    });
+    const verdict = prepared.verify();
+    expect(verdict.success).toBe(true);
+    expect(verdict.record).toMatchObject({ stage1Hidden: { resolved: true }, secondary: { error: 'docker went away again' }, audit: { error: 'docker went away' } });
+  });
+
+  it('oracle mode measures neither', () => {
+    const docker = fakeDocker();
+    const prepared = prepareInstance(ITEM, 'unit', { docker: docker.run, root });
+    const record = prepared.verify().record as RealRepoRunRecord;
+    expect('secondary' in record || 'audit' in record).toBe(false);
+    expect(docker.piped.some(p => p.includes('SECONDARY: files'))).toBe(false);
+    expect(docker.execs.some(c => c.startsWith('git diff --no-color'))).toBe(false);
   });
 });

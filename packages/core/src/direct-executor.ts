@@ -259,6 +259,11 @@ export class DirectExecutor {
     ];
 
     let totalTokens = 0;
+    // The split of totalTokens, for the record only. A provider that does not
+    // report cached prompt tokens (or reports 0) adds nothing to the cached sum.
+    let promptTokens = 0;
+    let completionTokens = 0;
+    let cachedPromptTokens = 0;
     // What the provider said it billed, kept apart from the token-based
     // estimate the budget uses; only calls that reported a cost contribute.
     let billedCostUsd = 0;
@@ -380,6 +385,9 @@ export class DirectExecutor {
       // Track budget — deductTokens handles cost approximation internally
       // Do NOT also call deductCost to avoid double-counting
       totalTokens += response.tokenUsage.totalTokens;
+      promptTokens += response.tokenUsage.promptTokens ?? 0;
+      completionTokens += response.tokenUsage.completionTokens ?? 0;
+      cachedPromptTokens += response.tokenUsage.cachedPromptTokens ?? 0;
       this.budgetManager.deductTokens(envelope, response.tokenUsage.totalTokens, response.model);
 
       // Report progress
@@ -660,6 +668,9 @@ export class DirectExecutor {
       lifecycleMetrics,
       ...(gate ? { verifiedEdits: gate.stats } : {}),
       ...(billedModelCalls > 0 ? { billedCostUsd, billedModelCalls } : {}),
+      promptTokens,
+      completionTokens,
+      cachedPromptTokens,
     };
   }
 

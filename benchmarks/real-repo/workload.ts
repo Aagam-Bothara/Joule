@@ -36,13 +36,18 @@ import { join, resolve } from 'node:path';
 import type { PreparedTask } from '../crew-scaling/tasks.js';
 import type { ScalingWorkload } from '../crew-scaling/runner.js';
 import { containerWorkspace } from '../harness/workloads/repo-workspace.js';
+import { MAX_SCANNED_BYTES, auditDiff, failedAudit, untrackedToScan, type DiffAudit } from './audit.js';
 import {
   CHECK_LABELS,
+  SECONDARY_HOST_TIMEOUT_MS,
   bytecodeCleanup,
+  failedSecondary,
   hiddenScorerSource,
   isDjango,
   parseScore,
+  parseSecondary,
   patchedFiles,
+  regressionScoreSource,
   reproCheckSource,
   shQuote,
   testHint,
@@ -50,6 +55,7 @@ import {
   visibleF2pSource,
   type CheckMode,
   type HiddenScore,
+  type SecondaryScore,
 } from './checks.js';
 
 export interface SweItem {
@@ -270,6 +276,69 @@ export function scoreHidden(container: string, item: SweItem, opts: { docker?: D
   return parseScore(r.status, `${r.stdout}${r.stderr}`);
 }
 
+/**
+ * The secondary regression score for the repository as it stands (reporting
+ * only; checks.ts `regressionScoreSource`). Like `scoreHidden`: the program is
+ * written on the host and piped in on stdin, and it leaves the repository
+ * byte-identical. Each of its two test runs is hard-bounded inside the
+ * container, and the host waits longer than both together
+ * (`SECONDARY_HOST_TIMEOUT_MS`), so the program always ends — modules put
+ * back — on its own: a host timeout would kill only `docker exec`, not it.
+ */
+export function scoreSecondary(
+  container: string,
+  item: SweItem,
+  opts: { docker?: DockerRun; dir?: string; maxFiles?: number; runTimeoutS?: number; killGraceS?: number; hostTimeoutMs?: number } = {},
+): SecondaryScore {
+  const dir = opts.dir ?? join(ARTIFACT_ROOT, 'scoring', item.instance_id);
+  mkdirSync(dir, { recursive: true });
+  const program = join(dir, 'secondary.py');
+  writeFileSync(program, regressionScoreSource(item, {
+    ...(opts.maxFiles !== undefined ? { maxFiles: opts.maxFiles } : {}),
+    ...(opts.runTimeoutS !== undefined ? { runTimeoutS: opts.runTimeoutS } : {}),
+    ...(opts.killGraceS !== undefined ? { killGraceS: opts.killGraceS } : {}),
+  }));
+  const r = inRepo(container, 'python -', opts.hostTimeoutMs ?? SECONDARY_HOST_TIMEOUT_MS, readFileSync(program, 'utf8'), opts.docker ?? realDocker);
+  const score = parseSecondary(`${r.stdout}${r.stderr}`);
+  return r.status === 0 || score.error ? score : { ...score, error: `exit ${r.status}` };
+}
+
+/**
+ * The diff audit (audit.ts) of the repository as it stands. It only reads:
+ * `git diff` against the base commit, the list of untracked files, and the
+ * first MAX_SCANNED_BYTES of each untracked non-test source file. Not
+ * `captureDiff`, whose `git add -A` changes the index.
+ */
+export function diffAuditOf(container: string, item: SweItem, mode: CheckMode, docker: DockerRun = realDocker): DiffAudit {
+  const diff = inRepo(container, `git diff --no-color -U0 ${item.base_commit}`, 120_000, undefined, docker);
+  const untracked = inRepo(container, 'git ls-files --others --exclude-standard', 120_000, undefined, docker);
+  const listed = untracked.stdout.split('\n');
+  const contents: Record<string, string> = {};
+  for (const f of untrackedToScan(listed, item, mode)) {
+    const read = inRepo(container, `head -c ${MAX_SCANNED_BYTES} -- ${shQuote(f)}`, 60_000, undefined, docker);
+    if (read.status === 0) contents[f] = read.stdout;
+  }
+  const audit = auditDiff(diff.stdout, listed, item, mode, contents);
+  if (diff.status !== 0 || untracked.status !== 0) {
+    return { ...audit, error: `could not read the diff: ${(diff.status !== 0 ? diff.stderr : untracked.stderr).trim().slice(0, 200)}` };
+  }
+  return audit;
+}
+
+/*
+ * The reporting measurements as a staged run takes them (observeStage and
+ * verify): a failure is recorded in the measurement, never thrown, so it
+ * cannot cost a run its record or a stage its hidden score. Branch points
+ * guard their own (branch.ts `measureExtra`).
+ */
+function reportingSecondary(container: string, item: SweItem, opts: { docker?: DockerRun; dir?: string }): SecondaryScore {
+  try { return scoreSecondary(container, item, opts); } catch (err) { return failedSecondary(err); }
+}
+
+function reportingAudit(container: string, item: SweItem, mode: CheckMode, docker: DockerRun): DiffAudit {
+  try { return diffAuditOf(container, item, mode, docker); } catch (err) { return failedAudit(err); }
+}
+
 /** A reproduction test to check against, as stored on the host by `repro-gen`. */
 export interface ReproCheck {
   source: string;
@@ -299,6 +368,10 @@ export interface RealRepoRunRecord {
   checkFinalPassed?: boolean;
   /** Staged arms outside oracle mode: the hidden score after stage 1, before any recovery stage ran */
   stage1Hidden?: HiddenScore;
+  /** Outside oracle mode: the secondary regression score of the final state (reporting only) */
+  secondary?: SecondaryScore;
+  /** Outside oracle mode: the diff audit of the final state (reporting only) */
+  audit?: DiffAudit;
 }
 
 export type PreparedInstance = PreparedTask & {
@@ -378,15 +451,18 @@ export function prepareInstance(item: SweItem, slot: string, opts: PrepareOption
     return { passed: r.status === 0, output: `${r.stdout}${r.stderr}`.trim() };
   };
 
-  // Outside oracle mode the hidden score is measured after every staged
-  // stage, for the record only; oracle runs stay exactly as they were.
+  // Outside oracle mode the hidden score and the diff audit are measured after
+  // every staged stage, and the secondary regression score after every stage
+  // whose check passed, for the record only; oracle runs stay exactly as they
+  // were.
   const stageScores: Array<{ stage: number; hidden: HiddenScore }> = [];
   const observeStage = mode === 'oracle'
     ? undefined
-    : ({ stage }: { stage: number }) => {
+    : ({ stage, passed }: { stage: number; passed: boolean }) => {
       const hidden = scoreHidden(container, item, scoring);
       stageScores.push({ stage, hidden });
-      return { hidden };
+      const audit = reportingAudit(container, item, mode, docker);
+      return { hidden, audit, ...(passed ? { secondary: reportingSecondary(container, item, scoring) } : {}) };
     };
 
   return {
@@ -414,12 +490,17 @@ export function prepareInstance(item: SweItem, slot: string, opts: PrepareOption
       const hidden = scoreHidden(container, item, scoring);
       const final = check();
       const stage1 = stageScores.find(s => s.stage === 1);
+      // Reporting only, after everything the verdict reads.
+      const audit = reportingAudit(container, item, mode, docker);
+      const secondary = reportingSecondary(container, item, scoring);
       const record: RealRepoRunRecord = {
         checkMode: mode,
         ...(mode === 'repro' ? { checkFaithful: opts.repro!.faithful } : {}),
         hidden,
         checkFinalPassed: final.passed,
         ...(stage1 ? { stage1Hidden: stage1.hidden } : {}),
+        secondary,
+        audit,
       };
       const detail = `hidden: F2P ${hidden.f2pPassed}/${hidden.f2pTotal}, P2P failing ${hidden.p2pFailed}/${hidden.p2pTotal}${hidden.error ? ` (${hidden.error})` : ''}; check ${final.passed ? 'passes' : 'fails'}`;
       return { success: hidden.resolved, output: detail, record };

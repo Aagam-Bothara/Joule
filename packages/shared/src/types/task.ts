@@ -173,6 +173,19 @@ export interface TaskResult {
   billedCostUsd?: number;
   /** How many model calls reported a billed cost; compare with lifecycleMetrics.modelCalls */
   billedModelCalls?: number;
+  /**
+   * Token split summed over this run's model calls, from each response's
+   * `tokenUsage` (direct execution path). Measurement only: nothing reads it to
+   * decide anything, and recording it changes no request.
+   */
+  promptTokens?: number;
+  completionTokens?: number;
+  /**
+   * Part of `promptTokens` the provider served from its prompt cache, summed.
+   * 0 (or absent) means none was reported: providers that do not report it,
+   * and the OpenAI-compatible provider when the cached count is 0, omit it.
+   */
+  cachedPromptTokens?: number;
   /** Verified-edit gate activity, when a policy was set on the task */
   verifiedEdits?: {
     checks: number;

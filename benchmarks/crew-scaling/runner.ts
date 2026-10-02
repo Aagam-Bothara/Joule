@@ -16,7 +16,7 @@ import { generateId } from '@joule/shared';
 import type { CrewDefinition, CrewResult, ModelProviderName, Task, ToolDefinition } from '@joule/shared';
 import { sanitizeFailure } from '../lifecycle/record.js';
 import { crewForWidth, roleNames } from './crews.js';
-import { contributionOf, crewBilling, manifestBilling } from './record.js';
+import { contributionOf, crewBilling, manifestBilling, tokenSplit } from './record.js';
 import { gatePolicy, loadScalingTasks, prepareTask, type PreparedTask, type ScalingTask } from './tasks.js';
 import type { AgentContribution, CrewScalingRecord, CrewWidth } from './types.js';
 
@@ -150,6 +150,7 @@ function toRecord(args: {
     totalCostUsd: args.crew.budgetUsed?.costUsd ?? sum(c => c.costUsd ?? 0),
     ...crewBilling(contributions),
     totalTokens: args.crew.budgetUsed?.tokensUsed ?? sum(c => c.tokens ?? 0),
+    ...tokenSplit(contributions),
     modelCalls: sum(c => c.modelCalls),
     toolCalls: sum(c => c.toolCalls),
     modelRuntimeMs: lifecycle.reduce((s, m) => s + (m?.modelRuntimeMs ?? 0), 0),

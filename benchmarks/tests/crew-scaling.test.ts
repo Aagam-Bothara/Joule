@@ -11,7 +11,7 @@ import {
   renderRepeatability,
   repeatability,
 } from '../crew-scaling/analyze.js';
-import { contributionOf, crewBilling, manifestBilling } from '../crew-scaling/record.js';
+import { contributionOf, crewBilling, manifestBilling, tokenSplit } from '../crew-scaling/record.js';
 import type { AgentContribution, CrewScalingRecord, CrewWidth } from '../crew-scaling/types.js';
 import type { AgentLifecycleEvent, AgentLifecycleState, AgentResult, LifecycleMetrics } from '@joule/shared';
 
@@ -468,6 +468,31 @@ describe('agent contribution records', () => {
     const plain = contributionOf(agentResult({ status: 'completed' }));
     expect('billedCostUsd' in plain).toBe(false);
     expect('modelHosts' in plain).toBe(false);
+  });
+
+  it('copies the prompt / completion / cached token split, and leaves it off when the result has none', () => {
+    const r = agentResult({ status: 'completed' });
+    Object.assign(r.taskResult, { promptTokens: 9000, completionTokens: 400, cachedPromptTokens: 6144 });
+    expect(contributionOf(r)).toMatchObject({ promptTokens: 9000, completionTokens: 400, cachedPromptTokens: 6144 });
+
+    const plain = contributionOf(agentResult({ status: 'completed' }));
+    expect('promptTokens' in plain || 'completionTokens' in plain || 'cachedPromptTokens' in plain).toBe(false);
+  });
+});
+
+describe('record-level token split', () => {
+  const contribution = (o: Partial<AgentContribution>): AgentContribution => ({ agentId: 'a', modelCalls: 1, toolCalls: 0, ...o });
+
+  it('sums input, output and cached input tokens over the agents that reported them', () => {
+    expect(tokenSplit([
+      contribution({ promptTokens: 1000, completionTokens: 50, cachedPromptTokens: 512 }),
+      contribution({ promptTokens: 2000, completionTokens: 70, cachedPromptTokens: 0 }),
+      contribution({}),
+    ])).toEqual({ inputTokens: 3000, outputTokens: 120, cachedInputTokens: 512 });
+  });
+
+  it('leaves the split undefined when no agent recorded one (older records)', () => {
+    expect(tokenSplit([contribution({ tokens: 500 })])).toEqual({});
   });
 });
 

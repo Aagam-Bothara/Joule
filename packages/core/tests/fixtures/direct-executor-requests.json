@@ -1,0 +1,204 @@
+[
+  {
+    "model": "test-slm",
+    "provider": "ollama",
+    "tier": "slm",
+    "system": "You are: tester\n\nYou look things up.\n\n## Response Format\n\nYou MUST respond with ONLY a raw JSON object (no markdown, no code fences, no extra text).\n\n### When you need to use tools:\nRespond with:\n{\"tool_calls\": [{\"toolName\": \"<tool_name>\", \"toolArgs\": {<arguments>}}]}\n\nYou can call multiple tools at once. Tool results will be sent back to you.\n\n### When you are done (task complete):\nRespond with:\n{\"answer\": \"<your final comprehensive answer>\"}\n\n## Available Tools\n\n- **lookup**: Look a word up | Args: query (string)",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Look up alpha, beta and gamma, then say which you looked up."
+      }
+    ],
+    "temperature": 0.3,
+    "responseFormat": "json",
+    "maxTokens": 4096
+  },
+  {
+    "model": "test-slm",
+    "provider": "ollama",
+    "tier": "slm",
+    "system": "You are: tester\n\nYou look things up.\n\n## Response Format\n\nYou MUST respond with ONLY a raw JSON object (no markdown, no code fences, no extra text).\n\n### When you need to use tools:\nRespond with:\n{\"tool_calls\": [{\"toolName\": \"<tool_name>\", \"toolArgs\": {<arguments>}}]}\n\nYou can call multiple tools at once. Tool results will be sent back to you.\n\n### When you are done (task complete):\nRespond with:\n{\"answer\": \"<your final comprehensive answer>\"}\n\n## Available Tools\n\n- **lookup**: Look a word up | Args: query (string)",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Look up alpha, beta and gamma, then say which you looked up."
+      },
+      {
+        "role": "assistant",
+        "content": "{\"tool_calls\": [{\"toolName\": \"lookup\", \"toolArgs\": {\"query\": \"alpha\"}}]}"
+      },
+      {
+        "role": "user",
+        "content": "<tool_results>\n[lookup] Success: {\"found\":\"ALPHA\"}\n</tool_results>\n\nContinue with the task. If done, respond with {\"answer\": \"your final answer\"}."
+      }
+    ],
+    "temperature": 0.3,
+    "responseFormat": "json",
+    "maxTokens": 4096
+  },
+  {
+    "model": "test-slm",
+    "provider": "ollama",
+    "tier": "slm",
+    "system": "You are: tester\n\nYou look things up.\n\n## Response Format\n\nYou MUST respond with ONLY a raw JSON object (no markdown, no code fences, no extra text).\n\n### When you need to use tools:\nRespond with:\n{\"tool_calls\": [{\"toolName\": \"<tool_name>\", \"toolArgs\": {<arguments>}}]}\n\nYou can call multiple tools at once. Tool results will be sent back to you.\n\n### When you are done (task complete):\nRespond with:\n{\"answer\": \"<your final comprehensive answer>\"}\n\n## Available Tools\n\n- **lookup**: Look a word up | Args: query (string)",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Look up alpha, beta and gamma, then say which you looked up."
+      },
+      {
+        "role": "assistant",
+        "content": "{\"tool_calls\": [{\"toolName\": \"lookup\", \"toolArgs\": {\"query\": \"alpha\"}}]}"
+      },
+      {
+        "role": "user",
+        "content": "<tool_results>\n[lookup] Success: {\"found\":\"ALPHA\"}\n</tool_results>\n\nContinue with the task. If done, respond with {\"answer\": \"your final answer\"}."
+      },
+      {
+        "role": "assistant",
+        "content": "this is not a tool call {\"tool_calls\": ["
+      },
+      {
+        "role": "user",
+        "content": "Your last reply could not be read as a tool call, so nothing was executed. Reply with ONLY one raw JSON object: {\"tool_calls\": [{\"toolName\": \"<tool_name>\", \"toolArgs\": {<arguments>}}]} to use tools, or {\"answer\": \"<your final answer>\"} when you are done."
+      }
+    ],
+    "temperature": 0.3,
+    "responseFormat": "json",
+    "maxTokens": 4096
+  },
+  {
+    "model": "test-slm",
+    "provider": "ollama",
+    "tier": "slm",
+    "system": "You are: tester\n\nYou look things up.\n\n## Response Format\n\nYou MUST respond with ONLY a raw JSON object (no markdown, no code fences, no extra text).\n\n### When you need to use tools:\nRespond with:\n{\"tool_calls\": [{\"toolName\": \"<tool_name>\", \"toolArgs\": {<arguments>}}]}\n\nYou can call multiple tools at once. Tool results will be sent back to you.\n\n### When you are done (task complete):\nRespond with:\n{\"answer\": \"<your final comprehensive answer>\"}\n\n## Available Tools\n\n- **lookup**: Look a word up | Args: query (string)",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Look up alpha, beta and gamma, then say which you looked up."
+      },
+      {
+        "role": "assistant",
+        "content": "{\"tool_calls\": [{\"toolName\": \"lookup\", \"toolArgs\": {\"query\": \"alpha\"}}]}"
+      },
+      {
+        "role": "user",
+        "content": "<tool_results>\n[lookup] Success: {\"found\":\"ALPHA\"}\n</tool_results>\n\nContinue with the task. If done, respond with {\"answer\": \"your final answer\"}."
+      },
+      {
+        "role": "assistant",
+        "content": "this is not a tool call {\"tool_calls\": ["
+      },
+      {
+        "role": "user",
+        "content": "Your last reply could not be read as a tool call, so nothing was executed. Reply with ONLY one raw JSON object: {\"tool_calls\": [{\"toolName\": \"<tool_name>\", \"toolArgs\": {<arguments>}}]} to use tools, or {\"answer\": \"<your final answer>\"} when you are done."
+      },
+      {
+        "role": "assistant",
+        "content": "{\"tool_calls\": [{\"toolName\": \"lookup\", \"toolArgs\": {\"query\": \"beta\"}}, {\"toolName\": \"lookup\", \"toolArgs\": {\"query\": \"gamma\"}}]}"
+      },
+      {
+        "role": "user",
+        "content": "<tool_results>\n[lookup] Success: {\"found\":\"BETA\"}\n[lookup] Success: {\"found\":\"GAMMA\"}\n</tool_results>\n\nContinue with the task. If done, respond with {\"answer\": \"your final answer\"}."
+      }
+    ],
+    "temperature": 0.3,
+    "responseFormat": "json",
+    "maxTokens": 4096
+  },
+  {
+    "model": "test-slm",
+    "provider": "ollama",
+    "tier": "slm",
+    "system": "You are: tester\n\nYou look things up.\n\n## Response Format\n\nYou MUST respond with ONLY a raw JSON object (no markdown, no code fences, no extra text).\n\n### When you need to use tools:\nRespond with:\n{\"tool_calls\": [{\"toolName\": \"<tool_name>\", \"toolArgs\": {<arguments>}}]}\n\nYou can call multiple tools at once. Tool results will be sent back to you.\n\n### When you are done (task complete):\nRespond with:\n{\"answer\": \"<your final comprehensive answer>\"}\n\n## Available Tools\n\n- **lookup**: Look a word up | Args: query (string)",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Look up alpha, beta and gamma, then say which you looked up."
+      },
+      {
+        "role": "assistant",
+        "content": "{\"tool_calls\": [{\"toolName\": \"lookup\", \"toolArgs\": {\"query\": \"alpha\"}}]}"
+      },
+      {
+        "role": "user",
+        "content": "<tool_results>\n[lookup] Success: {\"found\":\"ALPHA\"}\n</tool_results>\n\nContinue with the task. If done, respond with {\"answer\": \"your final answer\"}."
+      },
+      {
+        "role": "assistant",
+        "content": "this is not a tool call {\"tool_calls\": ["
+      },
+      {
+        "role": "user",
+        "content": "Your last reply could not be read as a tool call, so nothing was executed. Reply with ONLY one raw JSON object: {\"tool_calls\": [{\"toolName\": \"<tool_name>\", \"toolArgs\": {<arguments>}}]} to use tools, or {\"answer\": \"<your final answer>\"} when you are done."
+      },
+      {
+        "role": "assistant",
+        "content": "{\"tool_calls\": [{\"toolName\": \"lookup\", \"toolArgs\": {\"query\": \"beta\"}}, {\"toolName\": \"lookup\", \"toolArgs\": {\"query\": \"gamma\"}}]}"
+      },
+      {
+        "role": "user",
+        "content": "<tool_results>\n[lookup] Success: {\"found\":\"BETA\"}\n[lookup] Success: {\"found\":\"GAMMA\"}\n</tool_results>\n\nContinue with the task. If done, respond with {\"answer\": \"your final answer\"}."
+      },
+      {
+        "role": "user",
+        "content": "Your last reply was empty, so nothing was executed. Reply with ONLY one raw JSON object: {\"tool_calls\": [{\"toolName\": \"<tool_name>\", \"toolArgs\": {<arguments>}}]} to use tools, or {\"answer\": \"<your final answer>\"} when you are done."
+      }
+    ],
+    "temperature": 0.3,
+    "responseFormat": "json",
+    "maxTokens": 4096
+  },
+  {
+    "model": "test-slm",
+    "provider": "ollama",
+    "tier": "slm",
+    "system": "You are: tester\n\nYou look things up.\n\n## Response Format\n\nYou MUST respond with ONLY a raw JSON object (no markdown, no code fences, no extra text).\n\n### When you need to use tools:\nRespond with:\n{\"tool_calls\": [{\"toolName\": \"<tool_name>\", \"toolArgs\": {<arguments>}}]}\n\nYou can call multiple tools at once. Tool results will be sent back to you.\n\n### When you are done (task complete):\nRespond with:\n{\"answer\": \"<your final comprehensive answer>\"}\n\n## Available Tools\n\n- **lookup**: Look a word up | Args: query (string)",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Look up alpha, beta and gamma, then say which you looked up."
+      },
+      {
+        "role": "assistant",
+        "content": "{\"tool_calls\": [{\"toolName\": \"lookup\", \"toolArgs\": {\"query\": \"alpha\"}}]}"
+      },
+      {
+        "role": "user",
+        "content": "<tool_results>\n[lookup] Success: {\"found\":\"ALPHA\"}\n</tool_results>\n\nContinue with the task. If done, respond with {\"answer\": \"your final answer\"}."
+      },
+      {
+        "role": "assistant",
+        "content": "this is not a tool call {\"tool_calls\": ["
+      },
+      {
+        "role": "user",
+        "content": "Your last reply could not be read as a tool call, so nothing was executed. Reply with ONLY one raw JSON object: {\"tool_calls\": [{\"toolName\": \"<tool_name>\", \"toolArgs\": {<arguments>}}]} to use tools, or {\"answer\": \"<your final answer>\"} when you are done."
+      },
+      {
+        "role": "assistant",
+        "content": "{\"tool_calls\": [{\"toolName\": \"lookup\", \"toolArgs\": {\"query\": \"beta\"}}, {\"toolName\": \"lookup\", \"toolArgs\": {\"query\": \"gamma\"}}]}"
+      },
+      {
+        "role": "user",
+        "content": "<tool_results>\n[lookup] Success: {\"found\":\"BETA\"}\n[lookup] Success: {\"found\":\"GAMMA\"}\n</tool_results>\n\nContinue with the task. If done, respond with {\"answer\": \"your final answer\"}."
+      },
+      {
+        "role": "user",
+        "content": "Your last reply was empty, so nothing was executed. Reply with ONLY one raw JSON object: {\"tool_calls\": [{\"toolName\": \"<tool_name>\", \"toolArgs\": {<arguments>}}]} to use tools, or {\"answer\": \"<your final answer>\"} when you are done."
+      },
+      {
+        "role": "assistant",
+        "content": "{\"tool_calls\": [{\"toolName\": \"lookup\", \"toolArgs\": {\"query\": \"gamma\"}}]}"
+      },
+      {
+        "role": "user",
+        "content": "<tool_results>\n[lookup] Success: {\"found\":\"GAMMA\"}\n</tool_results>\n\nContinue with the task. If done, respond with {\"answer\": \"your final answer\"}."
+      }
+    ],
+    "temperature": 0.3,
+    "responseFormat": "json",
+    "maxTokens": 4096
+  }
+]

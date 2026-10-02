@@ -5,12 +5,36 @@
  * mirrored in benchmarks/README.md ("Pre-registration"). Nothing here reads a
  * result to decide what a rule is: pools are fixed by self-tests, and the
  * thresholds are constants.
+ *
+ * Amended 2026-10-02, after commit ff01479 and before any G1/G2 run
+ * (`PREREG_AMENDMENTS`, and "Amendment 1" in benchmarks/README.md): run counts
+ * fixed, and reporting added — G2 by how stage 1 ended, G1 recoveries by what
+ * preceded them, cost per control and arm, a secondary regression score and a
+ * diff audit. No threshold and no decision rule changed.
  */
 
 import type { CrewScalingRecord } from '../crew-scaling/types.js';
-import type { BranchRecord } from './branch.js';
-import { summarizeBranches } from './branch.js';
+import type { BranchControl, BranchOutcome, BranchRecord, EndReason } from './branch.js';
+import { BRANCH_CONTROLS, END_REASONS, endReasonOf, summarizeBranches } from './branch.js';
 import type { ReproCheck, SweItem } from './workload.js';
+
+// ── amendments ───────────────────────────────────────────────────────
+
+export interface PreregAmendment { id: string; date: string; summary: string }
+
+/** Every change to the pre-registration since commit ff01479, in order. */
+export const PREREG_AMENDMENTS: readonly PreregAmendment[] = [
+  {
+    id: 'amendment-1',
+    date: '2026-10-02',
+    summary: 'After commit ff01479, before any G1/G2 run. Repro fallback applied (5 of 13 dev reproduction tests faithful): G1 and G2 run with --check visible-f2p on both pools. Run counts fixed: G1 one staged run per issue per pool; G2 3 seeds dev, 1 seed held-out. Reporting added without thresholds or decision changes: G2 by stage-1 end reason, G1 recoveries by preceding end reason, tokens and billed cost per control and arm, a secondary regression score, extended false passes and a diff audit.',
+  },
+];
+
+/** G1: staged runs per issue in each pool (Amendment 1). */
+export const G1_RUNS_PER_ISSUE = 1;
+/** G2: seeds per issue in each pool (Amendment 1); no further seeds after any result is seen. */
+export const G2_SEEDS = { dev: 3, 'held-out': 1 } as const;
 
 // ── pools ────────────────────────────────────────────────────────────
 
@@ -130,11 +154,148 @@ export function evaluateG1(records: readonly CrewScalingRecord[]): G1Result {
   };
 }
 
+// ── G1 report (Amendment 1): reporting only, no threshold ───────────
+
+/** A staged stage's observation, as `observeStage` in workload.ts records it. */
+interface StageObservationRecord {
+  hidden?: { resolved?: boolean };
+  secondary?: { files?: number; regressed?: number; error?: string };
+  audit?: { testInfraChanged?: unknown[]; suspicious?: unknown[] };
+}
+
+export interface ExtendedFalsePass {
+  runId: string;
+  workloadId: string;
+  stage: number;
+  reasons: string[];
+}
+
+/**
+ * Check passes that look wrong by any measure, not only the hidden tests:
+ * the stage's check passed and the hidden tests failed, or the secondary
+ * regression score found a regression, or the diff audit flagged changed test
+ * infrastructure or suspicious source lines. Reporting only: G1's false-pass
+ * rule counts hidden failures alone, as pre-registered.
+ */
+export interface ExtendedFalsePasses {
+  /** Stages counted by evaluateG1 as check passes */
+  checkPasses: number;
+  hiddenFailed: number;
+  secondaryRegressed: number;
+  /** Check passes after which the secondary score ran no test file (not "clean") */
+  secondaryNoFiles: number;
+  testInfraChanged: number;
+  suspicious: number;
+  /** Check passes flagged for at least one reason */
+  flagged: number;
+  stages: ExtendedFalsePass[];
+}
+
+export interface G1Report {
+  /** Scored staged runs resolved (hidden) whose stage 1 was not */
+  recoveries: number;
+  /**
+   * How the stage before the solving stage ended, per recovery. The solving
+   * stage is the first whose hidden score resolved (else `staged.solvedAtStage`).
+   */
+  recoveriesByPrecedingEnd: Partial<Record<EndReason, number>>;
+  /** Recoveries whose solving or preceding stage could not be identified */
+  unattributedRecoveries: number;
+  /** Mean provider-billed cost per run, over the runs that reported one */
+  meanBilledUsd?: number;
+  billedRuns: number;
+  runs: number;
+  extendedFalsePasses: ExtendedFalsePasses;
+}
+
+const observationOf = (stage: { observation?: Record<string, unknown> }): StageObservationRecord | undefined =>
+  stage.observation as StageObservationRecord | undefined;
+
+/**
+ * What G1's result is made of, for the report. It reads the same records and
+ * changes nothing `evaluateG1` decides.
+ */
+export function describeG1(records: readonly CrewScalingRecord[]): G1Report {
+  const byEnd: Partial<Record<EndReason, number>> = {};
+  let recoveries = 0;
+  let unattributed = 0;
+  const extended: ExtendedFalsePasses = {
+    checkPasses: 0, hiddenFailed: 0, secondaryRegressed: 0, secondaryNoFiles: 0, testInfraChanged: 0, suspicious: 0, flagged: 0, stages: [],
+  };
+
+  for (const r of records) {
+    if (!r.hidden || !r.stage1Hidden) continue;
+    const stages = r.staged?.stages ?? [];
+
+    if (r.hidden.resolved && !r.stage1Hidden.resolved) {
+      recoveries++;
+      const solving = stages.find(s => s.executed && observationOf(s)?.hidden?.resolved === true)?.stage ?? r.staged?.solvedAtStage;
+      const preceding = solving !== undefined ? stages.find(s => s.stage === solving - 1 && s.executed) : undefined;
+      if (preceding) {
+        const reason = endReasonOf({ status: preceding.status, error: preceding.error });
+        byEnd[reason] = (byEnd[reason] ?? 0) + 1;
+      } else {
+        unattributed++;
+      }
+    }
+
+    for (const stage of stages) {
+      if (!stage.executed || stage.verification?.passed !== true) continue;
+      const obs = observationOf(stage);
+      if (obs?.hidden === undefined) continue;
+      extended.checkPasses++;
+      const reasons: string[] = [];
+      if (obs.hidden.resolved !== true) { extended.hiddenFailed++; reasons.push('hidden tests failed'); }
+      if ((obs.secondary?.regressed ?? 0) > 0) { extended.secondaryRegressed++; reasons.push('secondary regression'); }
+      if (obs.secondary && !obs.secondary.error && obs.secondary.files === 0) extended.secondaryNoFiles++;
+      if ((obs.audit?.testInfraChanged?.length ?? 0) > 0) { extended.testInfraChanged++; reasons.push('test infrastructure changed'); }
+      if ((obs.audit?.suspicious?.length ?? 0) > 0) { extended.suspicious++; reasons.push('suspicious source lines'); }
+      if (reasons.length > 0) {
+        extended.flagged++;
+        extended.stages.push({ runId: r.runId, workloadId: r.workloadId, stage: stage.stage, reasons });
+      }
+    }
+  }
+
+  const billed = records.filter(r => typeof r.totalBilledCostUsd === 'number');
+  return {
+    recoveries,
+    recoveriesByPrecedingEnd: byEnd,
+    unattributedRecoveries: unattributed,
+    ...(billed.length > 0 ? { meanBilledUsd: billed.reduce((s, r) => s + (r.totalBilledCostUsd ?? 0), 0) / billed.length } : {}),
+    billedRuns: billed.length,
+    runs: records.length,
+    extendedFalsePasses: extended,
+  };
+}
+
 // ── G2: evidence, or more turns? ─────────────────────────────────────
 
 export const G2_MIN_BRANCH_POINTS = 15;
 export const G2_MIN_RATE_GAP = 0.2;
 export const G2_MIN_RATE_RATIO = 2;
+
+/** G2's rates within one stratum of branch points (reporting only). */
+export interface G2Stratum {
+  branchPoints: number;
+  rateR?: number;
+  rateC0?: number;
+  rateC1?: number;
+}
+
+/** What a control cost over G2's branch points, and what it bought (reporting only). */
+export interface ControlCost {
+  /** Runs of this control over the paired branch points (a control that failed to run is left out) */
+  runs: number;
+  /** Mean total tokens over the runs that recorded them; absent when none did */
+  meanTokens?: number;
+  /** Mean provider-billed cost over the runs that reported one; absent when none did */
+  meanBilledUsd?: number;
+  billedRuns: number;
+  hiddenResolved: number;
+  /** Hidden recoveries per billed dollar, over the runs that reported a billed cost; absent when nothing was billed */
+  resolvedPerBilledUsd?: number;
+}
 
 export interface G2Result {
   branchPoints: number;
@@ -144,6 +305,13 @@ export interface G2Result {
   /** Enough branch points to judge at all */
   powered: boolean;
   confirmed: boolean;
+  /**
+   * Reporting only (Amendment 1), over the same branch points: the rates by how
+   * stage 1 ended. No threshold; `confirmed` and `powered` never read it.
+   */
+  strata: Partial<Record<EndReason, G2Stratum>>;
+  /** Reporting only (Amendment 1): tokens, billed cost and hidden recoveries per control */
+  cost: Partial<Record<BranchControl, ControlCost>>;
 }
 
 /**
@@ -168,5 +336,81 @@ export function evaluateG2(records: readonly BranchRecord[]): G2Result {
     ...(summary.C1 ? { rateC1: summary.C1.rate } : {}),
     powered,
     confirmed,
+    strata: g2Strata(paired),
+    cost: g2Cost(paired),
+  };
+}
+
+const pct = (v: number | undefined): string => (v === undefined ? '—' : `${Math.round(v * 100)}%`);
+
+/** The G2 report's strata and cost as text tables (reporting only). */
+export function renderG2Report(g2: G2Result): string {
+  const lines = [
+    'G2 by how stage 1 ended (reporting only; no threshold):',
+    '| stage 1 ended | branch points | R | C0 | C1 |',
+    '| --- | ---: | ---: | ---: | ---: |',
+    ...END_REASONS.filter(e => g2.strata[e]).map(e => {
+      const s = g2.strata[e]!;
+      return `| ${e} | ${s.branchPoints} | ${pct(s.rateR)} | ${pct(s.rateC0)} | ${pct(s.rateC1)} |`;
+    }),
+    '',
+    'Cost per control (reporting only):',
+    '| control | runs | mean tokens | mean billed | billed runs | hidden resolved | resolved per billed $ |',
+    '| --- | ---: | ---: | ---: | ---: | ---: | ---: |',
+    ...BRANCH_CONTROLS.filter(c => g2.cost[c]).map(c => {
+      const k = g2.cost[c]!;
+      return `| ${c} | ${k.runs} | ${k.meanTokens === undefined ? '—' : Math.round(k.meanTokens)} | ${k.meanBilledUsd === undefined ? '—' : `$${k.meanBilledUsd.toFixed(4)}`} | ${k.billedRuns} | ${k.hiddenResolved} | ${k.resolvedPerBilledUsd === undefined ? '—' : k.resolvedPerBilledUsd.toFixed(1)} |`;
+    }),
+  ];
+  return lines.join('\n');
+}
+
+/** How stage 1 ended; records from before the amendment carry no endReason, so it is read from status. */
+export const stage1EndReason = (r: BranchRecord): EndReason =>
+  r.stage1.endReason ?? endReasonOf({ status: r.stage1.status, error: r.stage1.agentError });
+
+function g2Strata(paired: readonly BranchRecord[]): Partial<Record<EndReason, G2Stratum>> {
+  const groups = new Map<EndReason, BranchRecord[]>();
+  for (const r of paired) {
+    const reason = stage1EndReason(r);
+    groups.set(reason, [...(groups.get(reason) ?? []), r]);
+  }
+  const out: Partial<Record<EndReason, G2Stratum>> = {};
+  for (const reason of END_REASONS) {
+    const group = groups.get(reason);
+    if (!group) continue;
+    const summary = summarizeBranches(group);
+    out[reason] = {
+      branchPoints: group.length,
+      ...(summary.R ? { rateR: summary.R.rate } : {}),
+      ...(summary.C0 ? { rateC0: summary.C0.rate } : {}),
+      ...(summary.C1 ? { rateC1: summary.C1.rate } : {}),
+    };
+  }
+  return out;
+}
+
+function g2Cost(paired: readonly BranchRecord[]): Partial<Record<BranchControl, ControlCost>> {
+  const out: Partial<Record<BranchControl, ControlCost>> = {};
+  for (const control of BRANCH_CONTROLS) {
+    const runs = paired.map(r => r.controls[control]).filter((o): o is BranchOutcome => o !== undefined && o.error === undefined);
+    if (runs.length === 0) continue;
+    out[control] = controlCost(runs);
+  }
+  return out;
+}
+
+/** Cost and hidden recoveries over some agent runs (reporting only). */
+export function controlCost(runs: readonly BranchOutcome[]): ControlCost {
+  const withTokens = runs.filter(o => typeof o.tokens === 'number');
+  const billed = runs.filter(o => typeof o.billedCostUsd === 'number');
+  const billedUsd = billed.reduce((s, o) => s + (o.billedCostUsd ?? 0), 0);
+  return {
+    runs: runs.length,
+    ...(withTokens.length > 0 ? { meanTokens: withTokens.reduce((s, o) => s + (o.tokens ?? 0), 0) / withTokens.length } : {}),
+    ...(billed.length > 0 ? { meanBilledUsd: billedUsd / billed.length } : {}),
+    billedRuns: billed.length,
+    hiddenResolved: runs.filter(o => o.hidden.resolved).length,
+    ...(billedUsd > 0 ? { resolvedPerBilledUsd: billed.filter(o => o.hidden.resolved).length / billedUsd } : {}),
   };
 }

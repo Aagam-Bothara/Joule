@@ -11,6 +11,10 @@
  *     PASS_TO_PASS with the instance's test patch), used only to grade a run.
  *     Outside `oracle` mode no agent ever sees it.
  *
+ * A third program, the secondary regression score (`regressionScoreSource`),
+ * is a measurement like the hidden score: recorded outside `oracle` mode,
+ * never shown to an agent, never part of a decision.
+ *
  * Check modes:
  *   oracle       the hidden SWE-bench tests are the check (the setting of every
  *                real-repository run before 2026-10-02; an oracle, not a check a
@@ -41,7 +45,7 @@ export const CHECK_LABELS: Record<CheckMode, string> = {
 export const CHECK_DESCRIPTIONS: Record<CheckMode, string> = {
   oracle: 'ORACLE: the check is the hidden SWE-bench checker (hidden test patch, FAIL_TO_PASS and PASS_TO_PASS); its output, including failing hidden-test names, reaches the agents. Not a check a user would have.',
   repro: 'repro: the check is a reproduction test generated per issue by a separate agent that saw only the issue and the repository (stored on the host, piped in at check time, removed afterwards), plus up to 3 existing test files named test_<module>.py for each non-test module changed since the base commit (git diff --name-only), where a test counts as a regression only if it passed with those modules at their base versions',
-  'visible-f2p': 'visible-f2p: the instance\'s FAIL_TO_PASS tests are applied to the repository at setup and named in the task; the check re-applies the test patch and passes when every FAIL_TO_PASS test passes (PASS_TO_PASS is not judged)',
+  'visible-f2p': 'visible-f2p: the instance\'s FAIL_TO_PASS tests are applied to the repository at setup and named in the task; the check re-applies the test patch and passes when every FAIL_TO_PASS test passes (PASS_TO_PASS is not judged). Test-given setting: these are the upstream fix\'s own tests; the same FAIL_TO_PASS set is the hidden FAIL_TO_PASS set, so, apart from flaky tests or timeouts, check/hidden disagreement can only come from PASS_TO_PASS.',
 };
 
 export const patchedFiles = (patch: string): string[] =>
@@ -149,6 +153,51 @@ const PY_PRUNE = [
   '    while d.startswith("/testbed/") and os.path.isdir(d) and not os.listdir(d):',
   '        os.rmdir(d)',
   '        d = os.path.dirname(d)',
+  '',
+];
+
+/**
+ * Run test targets (pytest paths or Django labels) without writing bytecode;
+ * needs KIND, ACTIVATE, sh, q and parse.
+ */
+const PY_RUN_TESTS = [
+  'def run_tests(targets):',
+  '    if KIND == "django":',
+  `        cmd = "${DJANGO_ENV} PYTHONDONTWRITEBYTECODE=1 ./tests/runtests.py --verbosity 2 --settings=test_sqlite --parallel 1 "`,
+  '    else:',
+  '        cmd = "PYTHONDONTWRITEBYTECODE=1 python -m pytest -rA --tb=short -p no:cacheprovider "',
+  '    try:',
+  '        r = sh(ACTIVATE + cmd + " ".join(q(t) for t in targets) + " 2>&1", timeout=600)',
+  '        log, rc = r.stdout + r.stderr, r.returncode',
+  '    except subprocess.TimeoutExpired:',
+  '        log, rc = "the tests timed out", 124',
+  '    return parse(log), log, rc',
+  '',
+];
+
+/**
+ * Run `targets` with the given modules at their base-commit versions, putting
+ * the current versions back in a finally: whatever happens, the modules end as
+ * they were. Needs BASE and run_tests.
+ */
+const PY_AT_BASE = [
+  'def at_base(modules, targets):',
+  '    saved = {}',
+  '    try:',
+  '        for m in modules:',
+  '            base = subprocess.run(["git", "show", "%s:%s" % (BASE, m)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd="/testbed")',
+  '            if base.returncode != 0:',
+  '                continue',
+  '            p = os.path.join("/testbed", m)',
+  '            with open(p, "rb") as fh:',
+  '                saved[p] = fh.read()',
+  '            with open(p, "wb") as fh:',
+  '                fh.write(base.stdout)',
+  '        return run_tests(targets)',
+  '    finally:',
+  '        for p, data in saved.items():',
+  '            with open(p, "wb") as fh:',
+  '                fh.write(data)',
   '',
 ];
 
@@ -327,18 +376,7 @@ export function reproCheckSource(item: SweItem, source: string, opts: { existing
     ...PY_HELPERS,
     ...PY_PARSERS,
     ...PY_PRUNE,
-    'def run_tests(targets):',
-    '    if KIND == "django":',
-    `        cmd = "${DJANGO_ENV} PYTHONDONTWRITEBYTECODE=1 ./tests/runtests.py --verbosity 2 --settings=test_sqlite --parallel 1 "`,
-    '    else:',
-    '        cmd = "PYTHONDONTWRITEBYTECODE=1 python -m pytest -rA --tb=short -p no:cacheprovider "',
-    '    try:',
-    '        r = sh(ACTIVATE + cmd + " ".join(q(t) for t in targets) + " 2>&1", timeout=600)',
-    '        log, rc = r.stdout + r.stderr, r.returncode',
-    '    except subprocess.TimeoutExpired:',
-    '        log, rc = "the tests timed out", 124',
-    '    return parse(log), log, rc',
-    '',
+    ...PY_RUN_TESTS,
     'created, kept = [], {}',
     '',
     'def place():',
@@ -405,24 +443,7 @@ export function reproCheckSource(item: SweItem, source: string, opts: { existing
     '        return [t[len("tests/"):-3].replace("/", ".") for t in picked if t.startswith("tests/")]',
     '    return picked',
     '',
-    'def at_base(modules, targets):',
-    '    saved = {}',
-    '    try:',
-    '        for m in modules:',
-    '            base = subprocess.run(["git", "show", "%s:%s" % (BASE, m)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd="/testbed")',
-    '            if base.returncode != 0:',
-    '                continue',
-    '            p = os.path.join("/testbed", m)',
-    '            with open(p, "rb") as fh:',
-    '                saved[p] = fh.read()',
-    '            with open(p, "wb") as fh:',
-    '                fh.write(base.stdout)',
-    '        return run_tests(targets)',
-    '    finally:',
-    '        for p, data in saved.items():',
-    '            with open(p, "wb") as fh:',
-    '                fh.write(data)',
-    '',
+    ...PY_AT_BASE,
     'place()',
     'try:',
     '    r_status, r_log, r_rc = run_tests([REPRO_TARGET])',
@@ -459,7 +480,295 @@ export function reproCheckSource(item: SweItem, source: string, opts: { existing
   ].join('\n');
 }
 
+// ── secondary regression score (reporting only) ────────────────────
+
+/** Most existing test files the secondary regression score runs. */
+export const MAX_SECONDARY_TEST_FILES = 5;
+/** In-container hard bound on one secondary test run: `timeout -s KILL`. */
+export const SECONDARY_RUN_TIMEOUT_S = 420;
+/**
+ * The program's own bound past that: it then kills every process in the
+ * run's session, and waits at most 10 s more for the pipe to close.
+ */
+export const SECONDARY_KILL_GRACE_S = 30;
+/** Worst case of one bounded run inside the program. */
+const secondaryRunBoundS = (runTimeoutS: number, killGraceS: number): number => runTimeoutS + killGraceS + 10;
+/**
+ * The host's timeout on the whole program: strictly longer than its two
+ * bounded runs (now, and at base) plus a margin for the git reads, so the
+ * program always ends on its own, with its modules put back, before the host
+ * gives up on it. A host timeout only kills `docker exec`, not the program.
+ */
+export const SECONDARY_HOST_TIMEOUT_MS = (2 * secondaryRunBoundS(SECONDARY_RUN_TIMEOUT_S, SECONDARY_KILL_GRACE_S) + 120) * 1000;
+
+/**
+ * One test run of the secondary score, bounded so that it really stops:
+ * `timeout -s KILL` ends the runner and its process group inside the
+ * container, and past RUN_TIMEOUT + KILL_GRACE the program kills every process
+ * in the run's session (a test that started its own process group included).
+ * `subprocess.run(..., timeout=)` is not enough on the Python 3.6 images: it
+ * waits for every grandchild holding the pipe.
+ */
+const PY_SECONDARY_RUN = [
+  'def kill_session(sid):',
+  '    for name in os.listdir("/proc"):',
+  '        if name.isdigit():',
+  '            try:',
+  '                if os.getsid(int(name)) == sid:',
+  '                    os.kill(int(name), signal.SIGKILL)',
+  '            except OSError:',
+  '                pass',
+  '',
+  'def run_bounded(c):',
+  '    p = subprocess.Popen(["bash", "-lc", c], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, cwd="/testbed", start_new_session=True)',
+  '    timed_out = False',
+  '    try:',
+  '        out, _ = p.communicate(timeout=RUN_TIMEOUT + KILL_GRACE)',
+  '    except subprocess.TimeoutExpired:',
+  '        timed_out = True',
+  '        kill_session(p.pid)',
+  '        try:',
+  '            out, _ = p.communicate(timeout=10)',
+  '        except subprocess.TimeoutExpired:',
+  '            out = b""',
+  '    kill_session(p.pid)',
+  '    rc = p.returncode if p.returncode is not None else 137',
+  '    if rc in (124, 137) or timed_out:',
+  '        timed_out = True',
+  '    return (out or b"").decode("utf-8", "replace"), rc, timed_out',
+  '',
+  'TIMED_OUT = []',
+  '',
+  'def run_tests(targets, when):',
+  '    if KIND == "django":',
+  `        env, cmd = "${DJANGO_ENV} PYTHONDONTWRITEBYTECODE=1", "./tests/runtests.py --verbosity 2 --settings=test_sqlite --parallel 1 "`,
+  '    else:',
+  '        env, cmd = "PYTHONDONTWRITEBYTECODE=1", "python -m pytest -rA --tb=short -p no:cacheprovider "',
+  '    c = ACTIVATE + "timeout -s KILL %d env %s %s" % (RUN_TIMEOUT, env, cmd + " ".join(q(t) for t in targets)) + " 2>&1"',
+  '    log, rc, timed_out = run_bounded(c)',
+  '    if timed_out:',
+  '        TIMED_OUT.append(when)',
+  '    return parse(log), log, rc',
+  '',
+];
+
+/**
+ * The changed modules at their base versions for one run. Every module is
+ * read before any is replaced, and every one is written back in the finally,
+ * whatever happened in between (an error, SIGTERM, SIGHUP or SIGINT, which
+ * are turned into an exit that runs the finally). Only SIGKILL can stop the
+ * put-back; the host timeout is set so that it never has to be used.
+ */
+const PY_SECONDARY_AT_BASE = [
+  'def at_base(modules, targets):',
+  '    saved = {}',
+  '    for m in modules:',
+  '        p = os.path.join("/testbed", m)',
+  '        with open(p, "rb") as fh:',
+  '            saved[p] = fh.read()',
+  '    def stop(signum, frame):',
+  '        raise SystemExit(128 + signum)',
+  '    previous = {}',
+  '    for s in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):',
+  '        previous[s] = signal.signal(s, stop)',
+  '    try:',
+  '        for m in modules:',
+  '            base = subprocess.run(["git", "show", "%s:%s" % (BASE, m)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd="/testbed")',
+  '            if base.returncode != 0:',
+  '                continue',
+  '            with open(os.path.join("/testbed", m), "wb") as fh:',
+  '                fh.write(base.stdout)',
+  '        return run_tests(targets, "base")',
+  '    finally:',
+  '        unrestored = []',
+  '        for p, data in saved.items():',
+  '            try:',
+  '                with open(p, "wb") as fh:',
+  '                    fh.write(data)',
+  '            except Exception:',
+  '                unrestored.append(p)',
+  '        for s, handler in previous.items():',
+  '            signal.signal(s, handler)',
+  '        if unrestored:',
+  '            print("SECONDARY: error could not restore " + ", ".join(unrestored))',
+  '',
+];
+
+/**
+ * Which tests regressed: passed at base, fail now. A test file that no longer
+ * collects counts too: pytest then reports the file itself (`ERROR <file>`, a
+ * key without `::`) and Django a `unittest.loader._FailedTest` named after the
+ * module's last part (`test_text (unittest.loader._FailedTest)`, checked in
+ * the Django 3.0 image); either is a regression when tests from that file
+ * passed at base. pytest stops the whole session on a collection error, so
+ * the other files' tests are then not run at all; only the file that broke is
+ * counted.
+ */
+export const PY_SECONDARY_JUDGE = [
+  'def regressions(now, base, now_rc, base_rc):',
+  '    failing = [t for t, ok in now.items() if not ok]',
+  '    out = [t for t in failing if base.get(t) is True]',
+  '    for t in failing:',
+  '        if t in out:',
+  '            continue',
+  '        if KIND == "django":',
+  '            m = re.match(r"^(\\S+) \\(unittest\\.loader\\._FailedTest(\\.\\S+)?\\)$", t)',
+  '            if not m:',
+  '                continue',
+  '            # Django names it after the module\'s last part: "test_text (unittest.loader._FailedTest)".',
+  '            module = re.compile(r"\\((?:[\\w.]*\\.)?" + re.escape(m.group(1).split(".")[-1]) + r"\\.")',
+  '            lost = [b for b, ok in base.items() if ok and "_FailedTest" not in b and module.search(b)]',
+  '        else:',
+  '            if "::" in t:',
+  '                continue',
+  '            lost = [b for b, ok in base.items() if ok and b.startswith(t + "::")]',
+  '        if lost:',
+  '            out.append("%s (no longer runs; %d test(s) from it passed at base)" % (t, len(lost)))',
+  '    if now_rc != 0 and not now and not (base_rc != 0 and not base):',
+  '        out.append("(the tests no longer run)")',
+  '    return out',
+  '',
+];
+
+/**
+ * The secondary regression score: a measurement recorded on every non-oracle
+ * run, never shown to an agent and never part of a decision.
+ *
+ * It finds the non-test modules changed since the base commit (the repro
+ * check's rule, also excluding the test patch's files), the repository's
+ * tracked test files named after them (`test_<stem>.py`, `<stem>_test.py` or
+ * `unittest_<stem>.py` under the test directory, minus the test patch's files,
+ * at most `maxFiles`), runs them, and when any test fails runs them again with
+ * the changed modules at their base versions. A regression is a test that
+ * passed at base and fails now, or a test file that no longer collects
+ * (`PY_SECONDARY_JUDGE`). Matching is by file name only, so coverage is
+ * partial (Django's tests are mostly `tests.py`); `files 0` means nothing
+ * matched, not that nothing regressed.
+ *
+ * Each test run is hard-bounded inside the container (`PY_SECONDARY_RUN`),
+ * the base swap is always put back (`PY_SECONDARY_AT_BASE`), and the host
+ * waits longer than both runs can take (`SECONDARY_HOST_TIMEOUT_MS`). It
+ * writes no bytecode and leaves the repository byte-identical. Prints
+ * `SECONDARY: files <n>, regressed <m>`, one `regressed: <test>` line per
+ * regression, and `timed out: <now|base>` per run that hit its bound; always
+ * exits 0.
+ */
+export function regressionScoreSource(item: SweItem, opts: { maxFiles?: number; runTimeoutS?: number; killGraceS?: number } = {}): string {
+  const skip = [...new Set([...patchedFiles(item.test_patch), ...Object.keys(reproFiles(item, ''))])];
+  return [
+    'import os, re, signal, subprocess, sys',
+    `BASE = ${JSON.stringify(item.base_commit)}`,
+    `KIND = ${JSON.stringify(isDjango(item) ? 'django' : 'pytest')}`,
+    `TEST_DIR = ${JSON.stringify(testDirOf(item))}`,
+    `SKIP = ${JSON.stringify(skip)}`,
+    `MAX_FILES = ${opts.maxFiles ?? MAX_SECONDARY_TEST_FILES}`,
+    `RUN_TIMEOUT = ${opts.runTimeoutS ?? SECONDARY_RUN_TIMEOUT_S}`,
+    `KILL_GRACE = ${opts.killGraceS ?? SECONDARY_KILL_GRACE_S}`,
+    `ACTIVATE = ${JSON.stringify(ACTIVATE)}`,
+    '',
+    ...PY_HELPERS,
+    ...PY_PARSERS,
+    ...PY_SECONDARY_RUN,
+    ...PY_SECONDARY_AT_BASE,
+    ...PY_SECONDARY_JUDGE,
+    'def changed_modules():',
+    '    out = []',
+    '    for f in sh("git diff --name-only %s" % q(BASE)).stdout.splitlines():',
+    '        f = f.strip()',
+    '        parts = f.split("/")',
+    '        if not f.endswith(".py") or f in SKIP:',
+    '            continue',
+    '        if parts[0] == TEST_DIR or "tests" in parts[:-1] or "testing" in parts[:-1]:',
+    '            continue',
+    '        if parts[-1].startswith("test_") or parts[-1] == "conftest.py":',
+    '            continue',
+    '        if os.path.isfile(os.path.join("/testbed", f)):',
+    '            out.append(f)',
+    '    return sorted(out)',
+    '',
+    'def test_files(modules):',
+    '    listed = sorted(sh("git ls-files %s" % q(TEST_DIR)).stdout.split())',
+    '    picked = []',
+    '    for m in modules:',
+    '        stem = os.path.splitext(os.path.basename(m))[0]',
+    '        if stem == "__init__":',
+    '            stem = os.path.basename(os.path.dirname(m))',
+    '        names = ("test_%s.py" % stem, "%s_test.py" % stem, "unittest_%s.py" % stem)',
+    '        for t in listed:',
+    '            if os.path.basename(t) in names and t not in SKIP and t not in picked:',
+    '                picked.append(t)',
+    '    return picked[:MAX_FILES]',
+    '',
+    'def targets_of(files):',
+    '    if KIND == "django":',
+    '        return [t[len("tests/"):-3].replace("/", ".") for t in files if t.startswith("tests/")]',
+    '    return files',
+    '',
+    'def main():',
+    '    modules = changed_modules()',
+    '    files = test_files(modules)',
+    '    targets = targets_of(files)',
+    '    regressed = []',
+    '    if targets:',
+    '        now, now_log, now_rc = run_tests(targets, "now")',
+    '        failing = [t for t, ok in now.items() if not ok]',
+    '        if failing or (now_rc != 0 and not now):',
+    '            base, base_log, base_rc = at_base(modules, targets)',
+    '            regressed = regressions(now, base, now_rc, base_rc)',
+    '    print("SECONDARY: files %d, regressed %d" % (len(files), len(regressed)))',
+    '    for t in regressed:',
+    '        print("regressed: " + t)',
+    '    for when in TIMED_OUT:',
+    '        print("timed out: " + when)',
+    '',
+    'try:',
+    '    main()',
+    'except Exception as err:',
+    '    print("SECONDARY: error " + (str(err).splitlines() or [type(err).__name__])[0][:200])',
+    'sys.exit(0)',
+    '',
+  ].join('\n');
+}
+
 // ── reading results ─────────────────────────────────────────────────
+
+/** The secondary regression score (reporting only; never shown to an agent). */
+export interface SecondaryScore {
+  /** Existing test files run; 0 means none matched by name, not "clean" */
+  files: number;
+  /** Tests that passed with the changed modules at base and fail now */
+  regressed: number;
+  regressedTests?: string[];
+  /** Runs that hit their in-container bound (`now`, `base`); their results are partial */
+  timedOut?: string[];
+  /** Set when the score could not be read */
+  error?: string;
+}
+
+/** The first line of an error, capped: how a failed reporting measurement records why. */
+export const errorLine = (err: unknown): string => (err instanceof Error ? err.message : String(err)).split('\n')[0].slice(0, 200);
+
+/** A secondary score that could not be taken. */
+export const failedSecondary = (err: unknown): SecondaryScore => ({ files: 0, regressed: 0, error: errorLine(err) });
+
+/** Read the secondary regression score from its program's output. */
+export function parseSecondary(output: string): SecondaryScore {
+  const failed = output.match(/^SECONDARY: error (.*)$/m);
+  if (failed) return { files: 0, regressed: 0, error: failed[1].trim().slice(0, 200) || 'error' };
+  const m = output.match(/^SECONDARY: files (\d+), regressed (\d+)\s*$/m);
+  if (!m) {
+    const last = output.trim().split('\n').slice(-1)[0] ?? '';
+    return { files: 0, regressed: 0, error: last.slice(0, 200) || 'no SECONDARY line' };
+  }
+  const names = [...output.matchAll(/^regressed: (.+)$/gm)].map(r => r[1].trim());
+  const timedOut = [...output.matchAll(/^timed out: (\w+)/gm)].map(r => r[1]);
+  return {
+    files: Number(m[1]),
+    regressed: Number(m[2]),
+    ...(names.length > 0 ? { regressedTests: names.slice(0, 50) } : {}),
+    ...(timedOut.length > 0 ? { timedOut } : {}),
+  };
+}
 
 /** A hidden-test score: the SWE-bench criterion on the repository's state. */
 export interface HiddenScore {

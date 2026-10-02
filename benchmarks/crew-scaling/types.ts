@@ -39,6 +39,15 @@ export interface AgentContribution {
   /** Model calls per upstream host that served them, when the provider named one */
   modelHosts?: Record<string, number>;
   tokens?: number;
+  /**
+   * Prompt / completion split of the agent's tokens, summed over its model
+   * calls (direct execution path). `cachedPromptTokens` is the part of the
+   * prompt the provider served from its cache; 0 or absent means none was
+   * reported (the OpenAI-compatible provider omits it when it is 0).
+   */
+  promptTokens?: number;
+  completionTokens?: number;
+  cachedPromptTokens?: number;
   modelCalls: number;
   toolCalls: number;
   /** Every tool call in order, with its outcome */
@@ -125,11 +134,14 @@ export interface CrewScalingRecord {
   modelHosts?: Record<string, number>;
   totalTokens?: number;
   /**
-   * Prompt/completion split is not tracked per agent on the direct execution
-   * path, so these stay undefined rather than being guessed at.
+   * Prompt/completion split, summed over the agents that reported it (direct
+   * execution path records it since 2026-10-02; earlier records leave these
+   * undefined rather than guessing). `cachedInputTokens` is the part of the
+   * input served from the provider's prompt cache; 0 means none was reported.
    */
   inputTokens?: number;
   outputTokens?: number;
+  cachedInputTokens?: number;
 
   modelCalls?: number;
   toolCalls?: number;
@@ -159,6 +171,21 @@ export interface CrewScalingRecord {
   hidden?: { resolved: boolean; f2pPassed: number; f2pTotal: number; p2pFailed: number; p2pTotal: number; error?: string };
   checkFinalPassed?: boolean;
   stage1Hidden?: { resolved: boolean; f2pPassed: number; f2pTotal: number; p2pFailed: number; p2pTotal: number; error?: string };
+  /**
+   * Real-repository runs outside oracle mode, reporting only (never shown to
+   * an agent, read by no decision rule): the secondary regression score and
+   * the diff audit of the final state (checks.ts `regressionScoreSource`,
+   * audit.ts). `secondary.files` 0 means no test file matched, not "clean".
+   */
+  secondary?: { files: number; regressed: number; regressedTests?: string[]; timedOut?: string[]; error?: string };
+  audit?: {
+    changedFiles: string[];
+    testInfraChanged: string[];
+    testFilesRemoved?: string[];
+    testFilesAdded: string[];
+    suspicious: Array<{ file: string; reason: string; line: string }>;
+    error?: string;
+  };
   agentResults: AgentContribution[];
 }
 
