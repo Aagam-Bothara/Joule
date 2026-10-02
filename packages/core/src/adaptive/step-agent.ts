@@ -328,17 +328,27 @@ function balancedJsonPrefix(text: string): string | undefined {
 
 /**
  * Small models often put raw newlines and tabs inside JSON string values
- * (typically file contents). Escape them so the object parses; everything
- * outside string literals is left untouched.
+ * (typically file contents), and shell commands carry backslashes JSON does not
+ * allow (`grep "a\|b"`, `foo\.bar`). Escape both so the object parses and the
+ * string reads back exactly as the model wrote it; everything outside string
+ * literals is left untouched.
  */
 function repairJsonStrings(text: string): string {
   let out = '';
   let inString = false;
   let escaped = false;
-  for (const ch of text) {
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
     if (inString) {
       if (escaped) { out += ch; escaped = false; continue; }
-      if (ch === '\\') { out += ch; escaped = true; continue; }
+      if (ch === '\\') {
+        const next = text[i + 1] ?? '';
+        const valid = '"\\/bfnrt'.includes(next) && next !== ''
+          || (next === 'u' && /^[0-9a-fA-F]{4}$/.test(text.slice(i + 2, i + 6)));
+        out += valid ? ch : '\\\\';
+        escaped = valid;
+        continue;
+      }
       if (ch === '"') { inString = false; out += ch; continue; }
       if (ch === '\n') { out += '\\n'; continue; }
       if (ch === '\r') { continue; }

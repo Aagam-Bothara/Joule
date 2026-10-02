@@ -401,6 +401,59 @@ describe('DirectExecutor', () => {
       expect(shell.mock.calls[0][0].command).toContain('git status --short | head -50');
     });
 
+    it('runs DeepSeek native-markup calls once their DSML tag prefix is removed', async () => {
+      const { executor, envelope, tools } = buildExecutor([unreadable.dsmlNativeTags, '{"answer":"done"}']);
+      const shell = registerRepoTool(tools, 'repo_shell');
+
+      const result = await executor.execute(makeTask(), envelope, makeAgent());
+
+      expect(result.result).toBe('done');
+      expect(shell).toHaveBeenCalledWith({ command: 'cd /testbed && ls -la' });
+    });
+
+    it('runs DeepSeek invoke/parameter calls', async () => {
+      const { executor, envelope, tools } = buildExecutor([unreadable.dsmlInvokePrefix, '{"answer":"done"}']);
+      const shell = registerRepoTool(tools, 'repo_shell');
+
+      await executor.execute(makeTask(), envelope, makeAgent());
+
+      expect(shell).toHaveBeenCalledWith({ command: 'cd /testbed && git remote -v && git branch --show-current && git log --oneline -8' });
+    });
+
+    it('reads a non-string invoke parameter as JSON', async () => {
+      const { executor, envelope, tools } = buildExecutor([
+        '<invoke name="repo_read"><parameter name="path" string="true">src/a.py</parameter><parameter name="start" string="false">40</parameter></invoke>',
+        '{"answer":"done"}',
+      ]);
+      const read = registerRecordingTool(tools, 'repo_read', 'path', 'start');
+
+      await executor.execute(makeTask(), envelope, makeAgent());
+
+      expect(read).toHaveBeenCalledWith({ path: 'src/a.py', start: 40 });
+    });
+
+    it('runs a native function-tag call whose arguments are child tags', async () => {
+      // The shape a staged tester produced (see staged-recovery test 8c).
+      const { executor, envelope, tools } = buildExecutor([
+        'Prose first.\n<｜DSML｜ll_func:shell_exec>\n  <command>cat pkg/report.py</command>',
+        '{"answer":"done"}',
+      ]);
+      const shell = registerRecordingTool(tools, 'shell_exec', 'command', 'cwd');
+
+      await executor.execute(makeTask(), envelope, makeAgent());
+
+      expect(shell).toHaveBeenCalledWith({ command: 'cat pkg/report.py' });
+    });
+
+    it('ignores function tags that name no registered tool', async () => {
+      const { executor, envelope } = buildExecutor(['See <function=summarise> in the docs.']);
+
+      const result = await executor.execute(makeTask(), envelope, makeAgent());
+
+      expect(result.status).toBe('completed');
+      expect(result.result).toBe('See <function=summarise> in the docs.');
+    });
+
     it('pairs parallel lists of tool names and arguments', async () => {
       const { executor, envelope, tools } = buildExecutor([unreadable.parallelArrays, '{"answer":"done"}']);
       const shell = registerRepoTool(tools, 'repo_shell');
@@ -429,6 +482,65 @@ describe('DirectExecutor', () => {
       expect(shell).toHaveBeenCalledWith({ command: 'ls' });
       const seen = provider.chat.mock.calls[1][0].messages as Array<{ role: string; content: string }>;
       expect(seen.some(m => m.role === 'user' && m.content.includes('could not be read as a tool call'))).toBe(true);
+    });
+
+    it('asks for 4096 output tokens per reply unless the agent sets its own cap', async () => {
+      const defaults = buildExecutor(['{"answer":"done"}']);
+      await defaults.executor.execute(makeTask(), defaults.envelope, makeAgent());
+      expect(defaults.provider.chat.mock.calls[0][0].maxTokens).toBe(4096);
+
+      const raised = buildExecutor(['{"answer":"done"}']);
+      await raised.executor.execute(makeTask(), raised.envelope, makeAgent({ maxOutputTokens: 12_000 }));
+      expect(raised.provider.chat.mock.calls[0][0].maxTokens).toBe(12_000);
+    });
+
+    it('tells the model when its call was cut off at the output limit', async () => {
+      const { executor, envelope, provider } = buildExecutor([unreadable.truncatedJson, '{"answer":"done"}']);
+      const reply = provider.chat.getMockImplementation()!;
+      provider.chat.mockImplementationOnce(async (...args: unknown[]) => ({ ...(await reply(...args)), finishReason: 'length' }));
+
+      const result = await executor.execute(makeTask(), envelope, makeAgent());
+
+      expect(result.result).toBe('done');
+      const seen = provider.chat.mock.calls[1][0].messages as Array<{ role: string; content: string }>;
+      expect(seen.some(m => m.role === 'user' && m.content.includes('cut off at the output limit'))).toBe(true);
+    });
+
+    it('passes shell backslashes that JSON does not allow through to the command unchanged', async () => {
+      // `\|` and `\.` are invalid JSON escapes; a strict parse made the whole call
+      // unreadable, and three in a row ended two ladder-limit real-repo runs.
+      const { executor, envelope, tools } = buildExecutor([
+        String.raw`{"tool_calls":[{"toolName":"repo_shell","toolArgs":{"command":"grep -rn \"def routes\|routes_command\" src/flask/cli.py && grep -n 'app\.cli' src"}}]}`,
+        '{"answer":"done"}',
+      ]);
+      const shell = registerRepoTool(tools, 'repo_shell');
+
+      await executor.execute(makeTask(), envelope, makeAgent());
+
+      expect(shell).toHaveBeenCalledWith({ command: String.raw`grep -rn "def routes\|routes_command" src/flask/cli.py && grep -n 'app\.cli' src` });
+    });
+
+    it('asks again, without running it, when the reply is only a shell block', async () => {
+      const { executor, envelope, tools, provider } = buildExecutor([unreadable.shellBlockOnly, '{"answer":"done"}']);
+      const shell = registerRepoTool(tools, 'repo_shell');
+
+      const result = await executor.execute(makeTask(), envelope, makeAgent());
+
+      expect(result.result).toBe('done');
+      expect(shell).not.toHaveBeenCalled();
+      expect(provider.chat).toHaveBeenCalledTimes(2);
+    });
+
+    it.each([
+      ['a python code block', '```python\ndef chunk(xs, n):\n    return [xs[i:i + n] for i in range(0, len(xs), n)]\n```'],
+      ['prose with a shell example', 'Run the suite with:\n```bash\npytest -q\n```\nAll 12 tests pass.'],
+    ])('still accepts %s as the answer', async (_label, reply) => {
+      const { executor, envelope } = buildExecutor([reply]);
+
+      const result = await executor.execute(makeTask(), envelope, makeAgent());
+
+      expect(result.status).toBe('completed');
+      expect(result.result).toBe(reply);
     });
 
     it('does not accept a bare tool_calls tag as the answer', async () => {
@@ -780,6 +892,19 @@ describe('DirectExecutor', () => {
       const result = await executor.execute(makeTask(), envelope, makeAgent({ maxIterations: 3 }));
 
       expect(result.error).toContain('max iterations');
+    });
+
+    it('reports a run that ran out of turns as failed, keeping where it got to', async () => {
+      const { executor, envelope } = buildExecutor([
+        '{"tool_calls": [{"toolName": "test_tool", "toolArgs": {"query": "a"}}]}',
+        '{"tool_calls": [{"toolName": "test_tool", "toolArgs": {"query": "b"}}]}',
+      ]);
+
+      const result = await executor.execute(makeTask(), envelope, makeAgent({ maxIterations: 2 }));
+
+      expect(result.status).toBe('failed');
+      expect(result.result).toContain('(Partial - max iterations reached)');
+      expect(result.lifecycle?.at(-1)?.to).toBe('failed');
     });
   });
 

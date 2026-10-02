@@ -71,6 +71,15 @@ export interface AgentDefinition {
    * than have runs end for a reason unrelated to what it is measuring.
    */
   wallTimeoutMs?: number;
+
+  /**
+   * Output token cap per model reply in direct mode (default: 4096).
+   *
+   * A reply that writes a file carries the whole edit, and reasoning models
+   * spend part of the cap before writing anything. Provider defaults (often
+   * 1024) cut such replies off mid-call.
+   */
+  maxOutputTokens?: number;
 }
 
 // ============================================================================

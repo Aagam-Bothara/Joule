@@ -897,8 +897,10 @@ export class CrewOrchestrator {
 
       lastResult = result;
 
-      // Don't retry on budget exhaustion — it won't help
-      if (result.taskResult.error?.includes('budget') || result.taskResult.error?.includes('Budget')) {
+      // Don't retry on budget exhaustion or the iteration cap — a fresh attempt
+      // with the same allowance ends the same way, at the same cost again.
+      const error = result.taskResult.error ?? '';
+      if (error.includes('budget') || error.includes('Budget') || error.includes('max iterations')) {
         break;
       }
 

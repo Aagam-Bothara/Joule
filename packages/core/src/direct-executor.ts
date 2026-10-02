@@ -106,6 +106,9 @@ function toolCallsFrom(value: unknown, catalog: ToolCatalog = new Map()): Parsed
  */
 const CALL_MARKERS = /"tool_?calls"|"tool_?name"|<tool_?calls?>|<tool_?name>|｜DSML｜/i;
 
+/** A reply consisting only of one fenced shell block, e.g. "```bash\nls\n```". */
+const SHELL_BLOCK_ONLY = /^\s*```(?:bash|sh|shell|console|zsh)\s*\n[\s\S]*?\n```\s*$/i;
+
 /** A recorded trace span for tool execution or LLM call. */
 interface TraceSpan {
   name: string;
@@ -153,6 +156,13 @@ const MAX_IDENTICAL_TOOL_CALLS = 3;
  * itself; the eleventh ended on an empty reply.
  */
 const MAX_FORMAT_RETRIES = 2;
+
+/**
+ * Output token cap per reply when the agent sets none — the step agent's
+ * default. Without it the provider's own default applies (1024 for the
+ * OpenAI-compatible adapter), which cuts off any reply that writes a real file.
+ */
+const DEFAULT_OUTPUT_TOKENS = 4_096;
 
 /** How much of an unreadable reply to show back to the model with the correction. */
 const MAX_RETRY_ECHO_CHARS = 2_000;
@@ -306,6 +316,7 @@ export class DirectExecutor {
         messages: windowedMessages,
         temperature: 0.3,
         responseFormat: 'json',
+        maxTokens: agent.maxOutputTokens ?? DEFAULT_OUTPUT_TOKENS,
       };
 
       let response;
@@ -370,9 +381,14 @@ export class DirectExecutor {
           break;
         }
         if (!empty) messages.push({ role: 'assistant', content: this.truncate(response.content, MAX_RETRY_ECHO_CHARS) });
+        const cutOff = response.finishReason === 'length';
+        const what = empty ? 'Your last reply was empty'
+          : cutOff ? 'Your last reply was cut off at the output limit before the call was complete'
+            : 'Your last reply could not be read as a tool call';
         messages.push({
           role: 'user',
-          content: `${empty ? 'Your last reply was empty' : 'Your last reply could not be read as a tool call'}, so nothing was executed. `
+          content: `${what}, so nothing was executed. `
+            + (cutOff ? 'Make a smaller change per call — replace one exact block rather than rewriting a whole file. ' : '')
             + 'Reply with ONLY one raw JSON object: {"tool_calls": [{"toolName": "<tool_name>", "toolArgs": {<arguments>}}]} '
             + 'to use tools, or {"answer": "<your final answer>"} when you are done.',
         });
@@ -500,9 +516,13 @@ export class DirectExecutor {
       }
     }
 
+    // Running out of turns is not finishing. The last assistant message is kept
+    // as the result so a recovery stage can see where the agent got to, but the
+    // run is reported as failed: it never gave an answer.
+    let hitIterationCap = false;
     if (!finalAnswer && !lastError) {
+      hitIterationCap = true;
       lastError = `Reached max iterations (${maxIterations}) without completing`;
-      // Provide the last assistant message as partial context
       const lastAssistant = [...messages].reverse().find(m => m.role === 'assistant');
       finalAnswer = lastAssistant
         ? `(Partial - max iterations reached) ${this.truncate(lastAssistant.content, 500)}`
@@ -510,7 +530,7 @@ export class DirectExecutor {
     }
 
     // Close the lifecycle on whatever ended the loop, matching `status` below.
-    const status: TaskStatus = finalAnswer ? 'completed' : 'failed';
+    const status: TaskStatus = finalAnswer && !hitIterationCap ? 'completed' : 'failed';
     if (!lifecycle.isTerminal()) {
       if (status === 'completed') lifecycle.complete({ iterations: iteration });
       else lifecycle.fail(lastError, { iterations: iteration });
@@ -662,7 +682,33 @@ Respond with:
    * Parse LLM response into either tool calls or final answer.
    * Handles various response formats gracefully.
    */
-  private parseResponse(content: string, catalog: ToolCatalog = this.toolCatalog()): ParsedResponse {
+  private parseResponse(raw: string, catalog: ToolCatalog = this.toolCatalog()): ParsedResponse {
+    // DeepSeek models sometimes emit their native tool-call markup, which is
+    // the tag forms below with a `｜DSML｜` prefix on every tag.
+    const content = raw.replace(/<(\/?)\s*｜DSML｜\s*/g, '<$1');
+
+    // `<ll_func:shell_exec><command>ls</command></ll_func>`: the call named in
+    // the tag, one child tag per argument.
+    const invoked = [...content.matchAll(/<(?:ll_)?func(?:tion)?[:=]\s*([\w.-]+)\s*>([\s\S]*?)(?=<\/?(?:ll_)?func(?:tion)?\b|$)/gi)]
+      .filter(match => catalog.has(match[1]))
+      .map(match => ({
+        toolName: match[1],
+        toolArgs: Object.fromEntries([...match[2].matchAll(/<([A-Za-z_][\w-]*)>([\s\S]*?)<\/\1>/g)].map(arg => [arg[1], arg[2].trim()])),
+      }));
+    if (invoked.length > 0) return { type: 'tool_calls', toolCalls: invoked };
+
+    // DeepSeek's function-call template: `<invoke name="repo_shell">` holding
+    // `<parameter name="command">...</parameter>`; `string="false"` marks a
+    // JSON value. A block cut off before `</invoke>` keeps its complete parameters.
+    const invokes = [...content.matchAll(/<invoke\s+name\s*=\s*"([^"]+)"\s*>([\s\S]*?)(?=<\/invoke>|<invoke\b|$)/gi)]
+      .filter(match => catalog.has(match[1]))
+      .map(match => ({
+        toolName: match[1],
+        toolArgs: Object.fromEntries([...match[2].matchAll(/<parameter\s+name\s*=\s*"([^"]+)"([^>]*)>([\s\S]*?)<\/parameter>/gi)]
+          .map(([, key, attrs, value]) => [key, /string\s*=\s*"false"/i.test(attrs) ? (extractJson(value) ?? value) : value])),
+      }));
+    if (invokes.length > 0) return { type: 'tool_calls', toolCalls: invokes };
+
     // Some model replies use XML tags for the call name and JSON arguments
     // (`<tool_name>` or `<toolName>`, possibly as list items). Parse the paired
     // tags, including replies whose outer closing tag is bad.
@@ -701,10 +747,15 @@ Respond with:
 
     // A reply that is trying to call a tool is not the agent's answer, however
     // it is broken: accepting it ends the run on an edit that never happened.
-    if (CALL_MARKERS.test(content)) return { type: 'malformed' };
+    if (CALL_MARKERS.test(raw)) return { type: 'malformed' };
+
+    // A reply that is nothing but a shell block is a command the model meant to
+    // run, not an answer. It is not run — only an explicit call is — but the
+    // agent is asked to make the call instead of being ended on it.
+    if (SHELL_BLOCK_ONLY.test(raw)) return { type: 'malformed' };
 
     // No recognizable call or answer: preserve the reply as the answer.
-    return { type: 'final_answer', answer: content };
+    return { type: 'final_answer', answer: raw };
   }
 
   /** Registered tool names, each with the schema key a bare value fills. */

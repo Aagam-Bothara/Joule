@@ -1210,6 +1210,34 @@ describe('CrewOrchestrator', () => {
 
       // Should have reached max iterations
       expect(result.agentResults[0].taskResult.error).toContain('max iterations');
+      expect(result.agentResults[0].taskResult.status).toBe('failed');
+    });
+
+    it('does not retry an agent that ran out of turns', async () => {
+      // Sequential crews retry failed agents twice by default; a retry with
+      // the same turn allowance would end the same way at three times the cost.
+      const mockProvider = createMockProvider(Array(15).fill(
+        directToolCallResponse([{ toolName: 'test_tool', toolArgs: { input: 'loop' } }]),
+      ));
+      providers.register(mockProvider as any);
+      const router = new ModelRouter(providers, budget, defaultRouting);
+      const planner = new Planner(router, tools, providers, budget, tracer);
+      const orchestrator = new CrewOrchestrator(planner, budget, router, tracer, tools, providers, undefined, undefined, defaultRouting);
+
+      const crew: CrewDefinition = {
+        name: 'iteration-limit-no-retry',
+        strategy: 'sequential',
+        agents: [makeAgent('looper', 'Looper', { budgetShare: 1.0, executionMode: 'direct', maxIterations: 3, retryDelayMs: 0 })],
+      };
+      const task = makeTask('Loop until limit');
+      const envelope = budget.createEnvelope('high');
+      const traceId = generateId('trace');
+      tracer.createTrace(traceId, task.id, envelope.envelope);
+
+      const result = await orchestrator.executeCrew(crew, task, envelope, traceId);
+
+      expect(result.agentResults[0].taskResult.status).toBe('failed');
+      expect(mockProvider.chat).toHaveBeenCalledTimes(3);
     });
 
     it('should handle multiple tool calls in a single response', async () => {
